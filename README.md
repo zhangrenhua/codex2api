@@ -87,6 +87,18 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 git pull && docker compose pull && docker compose up -d && docker compose logs -f codex2api
 ```
 
+> **⚠️ 重要：升级前请先备份数据库！**
+>
+> ```bash
+> docker exec codex2api-postgres pg_dump -U codex2api codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
+> ```
+>
+> 如果升级后数据异常，可通过以下命令恢复：
+>
+> ```bash
+> docker exec -i codex2api-postgres psql -U codex2api codex2api < backup_xxx.sql
+> ```
+
 如非必要，不建议在升级时执行 `docker compose down`；标准升级直接 `pull + up -d` 即可复用现有容器和命名卷。
 
 ### 本地开发模式
