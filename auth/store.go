@@ -691,6 +691,8 @@ type Store struct {
 	// Fast scheduler POC（默认关闭，通过环境变量启用）
 	fastScheduler        atomic.Pointer[FastScheduler]
 	fastSchedulerEnabled atomic.Bool
+
+	allowRemoteMigration atomic.Bool // 是否允许远程迁移拉取账号
 }
 
 func fastSchedulerEnabledFromEnv() bool {
@@ -739,6 +741,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		retries = 2 // 默认重试 2 次
 	}
 	atomic.StoreInt64(&s.maxRetries, retries)
+	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -1244,6 +1247,16 @@ func (s *Store) SetMaxRetries(n int) {
 // GetMaxRetries 获取当前最大重试次数
 func (s *Store) GetMaxRetries() int {
 	return int(atomic.LoadInt64(&s.maxRetries))
+}
+
+// GetAllowRemoteMigration 获取是否允许远程迁移
+func (s *Store) GetAllowRemoteMigration() bool {
+	return s.allowRemoteMigration.Load()
+}
+
+// SetAllowRemoteMigration 设置是否允许远程迁移
+func (s *Store) SetAllowRemoteMigration(enabled bool) {
+	s.allowRemoteMigration.Store(enabled)
 }
 
 // SetTestModel 动态更新测试连接模型

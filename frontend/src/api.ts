@@ -13,6 +13,7 @@ import type {
   OAuthURLResponse,
   OpsOverviewResponse,
   StatsResponse,
+  CPAExportEntry,
   SystemSettings,
   UsageLogsResponse,
   UsageLogsPagedResponse,
@@ -153,6 +154,14 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/clean-banned', { method: 'POST' }),
   cleanRateLimited: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-rate-limited', { method: 'POST' }),
+  exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[] }) => {
+    const sp = new URLSearchParams({ filter: params.filter })
+    if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))
+    return request<CPAExportEntry[]>(`/accounts/export?${sp.toString()}`)
+  },
+  migrateAccounts: (data: { url: string; admin_key: string }) =>
+    request<{ message: string; total: number; imported: number; duplicate: number; failed: number }>(
+      '/accounts/migrate', { method: 'POST', body: JSON.stringify(data) }),
   // Proxies
   listProxies: () =>
     request<{ proxies: ProxyRow[] }>('/proxies'),

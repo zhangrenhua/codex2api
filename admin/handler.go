@@ -88,6 +88,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/clean-banned", h.CleanBanned)
 	api.POST("/accounts/clean-rate-limited", h.CleanRateLimited)
+	api.GET("/accounts/export", h.ExportAccounts)
+	api.POST("/accounts/migrate", h.MigrateAccounts)
 	api.GET("/usage/stats", h.GetUsageStats)
 	api.GET("/usage/logs", h.GetUsageLogs)
 	api.GET("/usage/chart-data", h.GetChartData)
@@ -984,6 +986,7 @@ type settingsResponse struct {
 	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
 	MaxRetries            int    `json:"max_retries"`
+	AllowRemoteMigration  bool   `json:"allow_remote_migration"`
 	DatabaseDriver        string `json:"database_driver"`
 	DatabaseLabel         string `json:"database_label"`
 	CacheDriver           string `json:"cache_driver"`
@@ -1005,6 +1008,7 @@ type updateSettingsReq struct {
 	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
 	MaxRetries            *int    `json:"max_retries"`
+	AllowRemoteMigration  *bool   `json:"allow_remote_migration"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1033,6 +1037,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AllowRemoteMigration:  h.store.GetAllowRemoteMigration(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,
@@ -1157,6 +1162,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: max_retries = %d", v)
 	}
 
+	if req.AllowRemoteMigration != nil {
+		h.store.SetAllowRemoteMigration(*req.AllowRemoteMigration)
+		log.Printf("设置已更新: allow_remote_migration = %t", *req.AllowRemoteMigration)
+	}
+
 	// 读取当前 admin_secret（如有更新则使用新值）
 	currentAdminSecret := ""
 	if dbSettings, err := h.db.GetSystemSettings(c.Request.Context()); err == nil && dbSettings != nil {
@@ -1187,6 +1197,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AllowRemoteMigration:  h.store.GetAllowRemoteMigration(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -1221,10 +1232,211 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AllowRemoteMigration:  h.store.GetAllowRemoteMigration(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,
 		CacheLabel:            h.cacheLabel,
+	})
+}
+
+// ==================== 导出 & 迁移 ====================
+
+type cpaExportEntry struct {
+	Type         string `json:"type"`
+	Email        string `json:"email"`
+	Expired      string `json:"expired"`
+	IDToken      string `json:"id_token"`
+	AccountID    string `json:"account_id"`
+	AccessToken  string `json:"access_token"`
+	LastRefresh  string `json:"last_refresh"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// ExportAccounts 导出账号（CPA JSON 格式）
+func (h *Handler) ExportAccounts(c *gin.Context) {
+	filter := c.DefaultQuery("filter", "healthy")
+	idsParam := c.Query("ids")
+	remote := c.Query("remote")
+
+	// 远程调用需检查 allow_remote_migration
+	if remote == "true" && !h.store.GetAllowRemoteMigration() {
+		writeError(c, http.StatusForbidden, "远程迁移未启用，请在系统设置中开启")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	rows, err := h.db.ListActive(ctx)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
+		return
+	}
+
+	// 按指定 ID 过滤
+	var idSet map[int64]bool
+	if idsParam != "" {
+		idSet = make(map[int64]bool)
+		for _, s := range strings.Split(idsParam, ",") {
+			if id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+				idSet[id] = true
+			}
+		}
+	}
+
+	// 构建运行时状态映射（用于健康过滤）
+	runtimeMap := make(map[int64]*auth.Account)
+	if filter == "healthy" {
+		for _, acc := range h.store.Accounts() {
+			runtimeMap[acc.DBID] = acc
+		}
+	}
+
+	var entries []cpaExportEntry
+	for _, row := range rows {
+		if idSet != nil && !idSet[row.ID] {
+			continue
+		}
+		if filter == "healthy" {
+			acc, ok := runtimeMap[row.ID]
+			if !ok || acc.RuntimeStatus() != "active" {
+				continue
+			}
+		}
+		rt := row.GetCredential("refresh_token")
+		if rt == "" {
+			continue
+		}
+		entries = append(entries, cpaExportEntry{
+			Type:         "codex",
+			Email:        row.GetCredential("email"),
+			Expired:      row.GetCredential("expires_at"),
+			IDToken:      row.GetCredential("id_token"),
+			AccountID:    row.GetCredential("account_id"),
+			AccessToken:  row.GetCredential("access_token"),
+			LastRefresh:  row.UpdatedAt.Format(time.RFC3339),
+			RefreshToken: rt,
+		})
+	}
+
+	if entries == nil {
+		entries = []cpaExportEntry{}
+	}
+	c.JSON(http.StatusOK, entries)
+}
+
+type migrateReq struct {
+	URL      string `json:"url"`
+	AdminKey string `json:"admin_key"`
+}
+
+// MigrateAccounts 从远程 codex2api 实例迁移健康账号
+func (h *Handler) MigrateAccounts(c *gin.Context) {
+	var req migrateReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.URL == "" || req.AdminKey == "" {
+		writeError(c, http.StatusBadRequest, "url 和 admin_key 是必填字段")
+		return
+	}
+
+	remoteURL := strings.TrimRight(req.URL, "/")
+	exportURL := remoteURL + "/api/admin/accounts/export?filter=healthy&remote=true"
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, exportURL, nil)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "构建请求失败: "+err.Error())
+		return
+	}
+	httpReq.Header.Set("X-Admin-Key", req.AdminKey)
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpReq)
+	if err != nil {
+		writeError(c, http.StatusBadGateway, "连接远程实例失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		writeError(c, http.StatusBadGateway, fmt.Sprintf("远程实例返回错误 (%d): %s", resp.StatusCode, string(body)))
+		return
+	}
+
+	var remoteAccounts []cpaExportEntry
+	if err := json.NewDecoder(resp.Body).Decode(&remoteAccounts); err != nil {
+		writeError(c, http.StatusBadGateway, "解析远程数据失败: "+err.Error())
+		return
+	}
+
+	if len(remoteAccounts) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "远程实例没有可迁移的健康账号", "total": 0, "imported": 0, "duplicate": 0, "failed": 0})
+		return
+	}
+
+	// 去重
+	existingRTs, err := h.db.GetAllRefreshTokens(ctx)
+	if err != nil {
+		log.Printf("查询本地 RT 失败: %v", err)
+		existingRTs = make(map[string]bool)
+	}
+
+	var importedCount, duplicateCount, failCount int
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+
+	for _, entry := range remoteAccounts {
+		rt := strings.TrimSpace(entry.RefreshToken)
+		if rt == "" {
+			continue
+		}
+		if existingRTs[rt] {
+			duplicateCount++
+			continue
+		}
+
+		name := entry.Email
+		if name == "" {
+			name = fmt.Sprintf("migrate-%d", importedCount+1)
+		}
+
+		id, err := h.db.InsertAccount(ctx, name, rt, "")
+		if err != nil {
+			failCount++
+			continue
+		}
+		importedCount++
+
+		newAcc := &auth.Account{DBID: id, RefreshToken: rt}
+		h.store.AddAccount(newAcc)
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(accountID int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			rCtx, rCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer rCancel()
+			if err := h.store.RefreshSingle(rCtx, accountID); err != nil {
+				log.Printf("迁移账号 %d 刷新失败: %v", accountID, err)
+			}
+		}(id)
+	}
+
+	wg.Wait()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   fmt.Sprintf("迁移完成：导入 %d 个账号", importedCount),
+		"total":     len(remoteAccounts),
+		"imported":  importedCount,
+		"duplicate": duplicateCount,
+		"failed":    failCount,
 	})
 }
 

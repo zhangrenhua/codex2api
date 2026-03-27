@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, Upload, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
 
@@ -54,6 +54,12 @@ export default function Accounts() {
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [importing, setImporting] = useState(false)
   const [showImportPicker, setShowImportPicker] = useState(false)
+  const [showExportPicker, setShowExportPicker] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [showMigrate, setShowMigrate] = useState(false)
+  const [migrateUrl, setMigrateUrl] = useState('')
+  const [migrateKey, setMigrateKey] = useState('')
+  const [migrating, setMigrating] = useState(false)
   const [addMethod, setAddMethod] = useState<'rt' | 'oauth'>('rt')
   const [oauthStep, setOauthStep] = useState<'generate' | 'exchange'>('generate')
   const [oauthSession, setOauthSession] = useState<{ session_id: string; auth_url: string } | null>(null)
@@ -299,6 +305,55 @@ export default function Accounts() {
     }
   }
 
+  const handleExport = async (format: 'json' | 'txt', scope: 'healthy' | 'selected') => {
+    setExporting(true)
+    setShowExportPicker(false)
+    try {
+      const params: { filter: 'healthy' | 'all'; ids?: number[] } = {
+        filter: scope === 'healthy' ? 'healthy' : 'all',
+      }
+      if (scope === 'selected') {
+        params.ids = Array.from(selected)
+        params.filter = 'all'
+      }
+      const data = await api.exportAccounts(params)
+      if (data.length === 0) {
+        showToast(t('accounts.exportNoAccounts'), 'error')
+        return
+      }
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      if (format === 'json') {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+        downloadBlob(blob, `cpa-${ts}-${data.length}.json`)
+      } else {
+        const text = data.map(e => e.refresh_token).join('\n')
+        const blob = new Blob([text], { type: 'text/plain' })
+        downloadBlob(blob, `rt-${ts}-${data.length}.txt`)
+      }
+      showToast(t('accounts.exportSuccess', { count: data.length }))
+    } catch (error) {
+      showToast(`${t('accounts.exportFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleMigrate = async () => {
+    setMigrating(true)
+    try {
+      const result = await api.migrateAccounts({ url: migrateUrl.trim(), admin_key: migrateKey.trim() })
+      showToast(t('accounts.migrateSuccess', { imported: result.imported, duplicate: result.duplicate, failed: result.failed }))
+      setShowMigrate(false)
+      setMigrateUrl('')
+      setMigrateKey('')
+      void reload()
+    } catch (error) {
+      showToast(`${t('accounts.migrateFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setMigrating(false)
+    }
+  }
+
   const handleDelete = async (account: AccountRow) => {
     const confirmed = await confirm({
       title: t('accounts.deleteTitle'),
@@ -473,6 +528,14 @@ export default function Accounts() {
               <Button variant="outline" disabled={importing} onClick={() => setShowImportPicker(true)}>
                 <Upload className="size-3.5" />
                 {importing ? t('accounts.importing') : t('accounts.importFile')}
+              </Button>
+              <Button variant="outline" disabled={exporting} onClick={() => setShowExportPicker(true)}>
+                <Download className="size-3.5" />
+                {exporting ? t('accounts.exporting') : t('accounts.export')}
+              </Button>
+              <Button variant="outline" disabled={migrating} onClick={() => setShowMigrate(true)}>
+                <ArrowDownToLine className="size-3.5" />
+                {migrating ? t('accounts.migrating') : t('accounts.migrateImport')}
               </Button>
               <input
                 ref={fileInputRef}
@@ -914,6 +977,99 @@ export default function Accounts() {
           </div>
         </Modal>
 
+        <Modal
+          show={showExportPicker}
+          title={t('accounts.exportTitle')}
+          contentClassName="sm:max-w-[520px]"
+          onClose={() => setShowExportPicker(false)}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+              onClick={() => void handleExport('json', 'healthy')}
+            >
+              <FileJson className="size-5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-sm font-medium">{t('accounts.exportHealthyJson')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyJsonDesc')}</div>
+              </div>
+            </button>
+            <button
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+              onClick={() => void handleExport('txt', 'healthy')}
+            >
+              <FileText className="size-5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-sm font-medium">{t('accounts.exportHealthyTxt')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyTxtDesc')}</div>
+              </div>
+            </button>
+            <button
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              disabled={selected.size === 0}
+              onClick={() => void handleExport('json', 'selected')}
+            >
+              <FileJson className="size-5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-sm font-medium">{t('accounts.exportSelectedJson')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedJsonDesc')}</div>
+              </div>
+            </button>
+            <button
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              disabled={selected.size === 0}
+              onClick={() => void handleExport('txt', 'selected')}
+            >
+              <FileText className="size-5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-sm font-medium">{t('accounts.exportSelectedTxt')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedTxtDesc')}</div>
+              </div>
+            </button>
+          </div>
+        </Modal>
+
+        <Modal
+          show={showMigrate}
+          title={t('accounts.migrateTitle')}
+          contentClassName="sm:max-w-[520px]"
+          onClose={() => { setShowMigrate(false); setMigrateUrl(''); setMigrateKey('') }}
+        >
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+              <p>{t('accounts.migrateDesc')}</p>
+            </div>
+            <div>
+              <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.migrateUrlLabel')}</label>
+              <Input
+                placeholder={t('accounts.migrateUrlPlaceholder')}
+                value={migrateUrl}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setMigrateUrl(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.migrateKeyLabel')}</label>
+              <Input
+                type="password"
+                placeholder={t('accounts.migrateKeyPlaceholder')}
+                value={migrateKey}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setMigrateKey(e.target.value)}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateUrl(''); setMigrateKey('') }}>
+                {t('common.cancel')}
+              </Button>
+              <Button
+                onClick={() => void handleMigrate()}
+                disabled={migrating || !migrateUrl.trim() || !migrateKey.trim()}
+              >
+                {migrating ? t('accounts.migrating') : t('accounts.migrateConfirm')}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+
         {testingAccount && (
           <TestConnectionModal
             account={testingAccount}
@@ -934,6 +1090,17 @@ export default function Accounts() {
       </>
     </StateShell>
   )
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 function CompactStat({

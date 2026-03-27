@@ -54,6 +54,7 @@ export default function Settings() {
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
     max_retries: 2,
+    allow_remote_migration: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
@@ -465,6 +466,15 @@ export default function Settings() {
                 {settingsForm.admin_auth_source === 'env' ? (
                   <p className="text-xs text-amber-600 mt-1">{t('settings.adminSecretEnvOverride')}</p>
                 ) : null}
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.allowRemoteMigration')}</label>
+                <Select
+                  value={settingsForm.allow_remote_migration ? 'true' : 'false'}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, allow_remote_migration: value === 'true' }))}
+                  options={booleanOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.allowRemoteMigrationDesc')}</p>
               </div>
             </div>
             <Button onClick={() => void handleSaveSettings()} disabled={savingSettings}>

@@ -166,10 +166,22 @@ export interface SystemSettings {
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
   max_retries: number
+  allow_remote_migration: boolean
   database_driver: string
   database_label: string
   cache_driver: string
   cache_label: string
+}
+
+export interface CPAExportEntry {
+  type: string
+  email: string
+  expired: string
+  id_token: string
+  account_id: string
+  access_token: string
+  last_refresh: string
+  refresh_token: string
 }
 
 export interface UsageStats {
