@@ -65,10 +65,16 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 
 - 标准版和 SQLite 版都读取 `.env`
 - 切换部署模式前，需要先用对应的示例文件覆盖当前 `.env`
+- 标准镜像版项目名固定为 `codex2api`，数据卷固定为 `codex2api_pgdata`、`codex2api_redisdata`
+- 标准本地构建版项目名固定为 `codex2api-local`，数据卷固定为 `codex2api-local_pgdata`、`codex2api-local_redisdata`
+- SQLite 镜像版项目名固定为 `codex2api-sqlite`，数据卷固定为 `codex2api-sqlite_sqlite-data`
+- SQLite 本地构建版项目名固定为 `codex2api-sqlite-local`，数据卷固定为 `codex2api-sqlite-local_sqlite-data-local`
 - 标准版容器名：`codex2api`
 - SQLite 镜像版容器名：`codex2api-sqlite`
 - SQLite 本地构建版容器名：`codex2api-sqlite-local`
 - SQLite 轻量版只启动 `codex2api` 单容器，数据保存在 `/data/codex2api.db`
+- `docker compose down` 默认不会删除命名卷；只有 `docker compose down -v`、`docker volume rm` 或 `docker volume prune` 才会删除持久化数据
+- 不同部署模式的数据卷彼此隔离；切换 compose 文件后看到空数据，通常是切到了另一组卷，而不是原卷被自动删除
 
 启动后访问：
 
@@ -80,6 +86,8 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 ```bash
 git pull && docker compose pull && docker compose up -d && docker compose logs -f codex2api
 ```
+
+如非必要，不建议在升级时执行 `docker compose down`；标准升级直接 `pull + up -d` 即可复用现有容器和命名卷。
 
 ### 本地开发模式
 
@@ -124,6 +132,8 @@ Vite 会自动代理 `/api` 和 `/health` 到后端，开发时访问 `http://lo
 | `REDIS_PASSWORD` | Redis 密码 |
 | `REDIS_DB` | Redis DB 库号 |
 | `TZ` | 时区，例如 `Asia/Shanghai` |
+
+标准版 `.env.example` 已显式声明 `DATABASE_DRIVER=postgres` 与 `CACHE_DRIVER=redis`；SQLite 轻量版请改用 `.env.sqlite.example`。
 
 ### 业务运行配置
 

@@ -1,3 +1,5 @@
+name: codex2api-local
+
 services:
   codex2api:
     build: .
@@ -61,4 +63,6 @@ networks:
 
 volumes:
   pgdata:
+    name: codex2api-local_pgdata
   redisdata:
+    name: codex2api-local_redisdata

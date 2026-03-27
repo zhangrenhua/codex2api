@@ -1,3 +1,5 @@
+name: codex2api-sqlite
+
 services:
   codex2api:
     image: ghcr.io/james-6-23/codex2api:latest
@@ -12,3 +14,4 @@ services:
 
 volumes:
   sqlite-data:
+    name: codex2api-sqlite_sqlite-data
