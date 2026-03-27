@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from 'react'
 type Theme = 'light' | 'dark'
 
 const STORAGE_KEY = 'theme'
+const TRANSITION_CLASS = 'theme-transition'
+const TRANSITION_DURATION = 450
 
 function getInitialTheme(): Theme {
   const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
@@ -24,7 +26,12 @@ export function useTheme() {
   }, [theme])
 
   const toggle = useCallback(() => {
+    const root = document.documentElement
+    // 启用过渡动画
+    root.classList.add(TRANSITION_CLASS)
     setThemeState((t) => (t === 'dark' ? 'light' : 'dark'))
+    // 过渡结束后移除，避免影响正常交互性能
+    setTimeout(() => root.classList.remove(TRANSITION_CLASS), TRANSITION_DURATION)
   }, [])
 
   return { theme, toggle }

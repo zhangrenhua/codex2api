@@ -99,6 +99,15 @@
   }
 }
 
+/* 主题切换过渡：仅在切换时临时启用，避免影响正常交互 */
+.theme-transition,
+.theme-transition *,
+.theme-transition *::before,
+.theme-transition *::after {
+  transition: background-color 0.4s ease, color 0.3s ease, border-color 0.35s ease,
+              box-shadow 0.35s ease, background 0.4s ease, fill 0.3s ease, stroke 0.3s ease !important;
+}
+
 /* Toast animation */
 @keyframes toast-slide-in {
   from {
