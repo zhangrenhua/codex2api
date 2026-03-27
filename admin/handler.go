@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -556,7 +557,31 @@ func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string) {
 	h.importAccountsCommon(c, allTokens, proxyURL)
 }
 
-// importAccountsCommon 公共的去重、插入、刷新逻辑
+// importEvent SSE 导入进度事件
+type importEvent struct {
+	Type      string `json:"type"`                // progress | complete
+	Current   int    `json:"current"`
+	Total     int    `json:"total"`
+	Success   int    `json:"success"`
+	Duplicate int    `json:"duplicate"`
+	Failed    int    `json:"failed"`
+}
+
+func sendImportEvent(c *gin.Context, e importEvent) {
+	data, _ := json.Marshal(e)
+	fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+	c.Writer.Flush()
+}
+
+func setupSSE(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+}
+
+// importAccountsCommon 公共的去重、并发插入、SSE 进度推送逻辑
 func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, proxyURL string) {
 	// 文件内去重
 	seen := make(map[string]bool)
@@ -568,11 +593,10 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
-	defer cancel()
-
-	// 数据库去重
-	existingRTs, err := h.db.GetAllRefreshTokens(ctx)
+	// 数据库去重（独立短超时）
+	dedupeCtx, dedupeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dedupeCancel()
+	existingRTs, err := h.db.GetAllRefreshTokens(dedupeCtx)
 	if err != nil {
 		log.Printf("查询已有 RT 失败: %v", err)
 		existingRTs = make(map[string]bool)
@@ -588,77 +612,107 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		}
 	}
 
+	total := len(unique)
+
 	if len(newTokens) == 0 {
 		c.JSON(http.StatusOK, gin.H{
-			"message":   fmt.Sprintf("所有 %d 个 RT 已存在，无需导入", len(unique)),
+			"message":   fmt.Sprintf("所有 %d 个 RT 已存在，无需导入", total),
 			"success":   0,
 			"duplicate": duplicateCount,
 			"failed":    0,
-			"total":     len(unique),
+			"total":     total,
 		})
 		return
 	}
 
-	successCount := 0
-	failCount := 0
+	// 切换到 SSE 流式响应
+	setupSSE(c)
 
-	sem := make(chan struct{}, 10)
+	var successCount int64
+	var failCount int64
+	var current int64
+	sem := make(chan struct{}, 20) // 并发插入上限
 	var wg sync.WaitGroup
 
+	// 进度推送 goroutine：定时发送，避免每条都写造成 IO 瓶颈
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cur := int(atomic.LoadInt64(&current))
+				suc := int(atomic.LoadInt64(&successCount))
+				fai := int(atomic.LoadInt64(&failCount))
+				sendImportEvent(c, importEvent{
+					Type: "progress", Current: cur + duplicateCount, Total: total,
+					Success: suc, Duplicate: duplicateCount, Failed: fai,
+				})
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	for i, t := range newTokens {
-		name := t.name
-		if name == "" {
-			name = fmt.Sprintf("import-%d", i+1)
-		}
-
-		id, err := h.db.InsertAccount(ctx, name, t.refreshToken, proxyURL)
-		if err != nil {
-			log.Printf("导入账号 %d 失败: %v", i+1, err)
-			failCount++
-			continue
-		}
-
-		successCount++
-
-		newAcc := &auth.Account{
-			DBID:         id,
-			RefreshToken: t.refreshToken,
-			ProxyURL:     proxyURL,
-		}
-		h.store.AddAccount(newAcc)
-
-		wg.Add(1)
 		sem <- struct{}{}
-		go func(accountID int64) {
+		wg.Add(1)
+		go func(idx int, tok importToken) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-				log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
-			} else {
-				log.Printf("导入账号 %d 刷新成功", accountID)
+
+			name := tok.name
+			if name == "" {
+				name = fmt.Sprintf("import-%d", idx+1)
 			}
-		}(id)
+
+			insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			id, err := h.db.InsertAccount(insertCtx, name, tok.refreshToken, proxyURL)
+			insertCancel()
+
+			if err != nil {
+				log.Printf("导入账号 %d/%d 失败: %v", idx+1, len(newTokens), err)
+				atomic.AddInt64(&failCount, 1)
+				atomic.AddInt64(&current, 1)
+				return
+			}
+
+			atomic.AddInt64(&successCount, 1)
+			atomic.AddInt64(&current, 1)
+
+			newAcc := &auth.Account{
+				DBID:         id,
+				RefreshToken: tok.refreshToken,
+				ProxyURL:     proxyURL,
+			}
+			h.store.AddAccount(newAcc)
+
+			// 后台异步刷新，不阻塞导入流程
+			go func(accountID int64) {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
+					log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
+				} else {
+					log.Printf("导入账号 %d 刷新成功", accountID)
+				}
+			}(id)
+		}(i, t)
 	}
 
 	wg.Wait()
+	close(done)
 
-	msg := fmt.Sprintf("成功导入 %d 个账号", successCount)
-	if duplicateCount > 0 {
-		msg += fmt.Sprintf("，%d 个重复跳过", duplicateCount)
-	}
-	if failCount > 0 {
-		msg += fmt.Sprintf("，%d 个失败", failCount)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":   msg,
-		"success":   successCount,
-		"duplicate": duplicateCount,
-		"failed":    failCount,
-		"total":     len(unique),
+	// 发送完成事件
+	suc := int(atomic.LoadInt64(&successCount))
+	fai := int(atomic.LoadInt64(&failCount))
+	sendImportEvent(c, importEvent{
+		Type: "complete", Current: total, Total: total,
+		Success: suc, Duplicate: duplicateCount, Failed: fai,
 	})
+
+	log.Printf("导入完成: success=%d, duplicate=%d, failed=%d, total=%d", suc, duplicateCount, fai, total)
 }
 
 // GetAccountUsage 查询单个账号的用量统计
@@ -1348,7 +1402,7 @@ type migrateReq struct {
 	AdminKey string `json:"admin_key"`
 }
 
-// MigrateAccounts 从远程 codex2api 实例迁移健康账号
+// MigrateAccounts 从远程 codex2api 实例迁移健康账号（SSE 流式进度）
 func (h *Handler) MigrateAccounts(c *gin.Context) {
 	if !h.hasConfiguredAdminSecret(c.Request.Context()) {
 		writeError(c, http.StatusForbidden, "请先设置管理密钥，再使用远程迁移")
@@ -1368,17 +1422,17 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 	remoteURL := strings.TrimRight(req.URL, "/")
 	exportURL := remoteURL + "/api/admin/accounts/export?filter=healthy&remote=true"
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	defer cancel()
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer fetchCancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, exportURL, nil)
+	httpReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, exportURL, nil)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "构建请求失败: "+err.Error())
 		return
 	}
 	httpReq.Header.Set("X-Admin-Key", req.AdminKey)
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(httpReq)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(httpReq)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, "连接远程实例失败: "+err.Error())
 		return
@@ -1402,64 +1456,22 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 		return
 	}
 
-	// 去重
-	existingRTs, err := h.db.GetAllRefreshTokens(ctx)
-	if err != nil {
-		log.Printf("查询本地 RT 失败: %v", err)
-		existingRTs = make(map[string]bool)
-	}
-
-	var importedCount, duplicateCount, failCount int
-	sem := make(chan struct{}, 10)
-	var wg sync.WaitGroup
-
+	// 转换为 importToken 格式，复用 importAccountsCommon
+	var tokens []importToken
 	for _, entry := range remoteAccounts {
 		rt := strings.TrimSpace(entry.RefreshToken)
 		if rt == "" {
 			continue
 		}
-		if existingRTs[rt] {
-			duplicateCount++
-			continue
-		}
-
 		name := entry.Email
 		if name == "" {
-			name = fmt.Sprintf("migrate-%d", importedCount+1)
+			name = "migrate"
 		}
-
-		id, err := h.db.InsertAccount(ctx, name, rt, "")
-		if err != nil {
-			failCount++
-			continue
-		}
-		importedCount++
-
-		newAcc := &auth.Account{DBID: id, RefreshToken: rt}
-		h.store.AddAccount(newAcc)
-
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(accountID int64) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			rCtx, rCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer rCancel()
-			if err := h.store.RefreshSingle(rCtx, accountID); err != nil {
-				log.Printf("迁移账号 %d 刷新失败: %v", accountID, err)
-			}
-		}(id)
+		tokens = append(tokens, importToken{refreshToken: rt, name: name})
 	}
 
-	wg.Wait()
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":   fmt.Sprintf("迁移完成：导入 %d 个账号", importedCount),
-		"total":     len(remoteAccounts),
-		"imported":  importedCount,
-		"duplicate": duplicateCount,
-		"failed":    failCount,
-	})
+	log.Printf("远程迁移: 从 %s 拉取到 %d 个账号，开始导入", remoteURL, len(tokens))
+	h.importAccountsCommon(c, tokens, "")
 }
 
 // ==================== Models ====================

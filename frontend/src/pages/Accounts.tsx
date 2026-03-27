@@ -60,6 +60,7 @@ export default function Accounts() {
   const [migrateUrl, setMigrateUrl] = useState('')
   const [migrateKey, setMigrateKey] = useState('')
   const [migrating, setMigrating] = useState(false)
+  const [importProgress, setImportProgress] = useState<{ show: boolean; current: number; total: number; success: number; duplicate: number; failed: number; done: boolean }>({ show: false, current: 0, total: 0, success: 0, duplicate: 0, failed: 0, done: false })
   const [addMethod, setAddMethod] = useState<'rt' | 'oauth'>('rt')
   const [oauthStep, setOauthStep] = useState<'generate' | 'exchange'>('generate')
   const [oauthSession, setOauthSession] = useState<{ session_id: string; auth_url: string } | null>(null)
@@ -250,6 +251,29 @@ export default function Accounts() {
     }
   }
 
+  const readImportSSE = async (res: Response) => {
+    setImportProgress({ show: true, current: 0, total: 0, success: 0, duplicate: 0, failed: 0, done: false })
+    const reader = res.body?.getReader()
+    if (!reader) return
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const event = JSON.parse(line.slice(6)) as { type: string; current: number; total: number; success: number; duplicate: number; failed: number }
+          setImportProgress(p => ({ ...p, current: event.current, total: event.total, success: event.success, duplicate: event.duplicate, failed: event.failed, done: event.type === 'complete' }))
+          if (event.type === 'complete') void reload()
+        } catch { /* 忽略解析异常 */ }
+      }
+    }
+  }
+
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -263,12 +287,16 @@ export default function Accounts() {
       const formData = new FormData()
       formData.append('file', file)
       const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      const data = await res.json()
-      if (!res.ok) {
-        showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
+      if (res.headers.get('content-type')?.includes('text/event-stream')) {
+        await readImportSSE(res)
       } else {
-        showToast(t('accounts.importCompleted'))
-        void reload()
+        const data = await res.json()
+        if (!res.ok) {
+          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
+        } else {
+          showToast(t('accounts.importCompleted'))
+          void reload()
+        }
       }
     } catch (error) {
       showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
@@ -290,12 +318,16 @@ export default function Accounts() {
         formData.append('file', files[i])
       }
       const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      const data = await res.json()
-      if (!res.ok) {
-        showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
+      if (res.headers.get('content-type')?.includes('text/event-stream')) {
+        await readImportSSE(res)
       } else {
-        showToast(t('accounts.importCompleted'))
-        void reload()
+        const data = await res.json()
+        if (!res.ok) {
+          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
+        } else {
+          showToast(t('accounts.importCompleted'))
+          void reload()
+        }
       }
     } catch (error) {
       showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
@@ -340,17 +372,30 @@ export default function Accounts() {
 
   const handleMigrate = async () => {
     setMigrating(true)
+    setShowMigrate(false)
     try {
-      const result = await api.migrateAccounts({ url: migrateUrl.trim(), admin_key: migrateKey.trim() })
-      showToast(t('accounts.migrateSuccess', { imported: result.imported, duplicate: result.duplicate, failed: result.failed }))
-      setShowMigrate(false)
-      setMigrateUrl('')
-      setMigrateKey('')
-      void reload()
+      const res = await fetch('/api/admin/accounts/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {}) },
+        body: JSON.stringify({ url: migrateUrl.trim(), admin_key: migrateKey.trim() }),
+      })
+      if (res.headers.get('content-type')?.includes('text/event-stream')) {
+        await readImportSSE(res)
+      } else {
+        const data = await res.json()
+        if (!res.ok) {
+          showToast(data.error ? `${t('accounts.migrateFailed')}: ${data.error}` : t('accounts.migrateFailed'), 'error')
+        } else {
+          showToast(t('accounts.migrateSuccess', { imported: data.imported ?? 0, duplicate: data.duplicate ?? 0, failed: data.failed ?? 0 }))
+          void reload()
+        }
+      }
     } catch (error) {
       showToast(`${t('accounts.migrateFailed')}: ${getErrorMessage(error)}`, 'error')
     } finally {
       setMigrating(false)
+      setMigrateUrl('')
+      setMigrateKey('')
     }
   }
 
@@ -1083,6 +1128,44 @@ export default function Accounts() {
         {usageAccount && (
           <AccountUsageModal account={usageAccount} onClose={() => setUsageAccount(null)} />
         )}
+
+        <Modal
+          show={importProgress.show}
+          title={importProgress.done ? t('accounts.importDone') : t('accounts.importingProgress')}
+          contentClassName="sm:max-w-[420px]"
+          onClose={() => setImportProgress(p => ({ ...p, show: false }))}
+        >
+          <div className="space-y-4">
+            <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
+                style={{ width: importProgress.total > 0 ? `${Math.round((importProgress.current / importProgress.total) * 100)}%` : '0%' }}
+              />
+            </div>
+            <div className="text-center text-sm text-muted-foreground">
+              {importProgress.total > 0
+                ? `${importProgress.current} / ${importProgress.total}  (${Math.round((importProgress.current / importProgress.total) * 100)}%)`
+                : t('accounts.importPreparing')}
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="rounded-xl bg-emerald-500/10 px-3 py-2">
+                <div className="text-lg font-bold text-emerald-600">{importProgress.success}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.importSuccess')}</div>
+              </div>
+              <div className="rounded-xl bg-amber-500/10 px-3 py-2">
+                <div className="text-lg font-bold text-amber-600">{importProgress.duplicate}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.importDuplicate')}</div>
+              </div>
+              <div className="rounded-xl bg-red-500/10 px-3 py-2">
+                <div className="text-lg font-bold text-red-600">{importProgress.failed}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.importFailedCount')}</div>
+              </div>
+            </div>
+            {importProgress.done && (
+              <p className="text-xs text-center text-muted-foreground">{t('accounts.importDoneHint')}</p>
+            )}
+          </div>
+        </Modal>
 
         {confirmDialog}
 
