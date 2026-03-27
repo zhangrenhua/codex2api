@@ -52,6 +52,7 @@ export default function Settings() {
     admin_auth_source: 'disabled',
     auto_clean_full_usage: false,
     proxy_pool_enabled: false,
+    fast_scheduler_enabled: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
@@ -423,6 +424,18 @@ export default function Settings() {
                   options={booleanOptions}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.autoCleanFullUsageDesc')}</p>
+              </div>
+            </div>
+            <h3 className="text-base font-semibold text-foreground mb-4 mt-6">{t('settings.scheduler')}</h3>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 mb-4">
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.fastSchedulerEnabled')}</label>
+                <Select
+                  value={settingsForm.fast_scheduler_enabled ? 'true' : 'false'}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, fast_scheduler_enabled: value === 'true' }))}
+                  options={booleanOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.fastSchedulerEnabledDesc')}</p>
               </div>
             </div>
             <h3 className="text-base font-semibold text-foreground mb-4 mt-6">{t('settings.security')}</h3>

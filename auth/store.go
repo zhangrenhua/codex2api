@@ -733,10 +733,12 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanUnauthorized.Store(settings.AutoCleanUnauthorized)
 	s.autoCleanRateLimited.Store(settings.AutoCleanRateLimited)
 	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
-	s.fastSchedulerEnabled.Store(fastSchedulerEnabledFromEnv())
-	if s.fastSchedulerEnabled.Load() {
+	// 环境变量优先，否则读数据库设置
+	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
+	s.fastSchedulerEnabled.Store(fastEnabled)
+	if fastEnabled {
 		s.fastScheduler.Store(NewFastScheduler(int64(settings.MaxConcurrency)))
-		log.Printf("Fast scheduler POC 已启用（请求热路径将优先走本地内存调度器）")
+		log.Printf("快速调度器已启用（请求热路径将优先走本地内存调度器）")
 	}
 
 	// 加载代理池

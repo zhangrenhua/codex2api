@@ -982,6 +982,7 @@ type settingsResponse struct {
 	AdminAuthSource       string `json:"admin_auth_source"`
 	AutoCleanFullUsage    bool   `json:"auto_clean_full_usage"`
 	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
 	DatabaseDriver        string `json:"database_driver"`
 	DatabaseLabel         string `json:"database_label"`
 	CacheDriver           string `json:"cache_driver"`
@@ -1001,6 +1002,7 @@ type updateSettingsReq struct {
 	AdminSecret           *string `json:"admin_secret"`
 	AutoCleanFullUsage    *bool   `json:"auto_clean_full_usage"`
 	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1027,6 +1029,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AdminAuthSource:       adminAuthSource,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,
@@ -1134,6 +1137,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: proxy_pool_enabled = %t", *req.ProxyPoolEnabled)
 	}
 
+	if req.FastSchedulerEnabled != nil {
+		h.store.SetFastSchedulerEnabled(*req.FastSchedulerEnabled)
+		log.Printf("设置已更新: fast_scheduler_enabled = %t", *req.FastSchedulerEnabled)
+	}
+
 	// 读取当前 admin_secret（如有更新则使用新值）
 	currentAdminSecret := ""
 	if dbSettings, err := h.db.GetSystemSettings(c.Request.Context()); err == nil && dbSettings != nil {
@@ -1162,6 +1170,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AdminSecret:           currentAdminSecret,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -1194,6 +1203,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AdminAuthSource:       adminAuthSource,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,
