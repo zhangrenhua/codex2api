@@ -30,6 +30,7 @@ type Handler struct {
 	cache          cache.TokenCache
 	db             *database.DB
 	rateLimiter    *proxy.RateLimiter
+	refreshAccount func(context.Context, int64) error
 	cpuSampler     *cpuSampler
 	startedAt      time.Time
 	pgMaxConns     int
@@ -52,7 +53,7 @@ type chartCacheEntry struct {
 
 // NewHandler 创建管理后台处理器
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
-	return &Handler{
+	handler := &Handler{
 		store:          store,
 		cache:          tc,
 		db:             db,
@@ -66,6 +67,8 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		adminSecretEnv: adminSecretEnv,
 		chartCacheData: make(map[string]*chartCacheEntry),
 	}
+	handler.refreshAccount = handler.refreshSingleAccount
+	return handler
 }
 
 // SetPoolSizes 设置连接池大小跟踪值（由 main.go 在启动时调用）
@@ -767,10 +770,30 @@ func (h *Handler) RefreshAccount(c *gin.Context) {
 		return
 	}
 
-	// 查找运行时账号并触发刷新
-	_ = id // TODO: 实现通过 ID 查找运行时 Account 并触发刷新
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
 
-	writeMessage(c, http.StatusOK, "刷新请求已发送")
+	refreshFn := h.refreshAccount
+	if refreshFn == nil {
+		refreshFn = h.refreshSingleAccount
+	}
+	if err := refreshFn(ctx, id); err != nil {
+		if strings.Contains(err.Error(), "不存在") {
+			writeError(c, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "刷新失败: "+err.Error())
+		return
+	}
+
+	writeMessage(c, http.StatusOK, "账号刷新成功")
+}
+
+func (h *Handler) refreshSingleAccount(ctx context.Context, id int64) error {
+	if h == nil || h.store == nil {
+		return fmt.Errorf("账号池未初始化")
+	}
+	return h.store.RefreshSingle(ctx, id)
 }
 
 // ==================== Health ====================

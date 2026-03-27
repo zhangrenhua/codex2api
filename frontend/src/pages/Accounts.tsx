@@ -420,8 +420,8 @@ export default function Accounts() {
   const handleRefresh = async (account: AccountRow) => {
     setRefreshingIds((prev) => new Set(prev).add(account.id))
     try {
-      await api.refreshAccount(account.id)
-      showToast(t('accounts.refreshRequested'))
+      const result = await api.refreshAccount(account.id)
+      showToast(result.message || t('accounts.refreshRequested'))
       void reloadSilently()
     } catch (error) {
       showToast(t('accounts.refreshFailed', { error: getErrorMessage(error) }), 'error')
