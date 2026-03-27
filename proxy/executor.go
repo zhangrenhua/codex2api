@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -73,21 +72,19 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		MaxConnsPerHost:     16,               // 降低单连接池过热概率
 		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
 		TLSHandshakeTimeout: 10 * time.Second, // TLS 握手超时
-		// Keep-Alive
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
 		// 启用 HTTP/2
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 	}
+	baseDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport.DialContext = baseDialer.DialContext
 
 	// 设置代理
 	if proxyURL != "" {
-		if u, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(u)
-		}
+		_ = auth.ConfigureTransportProxy(transport, proxyURL, baseDialer)
 	}
 
 	client := &http.Client{

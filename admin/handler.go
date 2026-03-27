@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
-	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1680,12 +1680,12 @@ func (h *Handler) TestProxy(c *gin.Context) {
 
 	// 创建使用指定代理的 HTTP client
 	transport := &http.Transport{}
-	proxyURL, err := parseProxyURL(req.URL)
-	if err != nil {
+	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = baseDialer.DialContext
+	if err := auth.ConfigureTransportProxy(transport, req.URL, baseDialer); err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "error": fmt.Sprintf("代理 URL 格式错误: %v", err)})
 		return
 	}
-	transport.Proxy = http.ProxyURL(proxyURL)
 	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
 
 	apiLang := req.Lang
@@ -1736,7 +1736,3 @@ func (h *Handler) TestProxy(c *gin.Context) {
 	})
 }
 
-// parseProxyURL 解析代理 URL
-func parseProxyURL(rawURL string) (*neturl.URL, error) {
-	return neturl.Parse(rawURL)
-}
