@@ -980,49 +980,49 @@ export default function Accounts() {
         <Modal
           show={showExportPicker}
           title={t('accounts.exportTitle')}
-          contentClassName="sm:max-w-[520px]"
+          contentClassName="sm:max-w-[580px]"
           onClose={() => setShowExportPicker(false)}
         >
           <div className="grid grid-cols-2 gap-3">
             <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors"
               onClick={() => void handleExport('json', 'healthy')}
             >
               <FileJson className="size-5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">{t('accounts.exportHealthyJson')}</div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportHealthyJson')}</div>
                 <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyJsonDesc')}</div>
               </div>
             </button>
             <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors"
               onClick={() => void handleExport('txt', 'healthy')}
             >
               <FileText className="size-5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">{t('accounts.exportHealthyTxt')}</div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportHealthyTxt')}</div>
                 <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyTxtDesc')}</div>
               </div>
             </button>
             <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
               disabled={selected.size === 0}
               onClick={() => void handleExport('json', 'selected')}
             >
               <FileJson className="size-5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">{t('accounts.exportSelectedJson')}</div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportSelectedJson')}</div>
                 <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedJsonDesc')}</div>
               </div>
             </button>
             <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
               disabled={selected.size === 0}
               onClick={() => void handleExport('txt', 'selected')}
             >
               <FileText className="size-5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">{t('accounts.exportSelectedTxt')}</div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportSelectedTxt')}</div>
                 <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedTxtDesc')}</div>
               </div>
             </button>
