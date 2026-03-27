@@ -983,6 +983,7 @@ type settingsResponse struct {
 	AutoCleanFullUsage    bool   `json:"auto_clean_full_usage"`
 	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
+	MaxRetries            int    `json:"max_retries"`
 	DatabaseDriver        string `json:"database_driver"`
 	DatabaseLabel         string `json:"database_label"`
 	CacheDriver           string `json:"cache_driver"`
@@ -1003,6 +1004,7 @@ type updateSettingsReq struct {
 	AutoCleanFullUsage    *bool   `json:"auto_clean_full_usage"`
 	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
+	MaxRetries            *int    `json:"max_retries"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1030,6 +1032,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
+		MaxRetries:            h.store.GetMaxRetries(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,
@@ -1142,6 +1145,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: fast_scheduler_enabled = %t", *req.FastSchedulerEnabled)
 	}
 
+	if req.MaxRetries != nil {
+		v := *req.MaxRetries
+		if v < 0 {
+			v = 0
+		}
+		if v > 10 {
+			v = 10
+		}
+		h.store.SetMaxRetries(v)
+		log.Printf("设置已更新: max_retries = %d", v)
+	}
+
 	// 读取当前 admin_secret（如有更新则使用新值）
 	currentAdminSecret := ""
 	if dbSettings, err := h.db.GetSystemSettings(c.Request.Context()); err == nil && dbSettings != nil {
@@ -1171,6 +1186,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
+		MaxRetries:            h.store.GetMaxRetries(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -1204,6 +1220,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
+		MaxRetries:            h.store.GetMaxRetries(),
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
 		CacheDriver:           h.cacheDriver,

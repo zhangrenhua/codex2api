@@ -679,6 +679,7 @@ type Store struct {
 	autoCleanRateLimited  atomic.Bool
 	autoCleanFullUsage    atomic.Bool
 	autoCleanupBatch      atomic.Bool
+	maxRetries            int64 // 请求失败最大重试次数（换号重试）
 	stopCh                chan struct{}
 	wg                    sync.WaitGroup
 
@@ -733,6 +734,11 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanUnauthorized.Store(settings.AutoCleanUnauthorized)
 	s.autoCleanRateLimited.Store(settings.AutoCleanRateLimited)
 	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
+	retries := int64(settings.MaxRetries)
+	if retries <= 0 {
+		retries = 2 // 默认重试 2 次
+	}
+	atomic.StoreInt64(&s.maxRetries, retries)
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -1225,6 +1231,19 @@ func (s *Store) SetMaxConcurrency(n int) {
 // GetMaxConcurrency 获取当前每账号并发上限
 func (s *Store) GetMaxConcurrency() int {
 	return int(atomic.LoadInt64(&s.maxConcurrency))
+}
+
+// SetMaxRetries 动态更新最大重试次数
+func (s *Store) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	atomic.StoreInt64(&s.maxRetries, int64(n))
+}
+
+// GetMaxRetries 获取当前最大重试次数
+func (s *Store) GetMaxRetries() int {
+	return int(atomic.LoadInt64(&s.maxRetries))
 }
 
 // SetTestModel 动态更新测试连接模型

@@ -199,7 +199,7 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 	}
 }
 
-func shouldTransparentRetryStream(outcome streamOutcome, attempt int, wroteAnyBody bool, ctxErr, writeErr error) bool {
+func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries int, wroteAnyBody bool, ctxErr, writeErr error) bool {
 	if attempt >= maxRetries {
 		return false
 	}
@@ -261,7 +261,10 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 
 // ==================== /v1/responses ====================
 
-const maxRetries = 2 // 最多重试次数（换号）
+// getMaxRetries 从 store 读取可配置的最大重试次数
+func (h *Handler) getMaxRetries() int {
+	return h.store.GetMaxRetries()
+}
 
 const (
 	logStatusClientClosed        = 499
@@ -337,6 +340,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 
 	// 3. 带重试的上游请求
+	maxRetries := h.getMaxRetries()
 	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
@@ -515,7 +519,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
-		if shouldTransparentRetryStream(outcome, attempt, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
@@ -639,6 +643,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	sessionID := ResolveSessionID(c.GetHeader("Authorization"), codexBody)
 
 	// 3. 带重试的上游请求
+	maxRetries := h.getMaxRetries()
 	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
@@ -836,7 +841,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
-		if shouldTransparentRetryStream(outcome, attempt, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {

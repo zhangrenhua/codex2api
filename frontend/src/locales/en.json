@@ -455,6 +455,8 @@
     "trafficProtection": "Traffic Protection",
     "maxConcurrencyRange": "Max concurrent requests per account (1~50)",
     "globalRpmRange": "Max requests per minute, 0 = unlimited",
+    "maxRetries": "Max Retries",
+    "maxRetriesRange": "Auto-retry with a different account on failure (0~10), 0 = no retry",
     "testModelLabel": "Test Connection Model",
     "testModelHint": "Model used for account connection testing",
     "testConcurrencyRange": "Concurrency for batch testing (1~200)",

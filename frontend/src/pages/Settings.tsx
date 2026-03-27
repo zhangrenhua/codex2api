@@ -53,6 +53,7 @@ export default function Settings() {
     auto_clean_full_usage: false,
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    max_retries: 2,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
@@ -341,6 +342,17 @@ export default function Settings() {
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, global_rpm: parseInt(e.target.value) || 0 }))}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.globalRpmRange')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.maxRetries')}</label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={settingsForm.max_retries}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.maxRetriesRange')}</p>
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.testModelLabel')}</label>

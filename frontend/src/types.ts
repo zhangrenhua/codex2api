@@ -165,6 +165,7 @@ export interface SystemSettings {
   auto_clean_full_usage: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
+  max_retries: number
   database_driver: string
   database_label: string
   cache_driver: string
