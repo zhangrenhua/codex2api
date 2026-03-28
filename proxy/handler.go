@@ -385,7 +385,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
-					h.sendPoolExhaustedError(c, lastStatusCode, lastBody)
+					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -443,7 +443,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				continue
 			}
 
-			h.sendPoolExhaustedError(c, resp.StatusCode, errBody)
+			h.sendFinalUpstreamError(c, resp.StatusCode, errBody)
 			return
 		}
 
@@ -648,7 +648,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
 		})
 	} else if lastStatusCode != 0 {
-		h.sendPoolExhaustedError(c, lastStatusCode, lastBody)
+		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 	}
 }
 
@@ -697,7 +697,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
-					h.sendPoolExhaustedError(c, lastStatusCode, lastBody)
+					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -755,7 +755,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				continue
 			}
 
-			h.sendPoolExhaustedError(c, resp.StatusCode, errBody)
+			h.sendFinalUpstreamError(c, resp.StatusCode, errBody)
 			return
 		}
 
@@ -1000,7 +1000,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
 		})
 	} else if lastStatusCode != 0 {
-		h.sendPoolExhaustedError(c, lastStatusCode, lastBody)
+		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 	}
 }
 
@@ -1295,7 +1295,8 @@ func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte)
 	})
 }
 
-func (h *Handler) sendPoolExhaustedError(c *gin.Context, statusCode int, body []byte) {
+// sendFinalUpstreamError 重试用尽后的最终错误响应：识别 usage_limit_reached 改写为 503，其余透传
+func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []byte) {
 	if statusCode == http.StatusTooManyRequests {
 		if details, ok := parseUsageLimitDetails(body); ok {
 			if details.resetsInSeconds > 0 {
@@ -1307,16 +1308,21 @@ func (h *Handler) sendPoolExhaustedError(c *gin.Context, statusCode int, body []
 				message = fmt.Sprintf("%s：%s", message, details.message)
 			}
 
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error": gin.H{
-					"message":           message,
-					"type":              "server_error",
-					"code":              "account_pool_usage_limit_reached",
-					"plan_type":         details.planType,
-					"resets_at":         details.resetsAt,
-					"resets_in_seconds": details.resetsInSeconds,
-				},
-			})
+			errInfo := gin.H{
+				"message": message,
+				"type":    "server_error",
+				"code":    "account_pool_usage_limit_reached",
+			}
+			if details.planType != "" {
+				errInfo["plan_type"] = details.planType
+			}
+			if details.resetsAt != 0 {
+				errInfo["resets_at"] = details.resetsAt
+			}
+			if details.resetsInSeconds != 0 {
+				errInfo["resets_in_seconds"] = details.resetsInSeconds
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errInfo})
 			return
 		}
 	}

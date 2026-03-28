@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestSendPoolExhaustedUsageLimitErrorRewrites429(t *testing.T) {
+func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -18,7 +18,7 @@ func TestSendPoolExhaustedUsageLimitErrorRewrites429(t *testing.T) {
 	handler := &Handler{}
 	body := []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"free","resets_at":1775317531,"resets_in_seconds":602705}}`)
 
-	handler.sendPoolExhaustedError(ctx, http.StatusTooManyRequests, body)
+	handler.sendFinalUpstreamError(ctx, http.StatusTooManyRequests, body)
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
@@ -60,7 +60,7 @@ func TestSendPoolExhaustedUsageLimitErrorRewrites429(t *testing.T) {
 	}
 }
 
-func TestSendPoolExhaustedErrorFallsBackToUpstreamError(t *testing.T) {
+func TestSendFinalUpstreamError_FallsBackForNonUsageLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -69,12 +69,66 @@ func TestSendPoolExhaustedErrorFallsBackToUpstreamError(t *testing.T) {
 	handler := &Handler{}
 	body := []byte(`{"error":{"type":"rate_limit_error","message":"Too many requests"}}`)
 
-	handler.sendPoolExhaustedError(ctx, http.StatusTooManyRequests, body)
+	handler.sendFinalUpstreamError(ctx, http.StatusTooManyRequests, body)
 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "" {
 		t.Fatalf("Retry-After = %q, want empty", got)
+	}
+}
+
+func TestSendFinalUpstreamError_UsageLimitMissingTimeFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	handler := &Handler{}
+	// usage_limit_reached 但不含 resets_at / resets_in_seconds
+	body := []byte(`{"error":{"type":"usage_limit_reached","message":"limit reached"}}`)
+
+	handler.sendFinalUpstreamError(ctx, http.StatusTooManyRequests, body)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	// 无 resets_in_seconds 时不应设置 Retry-After
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want empty (no resets_in_seconds)", got)
+	}
+
+	// 验证零值字段不出现在响应中
+	var raw map[string]map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	errObj := raw["error"]
+	if _, exists := errObj["resets_at"]; exists {
+		t.Fatal("resets_at should be omitted when 0")
+	}
+	if _, exists := errObj["resets_in_seconds"]; exists {
+		t.Fatal("resets_in_seconds should be omitted when 0")
+	}
+	if _, exists := errObj["plan_type"]; exists {
+		t.Fatal("plan_type should be omitted when empty")
+	}
+}
+
+func TestSendFinalUpstreamError_Non429StatusPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	handler := &Handler{}
+	body := []byte(`{"error":{"type":"server_error","message":"internal failure"}}`)
+
+	handler.sendFinalUpstreamError(ctx, http.StatusInternalServerError, body)
+
+	// 非 429 直接透传原状态码
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
 	}
 }
