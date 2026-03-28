@@ -331,6 +331,11 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 清理 function tool parameters 中上游不支持的 JSON Schema 关键字
 	codexBody = sanitizeToolSchemas(codexBody)
 
+	// 展开 previous_response_id（将缓存的历史对话上下文注入 input）
+	codexBody, _ = expandPreviousResponse(codexBody)
+	// 保存展开后的 input，用于在 response.completed 时缓存完整上下文
+	expandedInputRaw := gjson.GetBytes(codexBody, "input").Raw
+
 	// 删除 Codex 不支持的参数
 	unsupportedFields := []string{
 		"max_output_tokens", "max_tokens", "max_completion_tokens",
@@ -470,6 +475,8 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := gjson.GetBytes(data, "response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					// 缓存响应上下文，供后续 previous_response_id 展开使用
+					cacheCompletedResponse([]byte(expandedInputRaw), data)
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -502,6 +509,8 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := gjson.GetBytes(data, "response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					// 缓存响应上下文，供后续 previous_response_id 展开使用
+					cacheCompletedResponse([]byte(expandedInputRaw), data)
 					gotTerminal = true
 					lastResponseData = data
 					return false
