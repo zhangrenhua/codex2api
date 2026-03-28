@@ -16,7 +16,10 @@ import (
 // 本模块在本地缓存每次响应的累积对话上下文，当下一个请求带 previous_response_id 时，
 // 自动将历史 items 注入回 input，使上游无需依赖服务端存储即可匹配 call_id。
 
-const responseCacheTTL = 10 * time.Minute
+const (
+	responseCacheTTL      = 10 * time.Minute
+	responseCacheMaxItems = 5000 // 最大缓存条目数，防止内存无限增长
+)
 
 type responseCacheEntry struct {
 	items     []json.RawMessage
@@ -36,6 +39,11 @@ func init() {
 // setResponseCache 存储响应上下文
 func setResponseCache(responseID string, items []json.RawMessage) {
 	respCache.mu.Lock()
+	// 超过上限时跳过写入，等待清理腾出空间
+	if len(respCache.store) >= responseCacheMaxItems {
+		respCache.mu.Unlock()
+		return
+	}
 	respCache.store[responseID] = &responseCacheEntry{
 		items:     items,
 		createdAt: time.Now(),
@@ -109,9 +117,27 @@ func expandPreviousResponse(codexBody []byte) ([]byte, string) {
 
 // cacheCompletedResponse 从 response.completed 事件中提取 response.id 和 response.output，
 // 与当前请求的 expanded input 合并后存入缓存。
+// 仅在响应包含 function_call 时才缓存，避免为普通对话浪费内存。
 func cacheCompletedResponse(expandedInputRaw []byte, completedData []byte) {
 	respID := gjson.GetBytes(completedData, "response.id").String()
 	if respID == "" {
+		return
+	}
+
+	// 仅在响应包含 function_call 时才缓存（普通对话无需 previous_response_id 展开）
+	output := gjson.GetBytes(completedData, "response.output")
+	if !output.IsArray() {
+		return
+	}
+	hasFunctionCall := false
+	output.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "function_call" {
+			hasFunctionCall = true
+			return false
+		}
+		return true
+	})
+	if !hasFunctionCall {
 		return
 	}
 
@@ -127,13 +153,10 @@ func cacheCompletedResponse(expandedInputRaw []byte, completedData []byte) {
 	}
 
 	// 添加响应 output items
-	output := gjson.GetBytes(completedData, "response.output")
-	if output.IsArray() {
-		output.ForEach(func(_, v gjson.Result) bool {
-			items = append(items, json.RawMessage(v.Raw))
-			return true
-		})
-	}
+	output.ForEach(func(_, v gjson.Result) bool {
+		items = append(items, json.RawMessage(v.Raw))
+		return true
+	})
 
 	if len(items) > 0 {
 		setResponseCache(respID, items)
