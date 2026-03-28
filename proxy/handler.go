@@ -390,9 +390,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.Release(account)
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
-			if resp.StatusCode == http.StatusBadRequest {
-				logBadRequest("/v1/responses", model, account.ID(), errBody)
-			}
+			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/responses",
@@ -696,9 +694,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.Release(account)
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
-			if resp.StatusCode == http.StatusBadRequest {
-				logBadRequest("/v1/chat/completions", model, account.ID(), errBody)
-			}
+			logUpstreamError("/v1/chat/completions", resp.StatusCode, model, account.ID(), errBody)
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/chat/completions",
