@@ -273,7 +273,7 @@ const (
 
 // isRetryableStatus 检查是否可重试的上游状态码
 func isRetryableStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == http.StatusUnauthorized
+	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == http.StatusUnauthorized || code == http.StatusInternalServerError
 }
 
 // Responses 处理 /v1/responses 请求（原生透传，无需协议翻译）
@@ -390,6 +390,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.Release(account)
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
+			if resp.StatusCode == http.StatusBadRequest {
+				logBadRequest("/v1/responses", model, account.ID(), errBody)
+			}
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/responses",
@@ -693,6 +696,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.Release(account)
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
+			if resp.StatusCode == http.StatusBadRequest {
+				logBadRequest("/v1/chat/completions", model, account.ID(), errBody)
+			}
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/chat/completions",
