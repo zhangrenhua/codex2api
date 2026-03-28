@@ -324,6 +324,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	if re := gjson.GetBytes(codexBody, "reasoning_effort"); re.Exists() && !gjson.GetBytes(codexBody, "reasoning.effort").Exists() {
 		codexBody, _ = sjson.SetBytes(codexBody, "reasoning.effort", re.String())
 	}
+	codexBody = clampReasoningEffort(codexBody)
 	codexBody = sanitizeServiceTierForUpstream(codexBody)
 
 	// 为缺少 description 的客户端执行工具补充默认描述（如 tool_search）
