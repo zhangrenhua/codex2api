@@ -687,6 +687,7 @@ type Store struct {
 	autoCleanRateLimited  atomic.Bool
 	autoCleanFullUsage    atomic.Bool
 	autoCleanError        atomic.Bool
+	autoCleanExpired      atomic.Bool
 	autoCleanupBatch      atomic.Bool
 	maxRetries            int64 // 请求失败最大重试次数（换号重试）
 	stopCh                chan struct{}
@@ -749,6 +750,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanRateLimited.Store(settings.AutoCleanRateLimited)
 	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
 	s.autoCleanError.Store(settings.AutoCleanError)
+	s.autoCleanExpired.Store(settings.AutoCleanExpired)
 	retries := int64(settings.MaxRetries)
 	if retries <= 0 {
 		retries = 2 // 默认重试 2 次
@@ -954,6 +956,19 @@ func (s *Store) SetAutoCleanError(enabled bool) {
 	s.autoCleanError.Store(enabled)
 }
 
+// GetAutoCleanExpired 获取是否自动清理过期账号
+func (s *Store) GetAutoCleanExpired() bool {
+	return s.autoCleanExpired.Load()
+}
+
+// SetAutoCleanExpired 设置是否自动清理过期账号（开启时立即执行一次）
+func (s *Store) SetAutoCleanExpired(enabled bool) {
+	s.autoCleanExpired.Store(enabled)
+	if enabled {
+		go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
+	}
+}
+
 // Init 初始化：从数据库加载账号
 func (s *Store) Init(ctx context.Context) error {
 	// 1. 从 PG 加载账号
@@ -1112,8 +1127,10 @@ func (s *Store) StartBackgroundRefresh() {
 					go s.CleanFullUsageAccounts(context.Background())
 				}
 			case <-expiredCleanupTicker.C:
-				// 每 15 分钟清理加入超过 30 分钟的账号
-				go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
+				// 每 15 分钟清理加入超过 30 分钟的账号（需开启开关）
+				if s.GetAutoCleanExpired() {
+					go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
+				}
 			case <-rebuildSchedulerTicker.C:
 				// 定期重建调度器以优化内存和性能
 				if s.FastSchedulerEnabled() {
