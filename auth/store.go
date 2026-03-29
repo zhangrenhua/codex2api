@@ -88,6 +88,7 @@ type Account struct {
 	TotalRequests  int64 // 累计总请求数
 	LastUsedAt     int64 // 最后使用时间（UnixNano）
 	Disabled       int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
+	AddedAt        int64 // 加入号池的时间（UnixNano），用于过期清理
 
 }
 
@@ -1010,6 +1011,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			RefreshToken: rt,
 			ProxyURL:     proxy,
 			HealthTier:   HealthTierWarm,
+			AddedAt:      row.CreatedAt.UnixNano(),
 		}
 
 		// 尝试从 credentials 恢复已有的 AT
@@ -1088,11 +1090,13 @@ func (s *Store) StartBackgroundRefresh() {
 		refreshTicker := time.NewTicker(2 * time.Minute)
 		autoCleanupTicker := time.NewTicker(30 * time.Second)
 		fullUsageCleanupTicker := time.NewTicker(5 * time.Minute)
+		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
 		// 添加定时重建 FastScheduler 以优化性能
 		rebuildSchedulerTicker := time.NewTicker(10 * time.Minute)
 		defer refreshTicker.Stop()
 		defer autoCleanupTicker.Stop()
 		defer fullUsageCleanupTicker.Stop()
+		defer expiredCleanupTicker.Stop()
 		defer rebuildSchedulerTicker.Stop()
 
 		for {
@@ -1107,6 +1111,9 @@ func (s *Store) StartBackgroundRefresh() {
 				if s.GetAutoCleanFullUsage() {
 					go s.CleanFullUsageAccounts(context.Background())
 				}
+			case <-expiredCleanupTicker.C:
+				// 每 15 分钟清理加入超过 30 分钟的账号
+				go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
 			case <-rebuildSchedulerTicker.C:
 				// 定期重建调度器以优化内存和性能
 				if s.FastSchedulerEnabled() {
@@ -1334,6 +1341,10 @@ func (s *Store) GetTestConcurrency() int {
 func (s *Store) AddAccount(acc *Account) {
 	if acc == nil {
 		return
+	}
+	// 记录加入时间（用于过期清理）
+	if atomic.LoadInt64(&acc.AddedAt) == 0 {
+		atomic.StoreInt64(&acc.AddedAt, time.Now().UnixNano())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1664,6 +1675,48 @@ func (s *Store) CleanFullUsageAccounts(ctx context.Context) int {
 
 	if cleaned > 0 {
 		log.Printf("用量清理完成: 共清理 %d 个满用量账号", cleaned)
+	}
+	return cleaned
+}
+
+// CleanExpiredAccounts 清理加入号池超过指定时长的账号（不管是否被调用过）
+func (s *Store) CleanExpiredAccounts(ctx context.Context, maxAge time.Duration) int {
+	accounts := s.Accounts()
+	cleaned := 0
+	cutoff := time.Now().Add(-maxAge).UnixNano()
+
+	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
+
+		addedAt := atomic.LoadInt64(&acc.AddedAt)
+		if addedAt == 0 || addedAt > cutoff {
+			continue // 未记录添加时间或未过期
+		}
+
+		// 跳过正在处理请求的账号
+		if atomic.LoadInt64(&acc.ActiveRequests) > 0 {
+			continue
+		}
+
+		if s.db != nil {
+			if err := s.db.SetError(ctx, acc.DBID, "deleted"); err != nil {
+				log.Printf("[账号 %d] 过期清理失败: %v", acc.DBID, err)
+				continue
+			}
+		}
+
+		s.RemoveAccount(acc.DBID)
+		log.Printf("[账号 %d] 加入超过 %v，已过期清理 (email=%s)", acc.DBID, maxAge, acc.Email)
+		if s.db != nil {
+			s.db.InsertAccountEventAsync(acc.DBID, "deleted", "clean_expired")
+		}
+		cleaned++
+	}
+
+	if cleaned > 0 {
+		log.Printf("过期清理完成: 共清理 %d 个超时账号", cleaned)
 	}
 	return cleaned
 }
