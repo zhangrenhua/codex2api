@@ -84,9 +84,40 @@ func (s *FastScheduler) Rebuild(accounts []*Account) {
 	}
 	s.positions = make(map[int64]fastSchedulerPosition, len(accounts))
 
+	// 批量插入：先全部放入桶中，不逐条排序
 	now := time.Now()
 	for _, acc := range accounts {
-		s.insertLocked(acc, now)
+		if acc == nil || acc.DBID == 0 {
+			continue
+		}
+		tier, score, limit, available := acc.fastSchedulerSnapshot(s.baseLimit, now)
+		if !available || limit <= 0 {
+			continue
+		}
+		if tier != HealthTierHealthy && tier != HealthTierWarm && tier != HealthTierRisky {
+			continue
+		}
+		s.buckets[tier] = append(s.buckets[tier], fastSchedulerEntry{
+			acc:   acc,
+			dbID:  acc.DBID,
+			score: score,
+		})
+	}
+
+	// 每个桶只排序一次 + 重建位置索引
+	for _, tier := range fastSchedulerTierOrder {
+		entries := s.buckets[tier]
+		if len(entries) == 0 {
+			continue
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].score == entries[j].score {
+				return entries[i].dbID < entries[j].dbID
+			}
+			return entries[i].score > entries[j].score
+		})
+		s.buckets[tier] = entries
+		s.rebuildPositionsLocked(tier)
 	}
 }
 
