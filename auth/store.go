@@ -693,6 +693,9 @@ type Store struct {
 	fastScheduler        atomic.Pointer[FastScheduler]
 	fastSchedulerEnabled atomic.Bool
 
+	// 智能刷新调度器
+	refreshScheduler atomic.Pointer[RefreshSchedulerIntegration]
+
 	allowRemoteMigration atomic.Bool // 是否允许远程迁移拉取账号
 }
 

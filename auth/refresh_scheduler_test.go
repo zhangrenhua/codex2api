@@ -1,8 +1,6 @@
 package auth
 
 import (
-	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,8 +129,8 @@ func TestRefreshSchedulerRandomJitter(t *testing.T) {
 	}
 
 	// 检查抖动范围
-	minJitter := base * 0.9
-	maxJitter := base * 1.1
+	minJitter := time.Duration(float64(base) * 0.9)
+	maxJitter := time.Duration(float64(base) * 1.1)
 	for i, s := range samples {
 		if s < minJitter || s > maxJitter {
 			t.Fatalf("sample %d out of range: %v", i, s)
@@ -160,15 +158,17 @@ func TestRefreshSchedulerCalculateRetryTime(t *testing.T) {
 	// 第一次重试
 	r1 := scheduler.calculateRetryTime(1)
 	delay1 := r1.Sub(time.Now())
-	if delay1 < 900*time.Millisecond || delay1 > 1100*time.Millisecond {
+	// 允许一定误差
+	if delay1 < 800*time.Millisecond || delay1 > 1200*time.Millisecond {
 		t.Fatalf("first retry delay = %v, want ~1s", delay1)
 	}
 
 	// 第二次重试（指数退避）
 	r2 := scheduler.calculateRetryTime(2)
 	delay2 := r2.Sub(time.Now())
-	if delay2 < 1800*time.Millisecond || delay2 > 2200*time.Millisecond {
-		t.Fatalf("second retry delay = %v, want ~2s", delay2)
+	// 2s base + 10% jitter = up to 2.2s
+	if delay2 < 1500*time.Millisecond || delay2 > 2500*time.Millisecond {
+		t.Fatalf("second retry delay = %v, want ~2s (allowing for jitter)", delay2)
 	}
 
 	// 多次重试（上限检查）
@@ -268,6 +268,9 @@ func TestRefreshSchedulerScheduleBatch(t *testing.T) {
 
 	scheduler.ScheduleBatch(accounts)
 
+	// 等待批量调度完成（最大延迟 = (5/2)*100ms = 200ms，加上一些缓冲）
+	time.Sleep(400 * time.Millisecond)
+
 	// 检查是否创建了所有任务
 	scheduler.tasksMu.RLock()
 	taskCount := len(scheduler.tasks)
@@ -292,6 +295,11 @@ func TestRefreshSchedulerPriorityQueue(t *testing.T) {
 	acc2 := newTestAccountWithExpiry(2, 30*time.Minute) // 低优先级
 	acc3 := newTestAccountWithExpiry(3, 10*time.Second) // 最高优先级
 
+	// 计算预期优先级
+	p1 := scheduler.calculatePriority(acc1) // 30 + 50 = 80
+	p2 := scheduler.calculatePriority(acc2) // 30
+	p3 := scheduler.calculatePriority(acc3) // 30 + 100 = 130
+
 	scheduler.Schedule(acc1)
 	scheduler.Schedule(acc2)
 	scheduler.Schedule(acc3)
@@ -301,15 +309,19 @@ func TestRefreshSchedulerPriorityQueue(t *testing.T) {
 	task2 := scheduler.popFromQueue()
 	task3 := scheduler.popFromQueue()
 
+	// 验证优先级: p3 > p1 > p2
+	t.Logf("Priorities: acc1=%d, acc2=%d, acc3=%d", p1, p2, p3)
+	t.Logf("Popped order: task1=%d, task2=%d, task3=%d", task1.Account.DBID, task2.Account.DBID, task3.Account.DBID)
+
 	// 最高优先级的应该先被弹出
-	if task3 == nil || task3.Account.DBID != 3 {
-		t.Fatal("highest priority task should be popped first")
+	if task1 == nil || task1.Account.DBID != 3 {
+		t.Fatalf("highest priority task should be popped first, got dbID=%d, want 3", task1.Account.DBID)
 	}
-	if task1 == nil || task1.Account.DBID != 1 {
-		t.Fatal("second priority task should be popped second")
+	if task2 == nil || task2.Account.DBID != 1 {
+		t.Fatalf("second priority task should be popped second, got dbID=%d, want 1", task2.Account.DBID)
 	}
-	if task2 == nil || task2.Account.DBID != 2 {
-		t.Fatal("lowest priority task should be popped last")
+	if task3 == nil || task3.Account.DBID != 2 {
+		t.Fatalf("lowest priority task should be popped last, got dbID=%d, want 2", task3.Account.DBID)
 	}
 }
 

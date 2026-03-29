@@ -3,7 +3,6 @@ package auth
 import (
 	"container/heap"
 	"context"
-	"fmt"
 	"log"
 	"math"
 	"math/rand"
