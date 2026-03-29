@@ -19,6 +19,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
 
@@ -137,6 +138,8 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(loggerMiddleware())
+	r.Use(security.SecurityHeadersMiddleware())
+	r.Use(security.RequestSizeLimiter(security.MaxRequestBodySize))
 
 	// handler 不再接收 cfg.APIKeys
 	handler := proxy.NewHandler(store, db)
@@ -223,7 +226,7 @@ func main() {
 	log.Println("已关闭")
 }
 
-// loggerMiddleware 简单日志中间件
+// loggerMiddleware 简单日志中间件（增强版，支持敏感信息脱敏）
 func loggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -238,20 +241,21 @@ func loggerMiddleware() gin.HandlerFunc {
 
 		emailStr := ""
 		if e, ok := email.(string); ok && e != "" {
-			emailStr = e
+			// 脱敏邮箱
+			emailStr = security.MaskEmail(e)
 		}
 		proxyStr := "no proxy"
 		if p, ok := proxyURL.(string); ok && p != "" {
-			proxyStr = p
+			proxyStr = security.SanitizeLog(p)
 		}
 
 		// 构建扩展标签
 		var tags []string
 		if m, ok := modelVal.(string); ok && m != "" {
-			tags = append(tags, m)
+			tags = append(tags, security.SanitizeLog(m))
 		}
 		if e, ok := effortVal.(string); ok && e != "" {
-			tags = append(tags, "effort="+e)
+			tags = append(tags, "effort="+security.SanitizeLog(e))
 		}
 		if t, ok := tierVal.(string); ok && t == "fast" {
 			tags = append(tags, "fast")

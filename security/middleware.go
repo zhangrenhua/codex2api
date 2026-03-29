@@ -194,6 +194,10 @@ func SecurityAuditLog(action, details string) {
 	safeDetails := SanitizeLog(details)
 	// Use standard log format with security prefix
 	fmt.Printf("[SECURITY] %s | %s | %s\n", time.Now().Format(time.RFC3339), action, safeDetails)
+
+	// 同时写入审计日志文件
+	logger := GetAuditLogger()
+	logger.Write("SECURITY", action, safeDetails)
 }
 
 // IsSensitiveEndpoint checks if an endpoint contains sensitive data

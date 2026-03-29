@@ -13,6 +13,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -228,7 +229,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.GET("/models", h.ListModels)
 }
 
-// authMiddleware API Key 鉴权中间件
+// authMiddleware API Key 鉴权中间件（增强版，带安全日志）
 func (h *Handler) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 如果没有配置任何密钥，跳过鉴权
@@ -250,8 +251,14 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// 清理输入
+		authHeader = security.SanitizeInput(authHeader)
+
 		key := strings.TrimPrefix(authHeader, "Bearer ")
 		if !h.isValidKey(key) {
+			// 记录安全审计日志（脱敏）
+			maskedKey := security.MaskAPIKey(key)
+			security.SecurityAuditLog("AUTH_FAILED", fmt.Sprintf("path=%s ip=%s key=%s", c.Request.URL.Path, c.ClientIP(), maskedKey))
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": gin.H{
 					"message": "无效的 API Key",
@@ -298,7 +305,7 @@ func parseUsageLimitDetails(body []byte) (usageLimitDetails, bool) {
 	}, true
 }
 
-// Responses 处理 /v1/responses 请求（原生透传，无需协议翻译）
+// Responses 处理 /v1/responses 请求（原生透传，增强输入验证）
 func (h *Handler) Responses(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := io.ReadAll(c.Request.Body)
@@ -309,10 +316,36 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 
+	// 检查请求体大小
+	if len(rawBody) > security.MaxRequestBodySize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": gin.H{"message": "请求体过大", "type": "invalid_request_error"},
+		})
+		return
+	}
+
 	model := gjson.GetBytes(rawBody, "model").String()
+
+	// 验证 model 参数
+	if err := security.ValidateModelName(model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"message": "model 参数无效", "type": "invalid_request_error"},
+		})
+		return
+	}
+
 	if model == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{"message": "model is required", "type": "invalid_request_error"},
+		})
+		return
+	}
+
+	// 检查XSS攻击
+	if security.ContainsXSS(model) {
+		security.SecurityAuditLog("XSS_ATTEMPT", fmt.Sprintf("path=%s ip=%s model=%s", c.Request.URL.Path, c.ClientIP(), security.SanitizeLog(model)))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"message": "model 参数包含非法字符", "type": "invalid_request_error"},
 		})
 		return
 	}
@@ -662,10 +695,36 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// 检查请求体大小
+	if len(rawBody) > security.MaxRequestBodySize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": gin.H{"message": "请求体过大", "type": "invalid_request_error"},
+		})
+		return
+	}
+
 	model := gjson.GetBytes(rawBody, "model").String()
 	if model == "" {
 		model = "gpt-5.4"
 	}
+
+	// 验证 model 参数
+	if err := security.ValidateModelName(model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"message": "model 参数无效", "type": "invalid_request_error"},
+		})
+		return
+	}
+
+	// 检查XSS攻击
+	if security.ContainsXSS(model) {
+		security.SecurityAuditLog("XSS_ATTEMPT", fmt.Sprintf("path=%s ip=%s model=%s", c.Request.URL.Path, c.ClientIP(), security.SanitizeLog(model)))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"message": "model 参数包含非法字符", "type": "invalid_request_error"},
+		})
+		return
+	}
+
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
