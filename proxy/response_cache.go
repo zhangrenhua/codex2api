@@ -74,8 +74,7 @@ func getResponseCache(responseID string) []json.RawMessage {
 	}
 	if time.Since(entry.createdAt) > responseCacheTTL {
 		// 同步删除过期条目，避免goroutine爆炸
-		// 先释放读锁，再获取写锁进行删除
-		respCache.mu.RUnlock()
+		// 读锁已在上方释放，直接获取写锁进行删除
 		respCache.mu.Lock()
 		// 双重检查：确认条目仍然存在且已过期
 		if e, exists := respCache.store[responseID]; exists && time.Since(e.createdAt) > responseCacheTTL {
