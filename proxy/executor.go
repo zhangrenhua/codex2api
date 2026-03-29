@@ -331,10 +331,25 @@ func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, request
 		return nil, err
 	}
 
+	// 检查 HTTP 握手响应状态
+	statusCode := http.StatusOK
+	if wsResp.HTTPResponse() != nil {
+		statusCode = wsResp.HTTPResponse().StatusCode
+		// 如果握手失败（非 2xx），返回错误响应
+		if statusCode < 200 || statusCode >= 300 {
+			wsResp.Close()
+			return &http.Response{
+				StatusCode: statusCode,
+				Header:     wsResp.HTTPResponse().Header.Clone(),
+				Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("websocket handshake failed: %d", statusCode))),
+			}, nil
+		}
+	}
+
 	// 将 WebSocket 响应包装为 http.Response
 	pr, pw := io.Pipe()
 	resp := &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: statusCode,
 		Header:     make(http.Header),
 		Body:       pr,
 	}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,22 +35,19 @@ const (
 
 	// Ping/Pong 心跳间隔
 	websocketPingInterval = 30 * time.Second
-
-	// Pong 等待超时
-	websocketPongWait = 60 * time.Second
 )
 
 // ==================== WebSocket 连接池 ====================
 
 // websocketConn 包装 WebSocket 连接，添加连接管理功能
 type websocketConn struct {
-	conn         *websocket.Conn
-	accountID    int64
-	wsURL        string
-	lastUsed     atomic.Int64 // UnixNano 时间戳
-	closed       atomic.Bool
-	mu           sync.RWMutex
-	pongDeadline time.Time
+	conn       *websocket.Conn
+	accountID  int64
+	wsURL      string
+	lastUsed   atomic.Int64 // UnixNano 时间戳
+	closed     atomic.Bool
+	mu         sync.Mutex // 保护所有写操作
+	inUse      atomic.Bool // 连接是否被租用
 }
 
 // touch 更新最后使用时间
@@ -126,8 +124,8 @@ func getPoolKey(accountID int64, wsURL string) string {
 	return fmt.Sprintf("%d|%s", accountID, wsURL)
 }
 
-// getOrCreateConn 获取或创建 WebSocket 连接
-func (p *websocketConnPool) getOrCreateConn(
+// acquireConn 从连接池获取连接并标记为租用
+func (p *websocketConnPool) acquireConn(
 	ctx context.Context,
 	account *auth.Account,
 	wsURL string,
@@ -140,8 +138,11 @@ func (p *websocketConnPool) getOrCreateConn(
 	if v, ok := p.connections.Load(key); ok {
 		wc := v.(*websocketConn)
 		if !wc.closed.Load() && !wc.isExpired() {
-			wc.touch()
-			return wc, nil, nil
+			if wc.inUse.CompareAndSwap(false, true) {
+				wc.touch()
+				return wc, nil, nil
+			}
+			// 连接已被租用，继续尝试创建新连接
 		}
 		// 连接已关闭或过期，删除旧连接
 		p.connections.Delete(key)
@@ -167,19 +168,19 @@ func (p *websocketConnPool) getOrCreateConn(
 		return nil, resp, fmt.Errorf("WebSocket 握手失败: %w", err)
 	}
 
-	// 配置连接
-	conn.EnableWriteCompression(false)
-	conn.SetPingHandler(func(appData string) error {
-		// 自动回复 Pong
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
-	})
-
 	wc := &websocketConn{
 		conn:      conn,
 		accountID: account.ID(),
 		wsURL:     wsURL,
 	}
 	wc.touch()
+	wc.inUse.Store(true)
+
+	// PongHandler 用于处理 Pong 消息，更新最后活跃时间（不加锁，仅操作原子变量）
+	conn.SetPongHandler(func(appData string) error {
+		wc.touch()
+		return nil
+	})
 
 	// 启动心跳协程
 	go p.heartbeat(wc)
@@ -187,13 +188,27 @@ func (p *websocketConnPool) getOrCreateConn(
 	// 存储新连接
 	if v, loaded := p.connections.LoadOrStore(key, wc); loaded {
 		// 已有其他协程创建了连接，关闭新连接并返回已存在的
+		wc.inUse.Store(false)
 		wc.close()
 		existing := v.(*websocketConn)
-		existing.touch()
-		return existing, resp, nil
+		if existing.inUse.CompareAndSwap(false, true) {
+			existing.touch()
+			return existing, resp, nil
+		}
+		// 已有连接也被占用了，创建一个新的专用连接
+		return wc, resp, nil
 	}
 
 	return wc, resp, nil
+}
+
+// releaseConn 归还连接至连接池
+func (p *websocketConnPool) releaseConn(wc *websocketConn) {
+	if wc == nil {
+		return
+	}
+	wc.inUse.Store(false)
+	wc.touch()
 }
 
 // heartbeat 发送 Ping 心跳保持连接活跃
@@ -208,9 +223,13 @@ func (p *websocketConnPool) heartbeat(wc *websocketConn) {
 				return
 			}
 
-			// 发送 Ping
+			// 发送 Ping（加锁保护写操作）
+			wc.mu.Lock()
 			deadline := time.Now().Add(10 * time.Second)
-			if err := wc.conn.WriteControl(websocket.PingMessage, []byte{}, deadline); err != nil {
+			err := wc.conn.WriteControl(websocket.PingMessage, []byte{}, deadline)
+			wc.mu.Unlock()
+
+			if err != nil {
 				// Ping 失败，标记连接为关闭
 				wc.close()
 				key := getPoolKey(wc.accountID, wc.wsURL)
@@ -299,7 +318,7 @@ func (e *WebsocketExecutor) ExecuteRequestViaWebsocket(
 	dialer := e.createWebsocketDialer(proxyURL)
 
 	// 获取或创建连接
-	wc, resp, err := wsConnPool.getOrCreateConn(ctx, account, wsURL, headers, dialer)
+	wc, resp, err := wsConnPool.acquireConn(ctx, account, wsURL, headers, dialer)
 	if err != nil {
 		return nil, err
 	}
@@ -308,13 +327,15 @@ func (e *WebsocketExecutor) ExecuteRequestViaWebsocket(
 	if err := e.sendRequest(wc, wsBody); err != nil {
 		// 发送失败，移除连接并重试一次
 		wsConnPool.removeConn(account.ID(), wsURL)
+		wc.inUse.Store(false)
 
-		wc, resp, err = wsConnPool.getOrCreateConn(ctx, account, wsURL, headers, dialer)
+		wc, resp, err = wsConnPool.acquireConn(ctx, account, wsURL, headers, dialer)
 		if err != nil {
 			return nil, err
 		}
 
 		if err := e.sendRequest(wc, wsBody); err != nil {
+			wsConnPool.releaseConn(wc)
 			return nil, fmt.Errorf("发送 WebSocket 请求失败: %w", err)
 		}
 	}
@@ -372,8 +393,15 @@ func (e *WebsocketExecutor) prepareWebsocketHeaders(accessToken, accountID strin
 	// Session ID
 	headers.Set("session_id", uuid.New().String())
 
-	// User-Agent 和版本
-	profile := ProfileForAccount(0) // 使用默认 profile
+	// User-Agent 和版本 - 根据账号 ID 确定性地选择 profile
+	var accountIDInt int64
+	if accountID != "" {
+		// 尝试解析账号 ID
+		if id, err := strconv.ParseInt(accountID, 10, 64); err == nil {
+			accountIDInt = id
+		}
+	}
+	profile := ProfileForAccount(accountIDInt)
 	headers.Set("User-Agent", profile.UserAgent)
 	headers.Set("Version", profile.Version)
 
@@ -491,7 +519,7 @@ func (r *WebsocketResponse) handleMessage(payload []byte, callback func(data []b
 
 	// 调用回调
 	if !callback(payload) {
-		return nil
+		return io.EOF
 	}
 
 	// 检查是否是终止事件
@@ -542,7 +570,7 @@ func normalizeCompletionEvent(payload []byte) []byte {
 	return payload
 }
 
-// Close 关闭响应
+// Close 关闭响应并归还连接至连接池
 func (r *WebsocketResponse) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -553,9 +581,9 @@ func (r *WebsocketResponse) Close() error {
 
 	r.closed = true
 
-	// 从连接池移除
+	// 归还连接至连接池（而非销毁）
 	if r.conn != nil {
-		wsConnPool.removeConn(r.conn.accountID, r.conn.wsURL)
+		wsConnPool.releaseConn(r.conn)
 	}
 
 	return nil
