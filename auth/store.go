@@ -971,7 +971,7 @@ func (s *Store) SetAutoCleanExpired(enabled bool) {
 
 // Init 初始化：从数据库加载账号
 func (s *Store) Init(ctx context.Context) error {
-	// 1. 从 PG 加载账号
+	// 1. 从数据库加载账号到内存
 	if err := s.loadFromDB(ctx); err != nil {
 		return err
 	}
@@ -981,23 +981,16 @@ func (s *Store) Init(ctx context.Context) error {
 		return nil
 	}
 
-	// 2. 并行刷新所有账号的 AT
-	s.parallelRefreshAll(ctx)
 	s.rebuildFastScheduler()
 
-	successCount := 0
+	// 2. 统计可用账号，RT 账号的刷新交给 StartBackgroundRefresh 处理
+	available := 0
 	for _, acc := range s.accounts {
 		if acc.IsAvailable() {
-			successCount++
+			available++
 		}
 	}
-
-	if successCount == 0 {
-		log.Println("⚠ 所有账号刷新失败，服务仍将启动")
-		return nil
-	}
-
-	log.Printf("账号初始化完成: %d/%d 成功", successCount, len(s.accounts))
+	log.Printf("账号初始化完成: %d/%d 可用", available, len(s.accounts))
 	return nil
 }
 
@@ -1697,45 +1690,96 @@ func (s *Store) CleanFullUsageAccounts(ctx context.Context) int {
 }
 
 // CleanExpiredAccounts 清理加入号池超过指定时长的账号（不管是否被调用过）
+// 批量操作优化：先收集所有过期 ID，再一次性完成数据库更新和内存移除
 func (s *Store) CleanExpiredAccounts(ctx context.Context, maxAge time.Duration) int {
 	accounts := s.Accounts()
-	cleaned := 0
 	cutoff := time.Now().Add(-maxAge).UnixNano()
 
+	// 1. 收集所有需要清理的账号 ID
+	var expiredIDs []int64
 	for _, acc := range accounts {
 		if acc == nil {
 			continue
 		}
-
 		addedAt := atomic.LoadInt64(&acc.AddedAt)
 		if addedAt == 0 || addedAt > cutoff {
-			continue // 未记录添加时间或未过期
+			continue
 		}
-
-		// 跳过正在处理请求的账号
 		if atomic.LoadInt64(&acc.ActiveRequests) > 0 {
 			continue
 		}
+		expiredIDs = append(expiredIDs, acc.DBID)
+	}
 
-		if s.db != nil {
-			if err := s.db.SetError(ctx, acc.DBID, "deleted"); err != nil {
-				log.Printf("[账号 %d] 过期清理失败: %v", acc.DBID, err)
-				continue
-			}
-		}
+	if len(expiredIDs) == 0 {
+		return 0
+	}
 
-		s.RemoveAccount(acc.DBID)
-		log.Printf("[账号 %d] 加入超过 %v，已过期清理 (email=%s)", acc.DBID, maxAge, acc.Email)
-		if s.db != nil {
-			s.db.InsertAccountEventAsync(acc.DBID, "deleted", "clean_expired")
+	log.Printf("过期清理: 发现 %d 个超时账号，开始批量处理", len(expiredIDs))
+
+	// 2. 批量更新数据库状态
+	if s.db != nil {
+		if err := s.db.BatchSetError(ctx, expiredIDs, "deleted"); err != nil {
+			log.Printf("过期清理: 批量更新数据库失败: %v，回退逐条处理", err)
+			return s.cleanExpiredFallback(ctx, expiredIDs)
 		}
+	}
+
+	// 3. 批量从内存池移除
+	s.RemoveAccounts(expiredIDs)
+
+	// 4. 批量写入事件日志（异步）
+	if s.db != nil {
+		s.db.BatchInsertAccountEventsAsync(expiredIDs, "deleted", "clean_expired")
+	}
+
+	log.Printf("过期清理完成: 共清理 %d 个超时账号", len(expiredIDs))
+	return len(expiredIDs)
+}
+
+// cleanExpiredFallback 批量操作失败时逐条回退处理
+func (s *Store) cleanExpiredFallback(ctx context.Context, ids []int64) int {
+	cleaned := 0
+	for _, id := range ids {
+		if err := s.db.SetError(ctx, id, "deleted"); err != nil {
+			log.Printf("[账号 %d] 过期清理失败: %v", id, err)
+			continue
+		}
+		s.RemoveAccount(id)
+		s.db.InsertAccountEventAsync(id, "deleted", "clean_expired")
 		cleaned++
 	}
-
 	if cleaned > 0 {
-		log.Printf("过期清理完成: 共清理 %d 个超时账号", cleaned)
+		log.Printf("过期清理(回退): 共清理 %d 个超时账号", cleaned)
 	}
 	return cleaned
+}
+
+// RemoveAccounts 批量从内存池移除账号（一次加锁、一次遍历，避免 O(n²)）
+func (s *Store) RemoveAccounts(dbIDs []int64) {
+	if len(dbIDs) == 0 {
+		return
+	}
+
+	removeSet := make(map[int64]struct{}, len(dbIDs))
+	for _, id := range dbIDs {
+		removeSet[id] = struct{}{}
+	}
+
+	s.mu.Lock()
+	kept := s.accounts[:0]
+	for _, acc := range s.accounts {
+		if _, remove := removeSet[acc.DBID]; remove {
+			s.fastSchedulerRemove(acc.DBID)
+			if scheduler := s.GetRefreshScheduler(); scheduler != nil {
+				scheduler.CancelTask(acc.DBID)
+			}
+		} else {
+			kept = append(kept, acc)
+		}
+	}
+	s.accounts = kept
+	s.mu.Unlock()
 }
 
 func (s *Store) parallelProbeUsage(ctx context.Context) {

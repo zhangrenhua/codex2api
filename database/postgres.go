@@ -1484,6 +1484,71 @@ func (db *DB) SetError(ctx context.Context, id int64, errorMsg string) error {
 	return err
 }
 
+// BatchSetError 批量标记账号错误状态，分批执行避免 SQL 参数过多
+func (db *DB) BatchSetError(ctx context.Context, ids []int64, errorMsg string) error {
+	const batchSize = 500
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[i:end]
+
+		// 构建 $2, $3, ... 占位符（$1 留给 errorMsg）
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)+1)
+		args = append(args, errorMsg)
+		for j, id := range batch {
+			placeholders[j] = fmt.Sprintf("$%d", j+2)
+			args = append(args, id)
+		}
+
+		query := fmt.Sprintf(
+			`UPDATE accounts SET status = 'error', error_message = $1, cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (%s)`,
+			strings.Join(placeholders, ","),
+		)
+		if _, err := db.conn.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("batch %d-%d failed: %w", i, end, err)
+		}
+	}
+	return nil
+}
+
+// BatchInsertAccountEventsAsync 批量异步插入账号事件
+func (db *DB) BatchInsertAccountEventsAsync(ids []int64, eventType string, source string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		const batchSize = 500
+		for i := 0; i < len(ids); i += batchSize {
+			end := i + batchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			batch := ids[i:end]
+
+			// 构建 VALUES ($1,$2,$3), ($4,$2,$3), ...
+			placeholders := make([]string, len(batch))
+			args := make([]interface{}, 0, len(batch)+2)
+			args = append(args, eventType, source) // $1=eventType, $2=source
+			for j, id := range batch {
+				paramIdx := j + 3 // $3, $4, ...
+				placeholders[j] = fmt.Sprintf("($%d, $1, $2)", paramIdx)
+				args = append(args, id)
+			}
+
+			query := fmt.Sprintf(
+				`INSERT INTO account_events (account_id, event_type, source) VALUES %s`,
+				strings.Join(placeholders, ","),
+			)
+			if _, err := db.conn.ExecContext(ctx, query, args...); err != nil {
+				log.Printf("[账号事件] 批量插入失败 (%d 条): %v", len(batch), err)
+			}
+		}
+	}()
+}
+
 // ClearError 清除账号错误状态
 func (db *DB) ClearError(ctx context.Context, id int64) error {
 	query := `UPDATE accounts SET status = 'active', error_message = '', cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
