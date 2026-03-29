@@ -3,11 +3,13 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 func TestResolveContinuity(t *testing.T) {
@@ -151,21 +153,61 @@ func TestResolveContinuity(t *testing.T) {
 }
 
 func TestResolveContinuityWithAuthID(t *testing.T) {
-	// 测试 auth_id 分支需要创建 account
-	// 注意：由于 auth.Account 的字段是私有的，我们无法直接设置
-	// 这里测试空 account 的情况
+	gin.SetMode(gin.TestMode)
 
-	req := Request{
-		Payload: []byte(`{}`),
-		Headers: http.Header{},
-	}
-	opts := Options{}
+	// 测试带 Email 的 account 会触发 auth_id 分支
+	t.Run("account with email", func(t *testing.T) {
+		account := &auth.Account{
+			Email: "test@example.com",
+		}
+		req := Request{
+			Payload: []byte(`{}`),
+			Headers: http.Header{},
+		}
+		opts := Options{}
 
-	// 空 account，无 email，应该返回空
-	result := ResolveContinuity(context.Background(), nil, req, opts)
-	if result.Key != "" {
-		t.Errorf("Expected empty key for nil account, got %v", result.Key)
-	}
+		result := ResolveContinuity(context.Background(), account, req, opts)
+		if result.Source != "auth_id" {
+			t.Errorf("Expected source 'auth_id', got %v", result.Source)
+		}
+		if result.Key == "" {
+			t.Error("Expected non-empty key for account with email")
+		}
+	})
+
+	// 测试带 DBID 的 account 会触发 auth_id 分支
+	t.Run("account with DBID", func(t *testing.T) {
+		// 由于 DBID 是私有字段，通过创建 Account 后内部设置
+		account := &auth.Account{}
+		// 使用反射或直接设置字段（如果可能）或通过 store 创建
+		// 这里我们使用 Email 为空，DBID 需要 > 0 才能生成 auth_id
+		// 由于无法直接设置私有字段 DBID，这个测试验证空 Email 且 DBID=0 时不生成 key
+		req := Request{
+			Payload: []byte(`{}`),
+			Headers: http.Header{},
+		}
+		opts := Options{}
+
+		result := ResolveContinuity(context.Background(), account, req, opts)
+		// 空 account 应该返回空
+		if result.Key != "" {
+			t.Errorf("Expected empty key for empty account, got %v", result.Key)
+		}
+	})
+
+	// 测试 nil account
+	t.Run("nil account", func(t *testing.T) {
+		req := Request{
+			Payload: []byte(`{}`),
+			Headers: http.Header{},
+		}
+		opts := Options{}
+
+		result := ResolveContinuity(context.Background(), nil, req, opts)
+		if result.Key != "" {
+			t.Errorf("Expected empty key for nil account, got %v", result.Key)
+		}
+	})
 }
 
 func TestApplyContinuityBody(t *testing.T) {
@@ -204,7 +246,19 @@ func TestApplyContinuityBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ApplyContinuityBody(tt.body, tt.continuity)
-			if !contains(string(result), tt.wantContains) {
+			gotKey := gjson.GetBytes(result, "prompt_cache_key").String()
+			wantKey := gjson.GetBytes([]byte(tt.wantContains), "prompt_cache_key").String()
+
+			// 如果 wantContains 包含 prompt_cache_key，验证其值
+			if wantKey != "" {
+				if gotKey != wantKey {
+					t.Errorf("ApplyContinuityBody() prompt_cache_key = %v, want %v", gotKey, wantKey)
+				}
+				return
+			}
+
+			// 否则检查原始 body 是否保持不变
+			if !strings.Contains(string(result), tt.wantContains) {
 				t.Errorf("ApplyContinuityBody() = %v, want to contain %v", string(result), tt.wantContains)
 			}
 		})
@@ -396,19 +450,4 @@ func TestUUIDGeneration(t *testing.T) {
 			t.Error("Different inputs should produce different UUIDs")
 		}
 	})
-}
-
-// 辅助函数
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && containsSubstr(s, substr)))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

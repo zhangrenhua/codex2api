@@ -72,14 +72,12 @@ func getGinContext(ctx context.Context) *gin.Context {
 	if ctx == nil {
 		return nil
 	}
-	// gin.Context 通常存储在 key "gin-context" 或可以直接类型断言
+	// gin.Context 通常存储在 key "gin-context"
 	if c, ok := ctx.Value("gin-context").(*gin.Context); ok {
 		return c
 	}
-	// 尝试直接类型断言 context 本身
-	if c, ok := ctx.(*gin.Context); ok {
-		return c
-	}
+	// *gin.Context 本身不实现 context.Context，不能直接类型断言
+	// 必须通过存储在 context 中的 key 获取
 	return nil
 }
 
@@ -109,14 +107,26 @@ func ResolveContinuity(ctx context.Context, account *auth.Account, req Request, 
 	}
 
 	// 4. gin context 中的 apiKey（client_principal）
+	// 优先从 Authorization header 读取
+	apiKey := ""
 	if ginCtx := getGinContext(ctx); ginCtx != nil {
-		if v, exists := ginCtx.Get("apiKey"); exists && v != nil {
-			if trimmed := principalString(v); trimmed != "" {
-				return Continuity{
-					Key:    uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+trimmed)).String(),
-					Source: "client_principal",
-				}
+		// 尝试从 Authorization header 读取
+		authHeader := ginCtx.GetHeader("Authorization")
+		if authHeader != "" {
+			apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+			apiKey = strings.TrimSpace(apiKey)
+		}
+		// 回退：尝试从 gin context 中获取（如果中间件设置了）
+		if apiKey == "" {
+			if v, exists := ginCtx.Get("apiKey"); exists && v != nil {
+				apiKey = principalString(v)
 			}
+		}
+	}
+	if apiKey != "" {
+		return Continuity{
+			Key:    uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+apiKey)).String(),
+			Source: "client_principal",
 		}
 	}
 
@@ -125,7 +135,10 @@ func ResolveContinuity(ctx context.Context, account *auth.Account, req Request, 
 		account.Mu().RLock()
 		authID := strings.TrimSpace(account.Email)
 		if authID == "" {
-			authID = fmt.Sprintf("%d", account.ID())
+			// 只有当 DBID > 0 时才使用 ID 作为 fallback
+			if account.DBID > 0 {
+				authID = fmt.Sprintf("%d", account.DBID)
+			}
 		}
 		account.Mu().RUnlock()
 
