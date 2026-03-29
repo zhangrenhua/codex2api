@@ -24,6 +24,7 @@ type Handler struct {
 	store      *auth.Store
 	configKeys map[string]bool // 配置文件中的静态 key
 	db         *database.DB
+	deviceCfg  *DeviceProfileConfig // 设备指纹配置
 
 	// 动态 key 缓存
 	dbKeysMu    sync.RWMutex
@@ -39,12 +40,18 @@ type usageLimitDetails struct {
 }
 
 // NewHandler 创建处理器
-func NewHandler(store *auth.Store, db *database.DB) *Handler {
+func NewHandler(store *auth.Store, db *database.DB, deviceCfg *DeviceProfileConfig) *Handler {
 	return &Handler{
 		store:      store,
 		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
 		db:         db,
+		deviceCfg:  deviceCfg,
 	}
+}
+
+// NewHandlerWithDeviceProfile 创建处理器（带设备指纹配置）
+func NewHandlerWithDeviceProfile(store *auth.Store, db *database.DB, deviceCfg *DeviceProfileConfig) *Handler {
+	return NewHandler(store, db, deviceCfg)
 }
 
 // refreshDBKeys 从数据库刷新密钥缓存（5 分钟）
@@ -402,12 +409,18 @@ func (h *Handler) Responses(c *gin.Context) {
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
 
-		// 设备指纹配置（可以从配置文件或数据库加载）
-		deviceCfg := &DeviceProfileConfig{
-			StabilizeDeviceProfile: false, // 默认关闭，可以通过配置开启
+		// 使用注入的设备指纹配置
+		deviceCfg := h.deviceCfg
+		if deviceCfg == nil {
+			deviceCfg = &DeviceProfileConfig{
+				StabilizeDeviceProfile: false, // 默认关闭
+			}
 		}
 
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg)
+		// 透传下游请求头用于指纹学习
+		downstreamHeaders := c.Request.Header.Clone()
+
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -724,12 +737,18 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
 
-		// 设备指纹配置（可以从配置文件或数据库加载）
-		deviceCfg := &DeviceProfileConfig{
-			StabilizeDeviceProfile: false, // 默认关闭，可以通过配置开启
+		// 使用注入的设备指纹配置
+		deviceCfg := h.deviceCfg
+		if deviceCfg == nil {
+			deviceCfg = &DeviceProfileConfig{
+				StabilizeDeviceProfile: false, // 默认关闭
+			}
 		}
 
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg)
+		// 透传下游请求头用于指纹学习
+		downstreamHeaders := c.Request.Header.Clone()
+
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {

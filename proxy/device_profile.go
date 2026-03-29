@@ -96,6 +96,11 @@ func IsDeviceProfileStabilizationEnabled(cfg *DeviceProfileConfig) bool {
 }
 
 func defaultDeviceProfile(cfg *DeviceProfileConfig) deviceProfile {
+	// 如果 cfg 为 nil，使用默认空配置兜底
+	if cfg == nil {
+		cfg = &DeviceProfileConfig{}
+	}
+
 	hdrDefault := func(cfgVal, fallback string) string {
 		if strings.TrimSpace(cfgVal) != "" {
 			return strings.TrimSpace(cfgVal)
@@ -232,13 +237,13 @@ func firstNonEmptyHeader(headers http.Header, name, fallback string) string {
 }
 
 // deviceProfileScopeKey 生成设备指纹作用域键
-// 优先使用 auth ID，其次是 API key，最后是 global
+// 优先使用 apiKey（细粒度控制），其次是 auth ID（账号级），最后是 global
 func deviceProfileScopeKey(account *auth.Account, apiKey string) string {
 	switch {
-	case account != nil && account.ID() != 0:
-		return "auth:" + strconv.FormatInt(account.ID(), 10)
 	case strings.TrimSpace(apiKey) != "":
 		return "api_key:" + strings.TrimSpace(apiKey)
+	case account != nil && account.ID() != 0:
+		return "auth:" + strconv.FormatInt(account.ID(), 10)
 	default:
 		return "global"
 	}

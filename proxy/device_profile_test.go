@@ -371,6 +371,12 @@ func TestDeviceProfileScopeKey(t *testing.T) {
 			apiKey: "",
 			want:   "global",
 		},
+		{
+			name:   "api key takes priority over account",
+			account: &auth.Account{}, // account.ID() == 0
+			apiKey: "sk-priority",
+			want:   "api_key:sk-priority",
+		},
 	}
 
 	for _, tt := range tests {
