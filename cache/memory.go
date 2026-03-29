@@ -91,8 +91,11 @@ func (tc *MemoryTokenCache) SetAccessToken(ctx context.Context, accountID int64,
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	expiresAt := time.Time{}
+	var expiresAt time.Time
 	if ttl > 0 {
+		expiresAt = time.Now().Add(ttl)
+	} else if ttl < 0 {
+		// Negative TTL means already expired - set to past time
 		expiresAt = time.Now().Add(ttl)
 	}
 	tc.tokens[accountID] = memoryTokenEntry{
