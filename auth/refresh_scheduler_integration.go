@@ -194,7 +194,7 @@ func (s *Store) InitRefreshSchedulerFromEnv() {
 	if v := getEnvInt("REFRESH_BATCH_SIZE", 0); v > 0 {
 		config.BatchSize = v
 	}
-	config.EnableBatchOptimize = truthyEnv(getEnv("REFRESH_BATCH_OPTIMIZE", "true"))
+	config.EnableBatchOptimize = truthyEnv(refreshGetEnv("REFRESH_BATCH_OPTIMIZE", "true"))
 
 	s.EnableRefreshScheduler(config)
 }
@@ -202,15 +202,15 @@ func (s *Store) InitRefreshSchedulerFromEnv() {
 // refreshSchedulerEnabledFromEnv 检查环境变量是否启用刷新调度器
 func refreshSchedulerEnabledFromEnv() bool {
 	for _, key := range []string{"REFRESH_SCHEDULER_ENABLED", "SMART_REFRESH_ENABLED"} {
-		if truthyEnv(getEnv(key, "")) {
+		if truthyEnv(refreshGetEnv(key, "")) {
 			return true
 		}
 	}
 	return false
 }
 
-// getEnv 获取环境变量
-func getEnv(key, defaultValue string) string {
+// refreshGetEnv 获取环境变量
+func refreshGetEnv(key, defaultValue string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
