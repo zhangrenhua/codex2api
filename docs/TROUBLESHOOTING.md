@@ -403,31 +403,30 @@ fi
 # 实时监控错误
 docker compose logs -f codex2api | grep -i "error\|fail\|panic"
 
-# 统计状态码分布
-docker compose logs codex2api | grep -oP "status":\s*\K\d+ | sort | uniq -c
+# 统计状态码分布（按日志示例，第 5 列为 HTTP 状态码）
+docker compose logs codex2api | awk '{print $5}' | sort | uniq -c | sort -rn
 
-# 查找慢请求
-docker compose logs codex2api | awk '/latency/ {print $0}' | sort -k3 -n | tail -20
+# 查找慢请求（按日志示例，第 6 列为延迟，如 523ms；这里筛选 > 1000ms 的请求）
+docker compose logs codex2api | awk '{lat=$6; gsub(/ms/,"",lat); if (lat+0 > 1000) print $0}' | sort -k6,6n | tail -20
 
-# 统计账号错误
-docker compose logs codex2api | grep -oP "account\s*\K\d+" | sort | uniq -c | sort -rn
+# 统计账号请求量（按日志示例，邮箱在方括号中，且包含 @）
+docker compose logs codex2api | awk '{for(i=1;i<=NF;i++){if($i ~ /@/){gsub(/[\[\]]/,"",$i); print $i}}}' | sort | uniq -c | sort -rn
 ```
 
 ### 日志字段说明
 
 ```
-[2024-01-01 12:00:00] [INFO] POST /v1/chat/completions 200 523ms gpt-5.4 effort=medium [user@example.com] [proxy1]
-│                    │      │   │                        │   │     │          │          │                │
-│                    │      │   │                        │   │     │          │          │                └── 使用的代理
-│                    │      │   │                        │   │     │          │          └── 账号邮箱
-│                    │      │   │                        │   │     │          └── 推理强度标签
-│                    │      │   │                        │   │     └── 模型名称
-│                    │      │   │                        │   └── 响应时间
-│                    │      │   │                        └── HTTP 状态码
-│                    │      │   └── 请求路径
-│                    │      └── HTTP 方法
-│                    └── 日志级别
-└── 时间戳
+2024/01/01 12:00:00 api/server.go:123: POST /v1/chat/completions 200 523ms gpt-5.4 effort=medium [user@example.com] [proxy1]
+│                 │                │    │                        │   │     │          │          │                │
+│                 │                │    │                        │   │     │          │          │                └── 使用的代理
+│                 │                │    │                        │   │     │          │          └── 账号邮箱
+│                 │                │    │                        │   │     │          └── 推理强度标签
+│                 │                │    │                        │   │     └── 模型名称
+│                 │                │    │                        │   └── 响应时间
+│                 │                │    │                        └── HTTP 状态码
+│                 │                │    └── 请求路径
+│                 │                └── HTTP 方法
+│                 └── 源码文件和行号
 ```
 
 ### 诊断脚本

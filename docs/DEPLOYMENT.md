@@ -234,9 +234,6 @@ TZ=Asia/Shanghai
 **可选配置:**
 
 ```bash
-# 全局代理（所有请求通过此代理）
-CODEX_PROXY_URL=http://proxy.example.com:8080
-
 # 快速调度器
 FAST_SCHEDULER_ENABLED=true
 ```

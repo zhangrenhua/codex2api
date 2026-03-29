@@ -162,7 +162,7 @@ data: [DONE]
 |------|------|------|------|
 | model | string | 是 | 模型名称 |
 | input | array/string | 是 | 输入内容（支持数组或字符串） |
-| stream | boolean | 否 | 是否启用流式响应，默认 true |
+| stream | boolean | 否 | 是否启用流式响应，默认 false。仅当显式传 `stream=true` 时返回 SSE（流式响应），否则返回普通 JSON。 |
 | reasoning.effort | string | 否 | 推理强度: low/medium/high |
 | service_tier | string | 否 | 服务等级: fast/auto |
 | include | array | 否 | 包含的额外字段 |
@@ -923,10 +923,13 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 | gpt-5-codex-mini | Codex 轻量 |
 | gpt-5.1 | 旧版本 |
 | gpt-5.1-codex | 旧版本 Codex |
+| gpt-5.1-codex-mini | 旧版本 Codex 轻量 |
+| gpt-5.1-codex-max | 旧版本 Codex 最大版 |
 | gpt-5.2 | 中间版本 |
 | gpt-5.2-codex | 中间版本 Codex |
 | gpt-5.3-codex | 较新版本 |
 
+> 提示：实际支持的模型以 `/v1/models` 接口返回为准，文档可能未及时更新。
 ---
 
 ## 错误码
