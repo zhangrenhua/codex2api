@@ -190,12 +190,59 @@ func (db *DB) migrate(ctx context.Context) error {
 		proxy_url     VARCHAR(500) DEFAULT '',
 		status        VARCHAR(50) DEFAULT 'active',
 		error_message TEXT DEFAULT '',
-		created_at    TIMESTAMP DEFAULT NOW(),
-		updated_at    TIMESTAMP DEFAULT NOW()
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		updated_at    TIMESTAMPTZ DEFAULT NOW()
 	);
 
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_reason VARCHAR(50) DEFAULT '';
-	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMP NULL;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ NULL;
+	ALTER TABLE accounts ALTER COLUMN created_at SET DEFAULT NOW();
+	ALTER TABLE accounts ALTER COLUMN updated_at SET DEFAULT NOW();
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'accounts'
+			  AND column_name = 'created_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE accounts
+				ALTER COLUMN created_at TYPE TIMESTAMPTZ
+				USING created_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'accounts'
+			  AND column_name = 'updated_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE accounts
+				ALTER COLUMN updated_at TYPE TIMESTAMPTZ
+				USING updated_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'accounts'
+			  AND column_name = 'cooldown_until'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE accounts
+				ALTER COLUMN cooldown_until TYPE TIMESTAMPTZ
+				USING cooldown_until AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
 
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
 	CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
@@ -212,8 +259,24 @@ func (db *DB) migrate(ctx context.Context) error {
 		total_tokens   INT DEFAULT 0,
 		status_code    INT DEFAULT 0,
 		duration_ms    INT DEFAULT 0,
-		created_at     TIMESTAMP DEFAULT NOW()
+		created_at     TIMESTAMPTZ DEFAULT NOW()
 	);
+	ALTER TABLE usage_logs ALTER COLUMN created_at SET DEFAULT NOW();
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'usage_logs'
+			  AND column_name = 'created_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE usage_logs
+				ALTER COLUMN created_at TYPE TIMESTAMPTZ
+				USING created_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
 
 	-- 复合索引
 	CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);
@@ -236,8 +299,24 @@ func (db *DB) migrate(ctx context.Context) error {
 		id         SERIAL PRIMARY KEY,
 		name       VARCHAR(255) DEFAULT '',
 		key        VARCHAR(255) NOT NULL UNIQUE,
-		created_at TIMESTAMP DEFAULT NOW()
+		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
+	ALTER TABLE api_keys ALTER COLUMN created_at SET DEFAULT NOW();
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'api_keys'
+			  AND column_name = 'created_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE api_keys
+				ALTER COLUMN created_at TYPE TIMESTAMPTZ
+				USING created_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
 
 	CREATE TABLE IF NOT EXISTS system_settings (
 		id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -269,8 +348,24 @@ func (db *DB) migrate(ctx context.Context) error {
 		url        VARCHAR(500) NOT NULL UNIQUE,
 		label      VARCHAR(255) DEFAULT '',
 		enabled    BOOLEAN DEFAULT TRUE,
-		created_at TIMESTAMP DEFAULT NOW()
+		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
+	ALTER TABLE proxies ALTER COLUMN created_at SET DEFAULT NOW();
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'proxies'
+			  AND column_name = 'created_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE proxies
+				ALTER COLUMN created_at TYPE TIMESTAMPTZ
+				USING created_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_ip VARCHAR(100) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_location VARCHAR(255) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_latency_ms INT DEFAULT 0;
@@ -280,8 +375,24 @@ func (db *DB) migrate(ctx context.Context) error {
 		account_id INT NOT NULL DEFAULT 0,
 		event_type VARCHAR(20) NOT NULL,
 		source     VARCHAR(30) DEFAULT '',
-		created_at TIMESTAMP DEFAULT NOW()
+		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
+	ALTER TABLE account_events ALTER COLUMN created_at SET DEFAULT NOW();
+	DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'account_events'
+			  AND column_name = 'created_at'
+			  AND data_type = 'timestamp without time zone'
+		) THEN
+			ALTER TABLE account_events
+				ALTER COLUMN created_at TYPE TIMESTAMPTZ
+				USING created_at AT TIME ZONE current_setting('TIMEZONE');
+		END IF;
+	END $$;
 	CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);
 	CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);
 	`
