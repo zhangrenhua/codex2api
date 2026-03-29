@@ -62,7 +62,7 @@ func NewWsConnection(conn *websocket.Conn, session *Session, wsURL string) *WsCo
 		URL:     wsURL,
 	}
 	wc.lastUsed.Store(time.Now().UnixNano())
-	wc.state.Store(StateConnected)
+	wc.state.Store(int32(StateConnected))
 	return wc
 }
 
@@ -79,13 +79,13 @@ func (wc *WsConnection) IsExpired() bool {
 
 // IsConnected 检查是否已连接
 func (wc *WsConnection) IsConnected() bool {
-	return wc.state.Load() == StateConnected
+	return wc.state.Load() == int32(StateConnected)
 }
 
 // Close 安全关闭连接
 func (wc *WsConnection) Close() error {
-	if wc.state.CompareAndSwap(StateConnected, StateClosing) ||
-		wc.state.CompareAndSwap(StateConnecting, StateClosing) {
+	if wc.state.CompareAndSwap(int32(StateConnected), int32(StateClosing)) ||
+		wc.state.CompareAndSwap(int32(StateConnecting), int32(StateClosing)) {
 		// 调用断开回调
 		if wc.onDisconnected != nil && wc.session != nil {
 			wc.onDisconnected(wc.session.AccountID)

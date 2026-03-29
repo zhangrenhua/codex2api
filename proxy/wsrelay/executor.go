@@ -14,7 +14,6 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
