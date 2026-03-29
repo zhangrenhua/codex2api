@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -55,7 +56,26 @@ func TestWriteMessage(t *testing.T) {
 	}
 }
 
-// ==================== Response Types Tests ====================
+func TestWriteInternalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	writeInternalError(ctx, fmt.Errorf("database connection failed"))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+
+	var resp errorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+	if resp.Error != "database connection failed" {
+		t.Errorf("error = %q, want 'database connection failed'", resp.Error)
+	}
+}
 
 func TestStatsResponse(t *testing.T) {
 	resp := statsResponse{
@@ -65,17 +85,29 @@ func TestStatsResponse(t *testing.T) {
 		TodayRequests: 1000,
 	}
 
-	if resp.Total != 10 {
-		t.Errorf("Total = %d, want 10", resp.Total)
+	// Verify JSON serialization includes the expected fields with correct keys
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal statsResponse: %v", err)
 	}
-	if resp.Available != 8 {
-		t.Errorf("Available = %d, want 8", resp.Available)
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal statsResponse JSON: %v", err)
 	}
-	if resp.Error != 2 {
-		t.Errorf("Error = %d, want 2", resp.Error)
+
+	// Check that JSON keys match expected field names
+	if total, ok := decoded["total"]; !ok || total != float64(10) {
+		t.Errorf("expected JSON to contain \"total\" field = 10, got %v", total)
 	}
-	if resp.TodayRequests != 1000 {
-		t.Errorf("TodayRequests = %d, want 1000", resp.TodayRequests)
+	if available, ok := decoded["available"]; !ok || available != float64(8) {
+		t.Errorf("expected JSON to contain \"available\" field = 8, got %v", available)
+	}
+	if errorField, ok := decoded["error"]; !ok || errorField != float64(2) {
+		t.Errorf("expected JSON to contain \"error\" field = 2, got %v", errorField)
+	}
+	if todayRequests, ok := decoded["today_requests"]; !ok || todayRequests != float64(1000) {
+		t.Errorf("expected JSON to contain \"today_requests\" field = 1000, got %v", todayRequests)
 	}
 }
 
@@ -421,8 +453,13 @@ func TestUsageLogsResponse(t *testing.T) {
 		Logs: nil, // Would contain actual log entries
 	}
 
-	// Just verify the structure exists
-	_ = resp
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal usageLogsResponse: %v", err)
+	}
+	if !json.Valid(data) {
+		t.Fatalf("marshaled usageLogsResponse produced invalid JSON: %s", string(data))
+	}
 }
 
 // ==================== API Keys Response Tests ====================
@@ -432,8 +469,20 @@ func TestAPIKeysResponse(t *testing.T) {
 		Keys: nil, // Would contain actual key rows
 	}
 
-	// Just verify the structure exists
-	_ = resp
+	// Verify JSON serialization includes the expected "keys" field
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal apiKeysResponse: %v", err)
+	}
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal apiKeysResponse JSON: %v", err)
+	}
+
+	if _, ok := decoded["keys"]; !ok {
+		t.Errorf("expected JSON to contain \"keys\" field, got %v", decoded)
+	}
 }
 
 // ==================== Benchmarks ====================

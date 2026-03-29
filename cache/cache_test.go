@@ -86,20 +86,28 @@ func TestMemoryTokenCache_DeleteAccessToken(t *testing.T) {
 	ctx := context.Background()
 
 	// Set and verify
-	tc.SetAccessToken(ctx, 1, "test-token", time.Hour)
-	token, _ := tc.GetAccessToken(ctx, 1)
+	if err := tc.SetAccessToken(ctx, 1, "test-token", time.Hour); err != nil {
+		t.Fatalf("SetAccessToken() error = %v", err)
+	}
+	token, err := tc.GetAccessToken(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
 	if token != "test-token" {
 		t.Fatal("Token should exist before deletion")
 	}
 
 	// Delete
-	err := tc.DeleteAccessToken(ctx, 1)
+	err = tc.DeleteAccessToken(ctx, 1)
 	if err != nil {
 		t.Fatalf("DeleteAccessToken() error = %v", err)
 	}
 
 	// Verify deletion
-	token, _ = tc.GetAccessToken(ctx, 1)
+	token, err = tc.GetAccessToken(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
 	if token != "" {
 		t.Fatal("Token should be deleted")
 	}
