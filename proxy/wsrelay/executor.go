@@ -392,16 +392,6 @@ func ShutdownExecutor() {
 	ShutdownManager()
 }
 
-// ExecuteRequest 向 Codex 上游发送请求（支持 WebSocket）
-// useWebsocket 参数可选，如果为 true 则使用 WebSocket 连接
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, useWebsocket bool) (*http.Response, error) {
-	if useWebsocket {
-		return ExecuteRequestWebsocket(ctx, account, requestBody, sessionID, proxyOverride)
-	}
-	// 否则使用 HTTP
-	return proxy.ExecuteRequest(ctx, account, requestBody, sessionID, proxyOverride, "", nil, nil)
-}
-
 // ExecuteRequestWebsocket 通过 WebSocket 发送请求
 // 返回一个模拟的 http.Response 用于兼容现有代码
 func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error) {
