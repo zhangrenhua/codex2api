@@ -205,12 +205,20 @@ const (
 	authClientPoolCleanupInterval = 60 * time.Second
 )
 
+// authClientPoolStop 用于停止清理协程（测试中可调用以避免 goroutine 泄漏）
+var authClientPoolStop = make(chan struct{})
+
 func init() {
 	go func() {
 		ticker := time.NewTicker(authClientPoolCleanupInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			evictExpiredAuthClients()
+		for {
+			select {
+			case <-ticker.C:
+				evictExpiredAuthClients()
+			case <-authClientPoolStop:
+				return
+			}
 		}
 	}()
 }
