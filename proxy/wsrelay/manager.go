@@ -264,6 +264,7 @@ func (m *Manager) getOnConnected() func(accountID int64, session *Session) {
 }
 
 // AcquireConnection 获取或创建连接
+// 注意：WebSocket 连接不支持并发读取，因此始终创建新连接而非复用
 func (m *Manager) AcquireConnection(
 	ctx context.Context,
 	account *auth.Account,
@@ -273,30 +274,20 @@ func (m *Manager) AcquireConnection(
 ) (*WsConnection, error) {
 	key := m.poolKey(account.ID(), wsURL)
 
-	// 尝试获取现有连接
-	if v, ok := m.connections.Load(key); ok {
+	// 清理可能存在的旧连接（避免泄漏）
+	if v, ok := m.connections.LoadAndDelete(key); ok {
 		wc := v.(*WsConnection)
-		if wc.IsConnected() && !wc.IsExpired() {
-			wc.Touch()
-			return wc, nil
-		}
-		// 连接已失效，删除旧连接
-		m.connections.Delete(key)
 		wc.Close()
 	}
 
-	// 创建新连接
+	// 始终创建新连接，避免多个请求复用同一个 websocket.Conn 导致并发读取
 	wc, err := m.createConnection(ctx, account, wsURL, headers, proxyOverride)
 	if err != nil {
 		return nil, err
 	}
 
 	// 存储新连接
-	if v, loaded := m.connections.LoadOrStore(key, wc); loaded {
-		// 已有其他协程创建了连接
-		wc.Close()
-		return v.(*WsConnection), nil
-	}
+	m.connections.Store(key, wc)
 
 	// 调用连接回调
 	if fn := m.getOnConnected(); fn != nil {

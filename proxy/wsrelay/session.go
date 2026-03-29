@@ -232,9 +232,14 @@ func (s *Session) DeliverStreamChunk(msg *Message) bool {
 	return false
 }
 
-// StartHeartbeat 启动心跳
+// StartHeartbeat 启动心跳（防重入）
 func (s *Session) StartHeartbeat(sendPing func() error) {
 	s.mu.Lock()
+	// 防重入：如果已有 timer 则直接返回
+	if s.heartbeatTimer != nil {
+		s.mu.Unlock()
+		return
+	}
 	s.heartbeatTimer = time.AfterFunc(HeartbeatPingInterval, func() {
 		s.mu.RLock()
 		connected := s.Connected
