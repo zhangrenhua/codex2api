@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,7 +98,7 @@ func TestTokenBucket_Concurrent(t *testing.T) {
 			for j := 0; j < 10; j++ {
 				if tb.allow() {
 					// 使用原子操作
-					_ = allowed + 1
+					atomic.AddInt64(&allowed, 1)
 				}
 			}
 		}()
@@ -147,7 +148,7 @@ func TestCooldownManager_ExponentialBackoff(t *testing.T) {
 		cm.reset()
 		// 模拟多次进入冷却以达到第i级
 		// 每次 enterCooldown 会先调用 computeCooldown，level 会增加
-		// 所以为了达到 level i，我们需要调用 i+1 次
+		// 所以为了达到 level i，我们需要调用 i 次
 		for j := 0; j < i; j++ {
 			cm.enterCooldown()
 		}

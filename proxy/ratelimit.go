@@ -145,11 +145,13 @@ func (tb *tokenBucket) updateRPM(rpm int) {
 	defer tb.mu.Unlock()
 
 	rps := float64(rpm) / 60.0
+	// 先保存旧值用于计算比例
+	oldMaxTokens := tb.maxTokens
 	tb.maxTokens = float64(rpm)
 	tb.refillRate = rps
 	// 保持当前令牌比例
-	if tb.maxTokens > 0 {
-		tb.tokens = (tb.tokens / tb.maxTokens) * float64(rpm)
+	if oldMaxTokens > 0 {
+		tb.tokens = (tb.tokens / oldMaxTokens) * float64(rpm)
 	} else {
 		tb.tokens = float64(rpm)
 	}
@@ -298,6 +300,10 @@ func (ll *LevelLimiter) allow() bool {
 	ll.mu.Lock()
 	defer ll.mu.Unlock()
 
+	// 在函数入口递增总请求数
+	ll.metrics.TotalRequests++
+	ll.metrics.LastUpdatedAt = time.Now()
+
 	if !ll.enabled {
 		return true
 	}
@@ -305,23 +311,19 @@ func (ll *LevelLimiter) allow() bool {
 	// 检查是否在冷却中
 	if ll.cooldown.isInCooldown() {
 		ll.metrics.BlockedRequests++
-		ll.metrics.LastUpdatedAt = time.Now()
 		return false
 	}
 
 	// 尝试获取令牌
 	if ll.bucket.allow() {
-		ll.metrics.TotalRequests++
 		ll.metrics.AllowedRequests++
 		ll.metrics.CurrentRPM = int64(ll.bucket.getRate())
-		ll.metrics.LastUpdatedAt = time.Now()
 		return true
 	}
 
 	// 令牌不足，进入冷却
 	ll.enterCooldown()
 	ll.metrics.BlockedRequests++
-	ll.metrics.LastUpdatedAt = time.Now()
 	return false
 }
 
@@ -330,23 +332,26 @@ func (ll *LevelLimiter) allowN(n int) bool {
 	ll.mu.Lock()
 	defer ll.mu.Unlock()
 
+	// 在函数入口递增总请求数
+	ll.metrics.TotalRequests += int64(n)
+	ll.metrics.LastUpdatedAt = time.Now()
+
 	if !ll.enabled {
 		return true
 	}
 
 	if ll.cooldown.isInCooldown() {
-		ll.metrics.BlockedRequests++
+		ll.metrics.BlockedRequests += int64(n)
 		return false
 	}
 
 	if ll.bucket.allowN(n) {
-		ll.metrics.TotalRequests += int64(n)
 		ll.metrics.AllowedRequests += int64(n)
 		return true
 	}
 
 	ll.enterCooldown()
-	ll.metrics.BlockedRequests++
+	ll.metrics.BlockedRequests += int64(n)
 	return false
 }
 
@@ -388,11 +393,13 @@ func (ll *LevelLimiter) getMetrics() LimitMetrics {
 	ll.mu.RLock()
 	defer ll.mu.RUnlock()
 
+	// 构造拷贝避免数据竞争
+	metrics := ll.metrics
 	if ll.bucket != nil {
-		ll.metrics.CurrentRPM = int64(ll.bucket.getRate())
+		metrics.CurrentRPM = int64(ll.bucket.getRate())
 	}
-	ll.metrics.CooldownLevel, _, ll.metrics.NextResetAt = ll.cooldown.getState()
-	return ll.metrics
+	metrics.CooldownLevel, _, metrics.NextResetAt = ll.cooldown.getState()
+	return metrics
 }
 
 // getSnapshot 获取快照
@@ -443,6 +450,7 @@ type EnhancedRateLimiter struct {
 	db              *database.DB
 	persistInterval time.Duration
 	stopCh          chan struct{}
+	stopOnce        sync.Once // 保护 stopCh 只被关闭一次
 
 	// 指标收集
 	metricsEnabled bool
@@ -685,17 +693,14 @@ func (erl *EnhancedRateLimiter) persistenceLoop() {
 
 // persistSnapshots 持久化快照到数据库
 func (erl *EnhancedRateLimiter) persistSnapshots() {
+	// 当前实现仅获取快照但不实际持久化
+	// 如需持久化，请在这里实现具体的存储逻辑
 	if erl.db == nil {
 		return
 	}
 
 	snapshots := erl.GetAllSnapshots()
 	if len(snapshots) == 0 {
-		return
-	}
-
-	data, err := json.Marshal(snapshots)
-	if err != nil {
 		return
 	}
 
@@ -708,12 +713,13 @@ func (erl *EnhancedRateLimiter) persistSnapshots() {
 	_, _ = erl.db.GetSystemSettings(ctx)
 	// 注：限流状态作为瞬态数据，通常不需要严格持久化
 	// 这里仅作演示，实际可根据需求决定是否持久化
-	_ = data
 }
 
 // Stop 停止限流器
 func (erl *EnhancedRateLimiter) Stop() {
-	close(erl.stopCh)
+	erl.stopOnce.Do(func() {
+		close(erl.stopCh)
+	})
 }
 
 // ComputeCooldown 计算冷却时间（参考CPA的nextQuotaCooldown）
