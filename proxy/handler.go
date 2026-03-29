@@ -397,7 +397,17 @@ func (h *Handler) Responses(c *gin.Context) {
 
 		start := time.Now()
 		proxyURL := h.store.NextProxy()
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL)
+
+		// 提取 API Key 用于设备指纹稳定化
+		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		apiKey = strings.TrimSpace(apiKey)
+
+		// 设备指纹配置（可以从配置文件或数据库加载）
+		deviceCfg := &DeviceProfileConfig{
+			StabilizeDeviceProfile: false, // 默认关闭，可以通过配置开启
+		}
+
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -709,7 +719,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		start := time.Now()
 		proxyURL := h.store.NextProxy()
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL)
+
+		// 提取 API Key 用于设备指纹稳定化
+		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		apiKey = strings.TrimSpace(apiKey)
+
+		// 设备指纹配置（可以从配置文件或数据库加载）
+		deviceCfg := &DeviceProfileConfig{
+			StabilizeDeviceProfile: false, // 默认关闭，可以通过配置开启
+		}
+
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
