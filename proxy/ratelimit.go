@@ -90,7 +90,7 @@ func (tb *tokenBucket) allow() bool {
 	tb.lastRefill = now
 
 	if tb.tokens >= 1 {
-		tokens--
+		tb.tokens--
 		return true
 	}
 	return false
@@ -108,12 +108,12 @@ func (tb *tokenBucket) allowN(n int) bool {
 	elapsed := now.Sub(tb.lastRefill).Seconds()
 	tb.tokens += elapsed * tb.refillRate
 	if tb.tokens > tb.maxTokens {
-		tokens = tb.maxTokens
+		tb.tokens = tb.maxTokens
 	}
-	lastRefill = now
+	tb.lastRefill = now
 
 	if tb.tokens >= float64(n) {
-		tokens -= float64(n)
+		tb.tokens -= float64(n)
 		return true
 	}
 	return false
