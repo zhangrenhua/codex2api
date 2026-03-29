@@ -20,6 +20,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
 
@@ -143,9 +144,15 @@ func main() {
 	r.Use(api.CORSMiddleware())
 	r.Use(api.SecurityHeadersMiddleware())
 	r.Use(loggerMiddleware())
+	r.Use(security.SecurityHeadersMiddleware())
+	r.Use(security.RequestSizeLimiter(security.MaxRequestBodySize))
 
 	// handler 不再接收 cfg.APIKeys
-	handler := proxy.NewHandler(store, db)
+	// 从环境变量读取设备指纹配置（后续可从数据库配置）
+	deviceCfg := &proxy.DeviceProfileConfig{
+		StabilizeDeviceProfile: os.Getenv("STABILIZE_DEVICE_PROFILE") == "true",
+	}
+	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
 
 	r.Use(rateLimiter.Middleware())
 	if settings.GlobalRPM > 0 {
@@ -225,11 +232,12 @@ func main() {
 
 	log.Println("正在关闭...")
 	store.Stop()
+	proxy.ShutdownWebsocketPool()
 	proxy.CloseErrorLogger()
 	log.Println("已关闭")
 }
 
-// loggerMiddleware 简单日志中间件
+// loggerMiddleware 简单日志中间件（增强版，支持敏感信息脱敏）
 func loggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -244,20 +252,21 @@ func loggerMiddleware() gin.HandlerFunc {
 
 		emailStr := ""
 		if e, ok := email.(string); ok && e != "" {
-			emailStr = e
+			// 脱敏邮箱
+			emailStr = security.MaskEmail(e)
 		}
 		proxyStr := "no proxy"
 		if p, ok := proxyURL.(string); ok && p != "" {
-			proxyStr = p
+			proxyStr = security.SanitizeLog(p)
 		}
 
 		// 构建扩展标签
 		var tags []string
 		if m, ok := modelVal.(string); ok && m != "" {
-			tags = append(tags, m)
+			tags = append(tags, security.SanitizeLog(m))
 		}
 		if e, ok := effortVal.(string); ok && e != "" {
-			tags = append(tags, "effort="+e)
+			tags = append(tags, "effort="+security.SanitizeLog(e))
 		}
 		if t, ok := tierVal.(string); ok && t == "fast" {
 			tags = append(tags, "fast")
