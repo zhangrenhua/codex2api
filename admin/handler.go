@@ -1040,9 +1040,6 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 		maskedKeys = append(maskedKeys, NewMaskedAPIKeyRow(k))
 	}
 
-	if maskedKeys == nil {
-		maskedKeys = []*MaskedAPIKeyRow{}
-	}
 	c.JSON(http.StatusOK, apiKeysResponse{Keys: maskedKeys})
 }
 

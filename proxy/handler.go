@@ -310,7 +310,11 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+		statusCode := http.StatusBadRequest
+		if errors.Is(err, &http.MaxBytesError{}) {
+			statusCode = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(statusCode, gin.H{
 			"error": gin.H{"message": "读取请求体失败", "type": "invalid_request_error"},
 		})
 		return
@@ -337,15 +341,6 @@ func (h *Handler) Responses(c *gin.Context) {
 	if model == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{"message": "model is required", "type": "invalid_request_error"},
-		})
-		return
-	}
-
-	// 检查XSS攻击
-	if security.ContainsXSS(model) {
-		security.SecurityAuditLog("XSS_ATTEMPT", fmt.Sprintf("path=%s ip=%s model=%s", c.Request.URL.Path, c.ClientIP(), security.SanitizeLog(model)))
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{"message": "model 参数包含非法字符", "type": "invalid_request_error"},
 		})
 		return
 	}
@@ -689,7 +684,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+		statusCode := http.StatusBadRequest
+		if errors.Is(err, &http.MaxBytesError{}) {
+			statusCode = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(statusCode, gin.H{
 			"error": gin.H{"message": "读取请求体失败", "type": "invalid_request_error"},
 		})
 		return
@@ -712,15 +711,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	if err := security.ValidateModelName(model); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{"message": "model 参数无效", "type": "invalid_request_error"},
-		})
-		return
-	}
-
-	// 检查XSS攻击
-	if security.ContainsXSS(model) {
-		security.SecurityAuditLog("XSS_ATTEMPT", fmt.Sprintf("path=%s ip=%s model=%s", c.Request.URL.Path, c.ClientIP(), security.SanitizeLog(model)))
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{"message": "model 参数包含非法字符", "type": "invalid_request_error"},
 		})
 		return
 	}

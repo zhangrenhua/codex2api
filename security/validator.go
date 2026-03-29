@@ -56,6 +56,9 @@ var (
 		regexp.MustCompile(`(?i)(["']?password["']?\s*[:=]\s*["']?)([^"'\s&]+)`),
 		regexp.MustCompile(`(?i)(sk-)([a-zA-Z0-9]{20,})`), // sk- 前缀单独作为组1
 	}
+
+	// UUID pattern for token masking
+	uuidPattern = regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 )
 
 // ValidateModelName validates a model name parameter
@@ -94,11 +97,12 @@ func ValidateEmail(email string) error {
 	if utf8.RuneCountInString(email) > MaxEmailLength {
 		return &ValidationError{Field: "email", Message: "email too long"}
 	}
-	if strings.Contains(email, "@") {
-		parts := strings.Split(email, "@")
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return &ValidationError{Field: "email", Message: "invalid email format"}
-		}
+	if !strings.Contains(email, "@") {
+		return &ValidationError{Field: "email", Message: "invalid email format: missing @"}
+	}
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return &ValidationError{Field: "email", Message: "invalid email format"}
 	}
 	return nil
 }
@@ -166,7 +170,6 @@ func MaskSensitiveData(input string) string {
 	}
 
 	// Mask UUID-like patterns that might be tokens
-	uuidPattern := regexp.MustCompile(`\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 	result = uuidPattern.ReplaceAllString(result, "****UUID-MASKED****")
 
 	return result

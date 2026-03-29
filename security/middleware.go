@@ -1,11 +1,14 @@
 package security
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -53,7 +56,35 @@ func RateLimitMiddleware(requests int, window time.Duration) gin.HandlerFunc {
 // RequestSizeLimiter limits request body size
 func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize)
+		// Read the request body
+		body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxSize+1))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{
+					"message": "读取请求体失败",
+					"type":    "invalid_request_error",
+				},
+			})
+			c.Abort()
+			return
+		}
+		defer c.Request.Body.Close()
+
+		// Check if body exceeds max size
+		if int64(len(body)) > maxSize {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error": gin.H{
+					"message": "请求体过大",
+					"type":    "invalid_request_error",
+					"code":    "request_too_large",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		// Replace the body so it can be read again
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 		c.Next()
 	}
 }
@@ -131,6 +162,9 @@ type IPRateLimiter struct {
 	visitors map[string]*visitor
 	requests int
 	window   time.Duration
+	mu       sync.Mutex
+	ticker   *time.Ticker
+	stopChan chan struct{}
 }
 
 type visitor struct {
@@ -144,13 +178,27 @@ func NewIPRateLimiter(requests int, window time.Duration) *IPRateLimiter {
 		visitors: make(map[string]*visitor),
 		requests: requests,
 		window:   window,
+		stopChan: make(chan struct{}),
 	}
 	go l.cleanup()
 	return l
 }
 
+// Stop stops the cleanup goroutine
+func (l *IPRateLimiter) Stop() {
+	l.mu.Lock()
+	if l.ticker != nil {
+		l.ticker.Stop()
+	}
+	l.mu.Unlock()
+	close(l.stopChan)
+}
+
 // Allow checks if a request from this IP is allowed
 func (l *IPRateLimiter) Allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	v, exists := l.visitors[ip]
 	now := time.Now()
 
@@ -177,13 +225,24 @@ func (l *IPRateLimiter) Allow(ip string) bool {
 
 // cleanup removes old entries periodically
 func (l *IPRateLimiter) cleanup() {
-	ticker := time.NewTicker(l.window * 2)
-	for range ticker.C {
-		now := time.Now()
-		for ip, v := range l.visitors {
-			if now.Sub(v.lastSeen) > l.window*2 {
-				delete(l.visitors, ip)
+	l.mu.Lock()
+	l.ticker = time.NewTicker(l.window * 2)
+	l.mu.Unlock()
+	defer l.ticker.Stop()
+
+	for {
+		select {
+		case <-l.ticker.C:
+			l.mu.Lock()
+			now := time.Now()
+			for ip, v := range l.visitors {
+				if now.Sub(v.lastSeen) > l.window*2 {
+					delete(l.visitors, ip)
+				}
 			}
+			l.mu.Unlock()
+		case <-l.stopChan:
+			return
 		}
 	}
 }

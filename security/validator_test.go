@@ -76,18 +76,19 @@ func TestMaskSensitiveData(t *testing.T) {
 		expected string
 	}{
 		{"refresh_token=secret123", "refresh_token=****MASKED****"},
-		{"access_token: abc123", "access_token:****MASKED****"},
+		{"access_token: abc123", "access_token: ****MASKED****"},
 		{"Bearer token123", "Bearer ****MASKED****"},
 		{"api_key=sk-1234567890", "api_key=****MASKED****"},
-		{"password: mypassword", "password:****MASKED****"},
-		{"sk-abcdef1234567890abcdef", "****MASKED****"},
+		{"password: mypassword", "password: ****MASKED****"},
+		{"sk-abcdef1234567890abcdef", "sk-****MASKED****"},
 		{"hello world", "hello world"},
+		{"token=550e8400-e29b-41d4-a716-446655440000", "token=****UUID-MASKED****"},
 	}
 
 	for _, test := range tests {
 		result := MaskSensitiveData(test.input)
-		if !strings.Contains(result, "MASKED") && strings.Contains(test.expected, "MASKED") {
-			t.Errorf("MaskSensitiveData(%q) = %q, expected to contain MASKED", test.input, result)
+		if result != test.expected {
+			t.Errorf("MaskSensitiveData(%q) = %q, expected %q", test.input, result, test.expected)
 		}
 	}
 }
@@ -97,16 +98,16 @@ func TestMaskAPIKey(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"sk-abcdefghijklmnopqrstuvwxyz", "sk-****...****vwxyz"},
+		{"sk-abcdefghijklmnopqrstuvwxyz", "sk-a****...****wxyz"},
 		{"sk-short", "****"},
 		{"", "****"},
-		{"sk-" + strings.Repeat("a", 100), "sk-a****...****a"},
+		{"sk-" + strings.Repeat("a", 100), "sk-a****...****aaaa"},
 	}
 
 	for _, test := range tests {
 		result := MaskAPIKey(test.input)
-		if !strings.Contains(result, "****") {
-			t.Errorf("MaskAPIKey(%q) = %q, expected to contain ****", test.input, result)
+		if result != test.expected {
+			t.Errorf("MaskAPIKey(%q) = %q, expected %q", test.input, result, test.expected)
 		}
 	}
 }

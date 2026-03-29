@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
@@ -60,7 +61,7 @@ func NewMaskedAPIKeyRow(row *database.APIKeyRow) *MaskedAPIKeyRow {
 		ID:        row.ID,
 		Name:      row.Name,
 		Key:       security.MaskAPIKey(row.Key),
-		CreatedAt: row.CreatedAt.Format("2006-01-02T15:04:05"),
+		CreatedAt: row.CreatedAt.Format(time.RFC3339),
 	}
 }
 

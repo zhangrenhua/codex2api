@@ -80,6 +80,15 @@ func TestRequestSizeLimiter(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("Small request: expected 200, got %d", w.Code)
 	}
+
+	// Large request should fail with 413
+	w = httptest.NewRecorder()
+	largeBody := strings.Repeat("x", 200)
+	req, _ = http.NewRequest("POST", "/test", strings.NewReader(largeBody))
+	r.ServeHTTP(w, req)
+	if w.Code != 413 {
+		t.Errorf("Large request: expected 413, got %d", w.Code)
+	}
 }
 
 func TestIPRateLimiter(t *testing.T) {

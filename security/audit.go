@@ -108,7 +108,9 @@ func (al *AuditLogger) shouldRotate() bool {
 // rotate 执行日志轮转
 func (al *AuditLogger) rotate() {
 	if al.file != nil {
-		al.file.Close()
+		if err := al.file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "关闭日志文件失败: %v\n", err)
+		}
 	}
 
 	// 轮转旧日志
@@ -116,14 +118,20 @@ func (al *AuditLogger) rotate() {
 	for i := al.maxBackups - 1; i > 0; i-- {
 		oldPath := fmt.Sprintf("%s.%d", logPath, i)
 		newPath := fmt.Sprintf("%s.%d", logPath, i+1)
-		os.Rename(oldPath, newPath)
+		if err := os.Rename(oldPath, newPath); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "重命名日志文件失败 %s -> %s: %v\n", oldPath, newPath, err)
+		}
 	}
 
 	// 重命名当前日志
-	os.Rename(logPath, logPath+".1")
+	if err := os.Rename(logPath, logPath+".1"); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "重命名当前日志文件失败: %v\n", err)
+	}
 
 	// 创建新日志文件
-	al.init()
+	if err := al.init(); err != nil {
+		fmt.Fprintf(os.Stderr, "初始化新日志文件失败: %v\n", err)
+	}
 }
 
 // Close 关闭审计日志
