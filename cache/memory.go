@@ -73,15 +73,19 @@ func (tc *MemoryTokenCache) SetPoolSize(n int) {
 }
 
 func (tc *MemoryTokenCache) GetAccessToken(ctx context.Context, accountID int64) (string, error) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
+	tc.mu.RLock()
 	entry, ok := tc.tokens[accountID]
+	tc.mu.RUnlock()
 	if !ok {
 		return "", nil
 	}
 	if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
-		delete(tc.tokens, accountID)
+		// 异步删除过期条目
+		go func() {
+			tc.mu.Lock()
+			delete(tc.tokens, accountID)
+			tc.mu.Unlock()
+		}()
 		return "", nil
 	}
 	return entry.token, nil
