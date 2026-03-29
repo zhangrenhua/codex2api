@@ -23,7 +23,25 @@ func (s *Store) EnableRefreshScheduler(config RefreshConfig) {
 	}
 
 	if config.MaxConcurrency <= 0 {
-		config = DefaultRefreshConfig()
+		config.MaxConcurrency = DefaultRefreshConfig().MaxConcurrency
+	}
+	if config.MinInterval <= 0 {
+		config.MinInterval = DefaultRefreshConfig().MinInterval
+	}
+	if config.PreExpireWindow <= 0 {
+		config.PreExpireWindow = DefaultRefreshConfig().PreExpireWindow
+	}
+	if config.RetryBackoffBase <= 0 {
+		config.RetryBackoffBase = DefaultRefreshConfig().RetryBackoffBase
+	}
+	if config.RetryMaxAttempts <= 0 {
+		config.RetryMaxAttempts = DefaultRefreshConfig().RetryMaxAttempts
+	}
+	if config.BatchSize <= 0 {
+		config.BatchSize = DefaultRefreshConfig().BatchSize
+	}
+	if config.JitterPercent < 0 {
+		config.JitterPercent = DefaultRefreshConfig().JitterPercent
 	}
 
 	integration := &RefreshSchedulerIntegration{
@@ -33,7 +51,8 @@ func (s *Store) EnableRefreshScheduler(config RefreshConfig) {
 	integration.enabled.Store(true)
 
 	// 启动调度器
-	ctx, _ := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	integration.scheduler.Start(ctx)
 
 	// 存储到 store
