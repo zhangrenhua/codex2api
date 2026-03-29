@@ -314,8 +314,11 @@ func (m *Manager) createConnection(
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, error) {
-	// 创建拨号器副本
-	dialer := m.dialer
+	// 创建拨号器副本（避免修改共享 dialer）
+	dialer := &websocket.Dialer{
+		HandshakeTimeout:  m.dialer.HandshakeTimeout,
+		EnableCompression: m.dialer.EnableCompression,
+	}
 
 	// 配置代理
 	account.Mu().RLock()

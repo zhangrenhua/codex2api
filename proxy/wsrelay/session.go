@@ -54,6 +54,10 @@ type PendingRequest struct {
 
 	// 取消函数
 	Cancel context.CancelFunc
+
+	// 关闭标志，防止重复关闭
+	closed bool
+	closeMu sync.Mutex
 }
 
 // NewPendingRequest 创建新的等待请求
@@ -70,8 +74,16 @@ func NewPendingRequest(sessionID string) *PendingRequest {
 	}
 }
 
-// Close 关闭请求，释放资源
+// Close 关闭请求，释放资源（幂等）
 func (pr *PendingRequest) Close() {
+	pr.closeMu.Lock()
+	defer pr.closeMu.Unlock()
+
+	if pr.closed {
+		return
+	}
+	pr.closed = true
+
 	pr.Cancel()
 	close(pr.ResponseChan)
 	close(pr.StreamChan)
@@ -181,11 +193,18 @@ func (s *Session) RemovePendingRequest(requestID string) {
 // DeliverResponse 投递响应到等待请求
 func (s *Session) DeliverResponse(msg *Message) bool {
 	if pr, ok := s.GetPendingRequest(msg.RequestID); ok {
+		pr.closeMu.Lock()
+		if pr.closed {
+			pr.closeMu.Unlock()
+			return false
+		}
 		select {
 		case pr.ResponseChan <- msg:
+			pr.closeMu.Unlock()
 			return true
 		default:
 			// 通道已满或已关闭
+			pr.closeMu.Unlock()
 			return false
 		}
 	}
@@ -195,11 +214,18 @@ func (s *Session) DeliverResponse(msg *Message) bool {
 // DeliverStreamChunk 投递流式数据块
 func (s *Session) DeliverStreamChunk(msg *Message) bool {
 	if pr, ok := s.GetPendingRequest(msg.RequestID); ok {
+		pr.closeMu.Lock()
+		if pr.closed {
+			pr.closeMu.Unlock()
+			return false
+		}
 		select {
 		case pr.StreamChan <- msg:
+			pr.closeMu.Unlock()
 			return true
 		default:
 			// 通道已满，丢弃旧数据
+			pr.closeMu.Unlock()
 			return false
 		}
 	}
@@ -224,12 +250,15 @@ func (s *Session) StartHeartbeat(sendPing func() error) {
 			return
 		}
 
-		// 重置计时器
+		// 检查 timer 是否仍存在（可能已被 StopHeartbeat 清除）
 		s.mu.Lock()
-		if s.heartbeatTimer != nil {
-			s.heartbeatTimer.Reset(HeartbeatPingInterval)
-		}
+		timer := s.heartbeatTimer
 		s.mu.Unlock()
+
+		// 安全重置计时器
+		if timer != nil {
+			timer.Reset(HeartbeatPingInterval)
+		}
 	})
 	s.mu.Unlock()
 }

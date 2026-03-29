@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
@@ -170,9 +169,6 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID string) http.H
 	// Beta header 启用 WebSocket 响应 API
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
-	// Session ID
-	headers.Set("session_id", uuid.New().String())
-
 	// User-Agent 和版本
 	var accountIDInt int64
 	if accountID != "" {
@@ -208,8 +204,8 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 发送请求体作为 TextMessage
-	return wc.WriteMessage(websocket.TextMessage, body)
+	// 发送消息（使用 marshaled msgBytes）
+	return wc.WriteMessage(websocket.TextMessage, msgBytes)
 }
 
 // ==================== WebSocket 响应处理 ====================

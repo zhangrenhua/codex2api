@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -138,6 +139,13 @@ func ErrAccountPoolUsageLimit(message string, planType string, resetsAt int64, r
 	if message == "" {
 		message = "Account pool quota exhausted, please retry later"
 	}
+	// Include plan type and reset info if provided
+	if planType != "" {
+		message = fmt.Sprintf("%s (plan: %s)", message, planType)
+	}
+	if resetsInSeconds > 0 {
+		message = fmt.Sprintf("%s, resets in %d seconds", message, resetsInSeconds)
+	}
 	return &Error{
 		Code:       ErrorCodeAccountPoolUsageLimit,
 		Message:    message,
@@ -242,30 +250,33 @@ func ErrMissingModel() *Error {
 // ==================== Helper Functions ====================
 
 // IsRetryableError checks if an error is retryable
+// Uses errors.As to support wrapped errors
 func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// Check if it's our structured error type
-	if e, ok := err.(*Error); ok {
+	// Use errors.As to support wrapped errors
+	var e *Error
+	if errors.As(err, &e) {
 		return e.Retryable
 	}
 
 	// For non-structured errors, check common retryable conditions
-	// This handles wrapped errors or standard errors
 	return false
 }
 
 // StatusCodeFromError extracts the HTTP status code from an error
+// Uses errors.As to support wrapped errors
 // Returns http.StatusInternalServerError if no status can be determined
 func StatusCodeFromError(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
 
-	// Check if it's our structured error type
-	if e, ok := err.(*Error); ok {
+	// Use errors.As to support wrapped errors
+	var e *Error
+	if errors.As(err, &e) {
 		return e.HTTPStatus
 	}
 
@@ -279,7 +290,8 @@ func ErrorToGinResponse(c *gin.Context, err error) {
 		return
 	}
 
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		c.JSON(e.HTTPStatus, e.ToGinH())
 		return
 	}

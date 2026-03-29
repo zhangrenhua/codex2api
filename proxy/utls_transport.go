@@ -140,6 +140,11 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		return nil, err
 	}
 
+	// 关闭旧连接（如果存在且不可用）
+	if oldConn, ok := t.connections[host]; ok {
+		go oldConn.Close() // 异步关闭，避免阻塞
+	}
+
 	// 存储新连接
 	t.connections[host] = h2Conn
 	return h2Conn, nil
@@ -200,12 +205,14 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		// 连接失败，从缓存中移除
+		// 连接失败，从缓存中移除并关闭连接
 		t.mu.Lock()
 		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
 			delete(t.connections, hostname)
 		}
 		t.mu.Unlock()
+		// 关闭失败的连接，避免资源泄漏
+		h2Conn.Close()
 		return nil, err
 	}
 
