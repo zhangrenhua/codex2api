@@ -100,6 +100,7 @@ type SchedulerBreakdown struct {
 	ServerPenalty       float64
 	FailurePenalty      float64
 	SuccessBonus        float64
+	ProvenBonus         float64 // 经过验证的账号（TotalRequests > 10）加分
 	UsagePenalty7d      float64
 	LatencyPenalty      float64
 	SuccessRatePenalty  float64 // 滑动窗口成功率惩罚
@@ -268,6 +269,11 @@ func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 	breakdown.FailurePenalty = float64(clampInt(a.FailureStreak*6, 0, 24))
 	breakdown.SuccessBonus = float64(clampInt(a.SuccessStreak*2, 0, 12))
 
+	// 经过验证的账号（累计请求 > 10 次）优先调度
+	if atomic.LoadInt64(&a.TotalRequests) > 10 {
+		breakdown.ProvenBonus = 20
+	}
+
 	// 滑动窗口成功率惩罚
 	if a.RecentResultsCnt >= 5 { // 至少 5 次请求才统计
 		rate := a.recentSuccessRateLocked()
@@ -316,7 +322,8 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 		breakdown.UsagePenalty7d -
 		breakdown.LatencyPenalty -
 		breakdown.SuccessRatePenalty +
-		breakdown.SuccessBonus
+		breakdown.SuccessBonus +
+		breakdown.ProvenBonus
 
 	tier := HealthTierHealthy
 	switch {
