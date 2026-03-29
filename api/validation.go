@@ -2,8 +2,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -373,6 +375,9 @@ func MaxItems(max int) ValidationRule {
 // ============ Chat Completions Validation Rules ============
 
 // ChatCompletionValidationRules returns validation rules for chat completions request
+// Note: Fields like 'stop' and 'tool_choice' are not validated strictly here
+// because they are ignored/deleted during translation to upstream format.
+// Validation is kept permissive to maintain backward compatibility.
 func ChatCompletionValidationRules() map[string][]ValidationRule {
 	return map[string][]ValidationRule{
 		"model":        {Required(), TypeString(), MaxLength(64)},
@@ -382,22 +387,24 @@ func ChatCompletionValidationRules() map[string][]ValidationRule {
 		"top_p":        {TypeNumber(), Range(0, 1)},
 		"n":            {TypeNumber(), MinValue(1), MaxValue(1)},
 		"stream":       {TypeBoolean()},
-		"stop":         {TypeString(), MaxLength(256)},
+		// stop and tool_choice are intentionally not strictly validated
+		// as they are ignored during request translation
 		"presence_penalty":  {TypeNumber(), Range(-2, 2)},
 		"frequency_penalty": {TypeNumber(), Range(-2, 2)},
 		"user":         {TypeString(), MaxLength(256)},
 		"reasoning_effort":  {TypeString(), Enum("low", "medium", "high")},
 		"service_tier":      {TypeString(), Enum("auto", "default", "fast")},
 		"tools":             {TypeArray(), MaxItems(128)},
-		"tool_choice":       {TypeString(), MaxLength(64)},
+		// tool_choice removed from strict validation to maintain backward compatibility
 	}
 }
 
 // ResponsesAPIValidationRules returns validation rules for responses API request
+// Note: input can be either a string or an array of items (validated separately)
 func ResponsesAPIValidationRules() map[string][]ValidationRule {
 	return map[string][]ValidationRule{
 		"model":             {Required(), TypeString(), MaxLength(64)},
-		"input":             {Required(), TypeArray(), MinItems(1), ValidateInput()},
+		// input validation is handled separately to support both string and array formats
 		"max_output_tokens": {TypeNumber(), MinValue(1), MaxValue(65536)},
 		"temperature":       {TypeNumber(), Range(0, 2)},
 		"top_p":             {TypeNumber(), Range(0, 1)},
@@ -448,8 +455,9 @@ func ValidationMiddleware(rules map[string][]ValidationRule) gin.HandlerFunc {
 			return
 		}
 
-		// Store body for later use
+		// Store body for later use and restore c.Request.Body
 		c.Set("raw_body", body)
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
 		// Validate
 		validator := NewValidator(body)
@@ -577,11 +585,15 @@ func ValidateMessages() ValidationRule {
 				}
 			}
 			content := value.Get(fmt.Sprintf("%d.content", i))
+			toolCalls := value.Get(fmt.Sprintf("%d.tool_calls", i))
 			if !content.Exists() && role != "tool" {
-				return &ValidationError{
-					Field:   msgPath + ".content",
-					Message: fmt.Sprintf("Message at index %d is missing 'content' field", i),
-					Code:    "missing_message_content",
+				// Allow assistant messages that have tool_calls to omit content
+				if !(role == "assistant" && toolCalls.Exists()) {
+					return &ValidationError{
+						Field:   msgPath + ".content",
+						Message: fmt.Sprintf("Message at index %d is missing 'content' field", i),
+						Code:    "missing_message_content",
+					}
 				}
 			}
 		}
@@ -614,12 +626,12 @@ func ValidateInput() ValidationRule {
 
 		for i := 0; i < int(value.Get("#").Int()); i++ {
 			itemType := value.Get(fmt.Sprintf("%d.type", i)).String()
+			// If no explicit type is provided, accept the item. This allows
+			// message-style inputs (e.g., {role, content}) and other variants
+			// that are handled elsewhere in the codebase without requiring
+			// clients to set type explicitly.
 			if itemType == "" {
-				return &ValidationError{
-					Field:   fmt.Sprintf("%s.%d.type", path, i),
-					Message: fmt.Sprintf("Input item at index %d is missing 'type' field", i),
-					Code:    "missing_input_type",
-				}
+				continue
 			}
 			if !validTypes[itemType] {
 				return &ValidationError{

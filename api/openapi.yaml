@@ -28,8 +28,6 @@ servers:
   - url: https://api.codex2api.local/v1
     description: Production server
 
-basePath: /v1
-
 security:
   - BearerAuth: []
 
@@ -38,7 +36,6 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
       description: |
         Enter your API key with Bearer prefix.
         Example: "Bearer sk-..."
@@ -64,10 +61,19 @@ components:
                 - invalid_api_key
                 - missing_api_key
                 - insufficient_scope
+                - invalid_parameter
+                - missing_field
+                - invalid_field_type
+                - invalid_field_format
+                - context_length_exceeded
+                - unsupported_model
                 - rate_limit_reached
                 - server_error
                 - service_unavailable
                 - upstream_error
+                - upstream_timeout
+                - resource_not_found
+                - resource_conflict
             message:
               type: string
               description: Human-readable error message
@@ -83,8 +89,14 @@ components:
                 - server_error
                 - upstream_error
             details:
-              type: object
               description: Additional error context
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items:
+                    type: object
+                    additionalProperties: true
 
     Model:
       type: object
@@ -540,6 +552,11 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   /health:
+    servers:
+      - url: http://localhost:8080
+        description: Local development server
+      - url: https://api.codex2api.local
+        description: Production server
     get:
       summary: Health check
       description: Returns the health status of the API
