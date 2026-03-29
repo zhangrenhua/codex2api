@@ -130,7 +130,13 @@ const (
 
 // ExecuteRequest 向 Codex 上游发送请求
 // sessionID 可选，用于 prompt cache 会话绑定
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error) {
+// useWebsocket 可选，如果为 true 则使用 WebSocket 连接
+func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, useWebsocket ...bool) (*http.Response, error) {
+	// 检查是否使用 WebSocket
+	if len(useWebsocket) > 0 && useWebsocket[0] {
+		return ExecuteRequestWebsocket(ctx, account, requestBody, sessionID, proxyOverride)
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -314,4 +320,57 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 			return err
 		}
 	}
+}
+
+// ExecuteRequestWebsocket 通过 WebSocket 向 Codex 上游发送请求
+// 返回一个模拟的 http.Response 用于兼容现有代码
+func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error) {
+	wsExec := InitWebsocketExecutor()
+	wsResp, err := wsExec.ExecuteRequestViaWebsocket(ctx, account, requestBody, sessionID, proxyOverride)
+	if err != nil {
+		return nil, err
+	}
+
+	// 将 WebSocket 响应包装为 http.Response
+	pr, pw := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       pr,
+	}
+
+	// 从 HTTP 握手响应中复制头信息
+	if wsResp.HTTPResponse() != nil {
+		for key, values := range wsResp.HTTPResponse().Header {
+			for _, v := range values {
+				resp.Header.Add(key, v)
+			}
+		}
+	}
+
+	// 设置 SSE 响应头
+	resp.Header.Set("Content-Type", "text/event-stream")
+	resp.Header.Set("Cache-Control", "no-cache")
+	resp.Header.Set("Connection", "keep-alive")
+
+	// 在后台读取 WebSocket 流并写入 pipe
+	go func() {
+		defer pw.Close()
+		defer wsResp.Close()
+
+		err := wsResp.ReadStream(func(data []byte) bool {
+			// 将数据编码为 SSE 格式
+			line := fmt.Sprintf("data: %s\n\n", string(data))
+			if _, err := pw.Write([]byte(line)); err != nil {
+				return false
+			}
+			return true
+		})
+
+		if err != nil && err != io.EOF {
+			pw.CloseWithError(err)
+		}
+	}()
+
+	return resp, nil
 }

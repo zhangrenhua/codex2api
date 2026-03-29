@@ -139,7 +139,7 @@ func main() {
 	r.Use(loggerMiddleware())
 
 	// handler 不再接收 cfg.APIKeys
-	handler := proxy.NewHandler(store, db)
+	handler := proxy.NewHandler(store, db, cfg)
 
 	r.Use(rateLimiter.Middleware())
 	if settings.GlobalRPM > 0 {
@@ -219,6 +219,7 @@ func main() {
 
 	log.Println("正在关闭...")
 	store.Stop()
+	proxy.ShutdownWebsocketPool()
 	proxy.CloseErrorLogger()
 	log.Println("已关闭")
 }

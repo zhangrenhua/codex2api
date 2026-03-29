@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -24,6 +25,7 @@ type Handler struct {
 	store      *auth.Store
 	configKeys map[string]bool // 配置文件中的静态 key
 	db         *database.DB
+	cfg        *config.Config  // 全局配置
 
 	// 动态 key 缓存
 	dbKeysMu    sync.RWMutex
@@ -39,11 +41,12 @@ type usageLimitDetails struct {
 }
 
 // NewHandler 创建处理器
-func NewHandler(store *auth.Store, db *database.DB) *Handler {
+func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config) *Handler {
 	return &Handler{
 		store:      store,
 		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
 		db:         db,
+		cfg:        cfg,
 	}
 }
 
@@ -397,7 +400,8 @@ func (h *Handler) Responses(c *gin.Context) {
 
 		start := time.Now()
 		proxyURL := h.store.NextProxy()
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL)
+		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -709,7 +713,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		start := time.Now()
 		proxyURL := h.store.NextProxy()
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL)
+		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {

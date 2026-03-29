@@ -44,7 +44,7 @@ const (
 // websocketConn 包装 WebSocket 连接，添加连接管理功能
 type websocketConn struct {
 	conn         *websocket.Conn
-	accountID    int
+	accountID    int64
 	wsURL        string
 	lastUsed     atomic.Int64 // UnixNano 时间戳
 	closed       atomic.Bool
@@ -122,7 +122,7 @@ func (p *websocketConnPool) stop() {
 }
 
 // getPoolKey 生成连接池键
-func getPoolKey(accountID int, wsURL string) string {
+func getPoolKey(accountID int64, wsURL string) string {
 	return fmt.Sprintf("%d|%s", accountID, wsURL)
 }
 
@@ -222,7 +222,7 @@ func (p *websocketConnPool) heartbeat(wc *websocketConn) {
 }
 
 // removeConn 从连接池中移除连接
-func (p *websocketConnPool) removeConn(accountID int, wsURL string) {
+func (p *websocketConnPool) removeConn(accountID int64, wsURL string) {
 	key := getPoolKey(accountID, wsURL)
 	if v, ok := p.connections.LoadAndDelete(key); ok {
 		wc := v.(*websocketConn)
@@ -449,7 +449,7 @@ func (r *WebsocketResponse) ReadStream(callback func(data []byte) bool) error {
 		msgType, payload, err := r.conn.conn.ReadMessage()
 		if err != nil {
 			// 检查是否是正常关闭
-			if websocket.IsCloseError(err, websocket.NormalClosure, websocket.GoingAway) {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				return nil
 			}
 			return fmt.Errorf("websocket read error: %w", err)
