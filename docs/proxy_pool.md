@@ -7,7 +7,7 @@
 增强代理池管理提供了以下核心功能：
 
 1. **代理健康检查**
-   - 定期 ping 检查
+   - 定期 HTTP HEAD 检查
    - 响应时间监控
    - HTTP/SOCKS5 代理支持
 
@@ -261,7 +261,7 @@ enhancedPool.MarkProxyFailure(proxyURL)
 运行测试：
 
 ```bash
-cd D:/Code/Projects/C2A/13-proxy-pool
+cd /path/to/project
 go test -v ./auth/
 ```
 

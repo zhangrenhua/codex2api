@@ -91,6 +91,7 @@ type ProxyPool struct {
 
 	// 运行时状态
 	stopCh chan struct{}
+	stopOnce sync.Once
 	wg     sync.WaitGroup
 
 	// 回调函数
@@ -228,7 +229,24 @@ func (p *ProxyPool) Select() *ProxyEntry {
 		return nil
 	}
 
-	switch p.strategy {
+	return p.selectByStrategy(p.strategy)
+}
+
+// SelectWithStrategy 使用指定策略选择代理（不修改全局策略）
+func (p *ProxyPool) SelectWithStrategy(strategy ProxySelectionStrategy) *ProxyEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.healthy) == 0 {
+		return nil
+	}
+
+	return p.selectByStrategy(strategy)
+}
+
+// selectByStrategy 根据策略选择代理
+func (p *ProxyPool) selectByStrategy(strategy ProxySelectionStrategy) *ProxyEntry {
+	switch strategy {
 	case StrategyWeighted:
 		return p.selectWeighted()
 	case StrategyLeastConnections:
@@ -295,8 +313,10 @@ func (p *ProxyPool) selectLeastConnections() *ProxyEntry {
 
 	for _, entry := range p.healthy {
 		conns := atomic.LoadInt64(&entry.ActiveConns)
-		// 考虑成功率作为调节因子
+		// 考虑成功率作为调节因子，需要在锁外读取
+		entry.mu.RLock()
 		successRate := entry.SuccessRate
+		entry.mu.RUnlock()
 		if successRate <= 0 {
 			successRate = 0.1
 		}
@@ -341,9 +361,8 @@ func (p *ProxyPool) MarkSuccess(url string) {
 			p.onRecovery(entry)
 		}
 	}
-	entry.mu.Unlock()
 
-	// 更新统计
+	// 在锁内更新 stats
 	if stats, ok := p.stats[url]; ok {
 		stats.TotalRequests = atomic.LoadInt64(&entry.TotalRequests)
 		stats.FailedRequests = atomic.LoadInt64(&entry.FailedRequests)
@@ -351,6 +370,8 @@ func (p *ProxyPool) MarkSuccess(url string) {
 		stats.Status = p.statusString(entry.Status)
 		stats.ConsecutiveFailures = entry.ConsecutiveFailures
 	}
+
+	entry.mu.Unlock()
 
 	p.rebuildHealthyListIfNeeded()
 }
@@ -386,9 +407,8 @@ func (p *ProxyPool) MarkFailure(url string) {
 			p.onIsolation(entry)
 		}
 	}
-	entry.mu.Unlock()
 
-	// 更新统计
+	// 在锁内更新 stats
 	if stats, ok := p.stats[url]; ok {
 		stats.TotalRequests = atomic.LoadInt64(&entry.TotalRequests)
 		stats.FailedRequests = atomic.LoadInt64(&entry.FailedRequests)
@@ -396,6 +416,8 @@ func (p *ProxyPool) MarkFailure(url string) {
 		stats.Status = p.statusString(entry.Status)
 		stats.ConsecutiveFailures = entry.ConsecutiveFailures
 	}
+
+	entry.mu.Unlock()
 
 	p.rebuildHealthyListIfNeeded()
 }
@@ -445,7 +467,10 @@ func (p *ProxyPool) ReleaseConnection(url string) {
 		return
 	}
 
-	atomic.AddInt64(&entry.ActiveConns, -1)
+	// 防止计数器减到负数
+	if atomic.LoadInt64(&entry.ActiveConns) > 0 {
+		atomic.AddInt64(&entry.ActiveConns, -1)
+	}
 }
 
 // HealthCheck 执行健康检查
@@ -504,6 +529,9 @@ func (p *ProxyPool) checkProxy(ctx context.Context, entry *ProxyEntry) *HealthCh
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		DisableKeepAlives: true, // 禁用 keep-alive 避免连接泄漏
+		MaxIdleConns:      0,
+		IdleConnTimeout:   0,
 	}
 
 	// 配置代理
@@ -542,8 +570,8 @@ func (p *ProxyPool) checkProxy(ctx context.Context, entry *ProxyEntry) *HealthCh
 		result.Error = err
 	} else {
 		resp.Body.Close()
-		// 204 或其他成功状态码都认为健康
-		result.Healthy = resp.StatusCode >= 200 && resp.StatusCode < 500
+		// 只有 2xx 和 3xx 状态码认为健康
+		result.Healthy = resp.StatusCode >= 200 && resp.StatusCode < 400
 		if !result.Healthy {
 			result.Error = fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
@@ -582,6 +610,7 @@ func (p *ProxyPool) processHealthCheckResult(result *HealthCheckResult) {
 		}
 	} else {
 		entry.Healthy = false
+		entry.Status = ProxyStatusUnhealthy
 		entry.ConsecutiveFailures++
 
 		// 检查是否需要隔离
@@ -629,10 +658,16 @@ func (p *ProxyPool) statusString(status ProxyHealthStatus) string {
 
 // StartHealthCheck 启动定期健康检查
 func (p *ProxyPool) StartHealthCheck() {
+	// 校验 checkInterval，避免非正值导致 panic
+	checkInterval := p.checkInterval
+	if checkInterval <= 0 {
+		checkInterval = 30 * time.Second
+	}
+
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		ticker := time.NewTicker(p.checkInterval)
+		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
 
 		// 立即执行一次检查
@@ -651,8 +686,10 @@ func (p *ProxyPool) StartHealthCheck() {
 
 // Stop 停止代理池
 func (p *ProxyPool) Stop() {
-	close(p.stopCh)
-	p.wg.Wait()
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+		p.wg.Wait()
+	})
 }
 
 // GetStats 获取代理统计信息
@@ -860,9 +897,10 @@ func (p *ProxyPool) ForceHealthCheck(ctx context.Context) {
 // RecoverIsolatedProxies 尝试恢复已过隔离期的代理
 func (p *ProxyPool) RecoverIsolatedProxies() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	now := time.Now()
+	// 收集需要恢复的代理
+	var recoveredEntries []*ProxyEntry
 	for _, entry := range p.proxies {
 		if entry.Status == ProxyStatusIsolated && !entry.IsolatedAt.IsZero() {
 			if now.Sub(entry.IsolatedAt) >= p.isolationDuration {
@@ -870,12 +908,18 @@ func (p *ProxyPool) RecoverIsolatedProxies() {
 				entry.IsolatedAt = time.Time{}
 				entry.Healthy = true
 				entry.ConsecutiveFailures = 0
-				log.Printf("[ProxyPool] 代理已恢复: %s", entry.URL)
-				if p.onRecovery != nil {
-					p.onRecovery(entry)
-				}
+				recoveredEntries = append(recoveredEntries, entry)
 			}
 		}
 	}
 	p.rebuildHealthyList()
+	p.mu.Unlock()
+
+	// 在锁外执行回调，避免死锁
+	for _, entry := range recoveredEntries {
+		log.Printf("[ProxyPool] 代理已恢复: %s", entry.URL)
+		if p.onRecovery != nil {
+			p.onRecovery(entry)
+		}
+	}
 }

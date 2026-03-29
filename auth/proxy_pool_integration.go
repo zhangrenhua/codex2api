@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"log"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -104,8 +105,7 @@ func (e *EnhancedProxyPool) SelectWithStrategy(strategy ProxySelectionStrategy) 
 		return nil
 	}
 
-	e.pool.SetStrategy(strategy)
-	return e.pool.Select()
+	return e.pool.SelectWithStrategy(strategy)
 }
 
 // MarkProxySuccess 标记代理成功
@@ -290,10 +290,10 @@ func NewStoreProxyPoolIntegration(store *Store, db *database.DB, settings *datab
 	if settings != nil && settings.ProxyPoolEnabled {
 		config := &ProxyPoolConfig{
 			Strategy:           ParseStrategy(getEnv("PROXY_POOL_STRATEGY", "round_robin")),
-			CheckInterval:      parseDuration(getEnv("PROXY_POOL_CHECK_INTERVAL", "30s")),
-			Timeout:            parseDuration(getEnv("PROXY_POOL_TIMEOUT", "10s")),
-			IsolationThreshold: parseInt(getEnv("PROXY_POOL_ISOLATION_THRESHOLD", "3")),
-			IsolationDuration:  parseDuration(getEnv("PROXY_POOL_ISOLATION_DURATION", "5m")),
+			CheckInterval:      parseDuration(getEnv("PROXY_POOL_CHECK_INTERVAL", "30s"), 30*time.Second),
+			Timeout:            parseDuration(getEnv("PROXY_POOL_TIMEOUT", "10s"), 10*time.Second),
+			IsolationThreshold: parseInt(getEnv("PROXY_POOL_ISOLATION_THRESHOLD", "3"), 3),
+			IsolationDuration:  parseDuration(getEnv("PROXY_POOL_ISOLATION_DURATION", "5m"), 5*time.Minute),
 			HealthCheckURL:     getEnv("PROXY_POOL_HEALTH_CHECK_URL", "http://www.google.com/generate_204"),
 		}
 
@@ -369,20 +369,17 @@ func getEnv(key, defaultValue string) string {
 }
 
 // 用于测试注入
-var getEnvFunc = func(key string) string {
-	// 这里应该调用 os.Getenv，但为了避免 import cycle，我们使用这个包装
-	return ""
-}
+var getEnvFunc = os.Getenv
 
-func parseDuration(s string) time.Duration {
+func parseDuration(s string, defaultValue time.Duration) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return 30 * time.Second
+		return defaultValue
 	}
 	return d
 }
 
-func parseInt(s string) int {
+func parseInt(s string, defaultValue int) int {
 	var result int
 	for _, c := range s {
 		if c >= '0' && c <= '9' {
@@ -392,7 +389,7 @@ func parseInt(s string) int {
 		}
 	}
 	if result == 0 {
-		return 3
+		return defaultValue
 	}
 	return result
 }

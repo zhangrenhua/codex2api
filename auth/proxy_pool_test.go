@@ -348,7 +348,7 @@ func TestProxyPoolUpdateProxyWeight(t *testing.T) {
 
 func TestProxyPoolRecoverIsolatedProxies(t *testing.T) {
 	pool := NewProxyPool(nil)
-	pool.isolationDuration = 100 * time.Millisecond
+	pool.isolationDuration = 50 * time.Millisecond
 
 	pool.AddProxy("http://proxy1:8080", 10)
 
@@ -362,15 +362,14 @@ func TestProxyPoolRecoverIsolatedProxies(t *testing.T) {
 		t.Fatal("Proxy should be isolated")
 	}
 
-	// 等待隔离期结束
-	time.Sleep(150 * time.Millisecond)
-
-	// 恢复代理
-	pool.RecoverIsolatedProxies()
-
-	// 状态应该变为健康
-	if entry.Status != ProxyStatusHealthy {
-		t.Error("Proxy should be recovered after isolation period")
+	// 轮询等待隔离期结束，而不是固定 sleep
+	start := time.Now()
+	for entry.Status != ProxyStatusHealthy {
+		if time.Since(start) > 2*time.Second {
+			t.Fatal("Timeout waiting for proxy recovery")
+		}
+		time.Sleep(10 * time.Millisecond)
+		pool.RecoverIsolatedProxies()
 	}
 }
 

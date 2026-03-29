@@ -275,7 +275,7 @@ func TestParseDuration(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		result := parseDuration(test.input)
+		result := parseDuration(test.input, 30*time.Second)
 		if result != test.expected {
 			t.Errorf("parseDuration(%s) = %v, want %v", test.input, result, test.expected)
 		}
@@ -295,7 +295,7 @@ func TestParseInt(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		result := parseInt(test.input)
+		result := parseInt(test.input, 3)
 		if result != test.expected {
 			t.Errorf("parseInt(%s) = %d, want %d", test.input, result, test.expected)
 		}
