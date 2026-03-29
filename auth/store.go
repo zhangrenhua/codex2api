@@ -1150,8 +1150,14 @@ func (s *Store) CleanByRuntimeStatus(ctx context.Context, targetStatus string) i
 
 // Next 获取下一个可用账号（健康优先 + 低负载择优 + warm 公平调度）
 func (s *Store) Next() *Account {
+	return s.NextExcluding(nil)
+}
+
+// NextExcluding 获取下一个可用账号，排除指定的账号 ID 集合
+// 用于重试时避免再次选到已失败（如 401）的账号
+func (s *Store) NextExcluding(exclude map[int64]bool) *Account {
 	if scheduler := s.getFastScheduler(); scheduler != nil {
-		return scheduler.Acquire()
+		return scheduler.AcquireExcluding(exclude)
 	}
 
 	s.mu.RLock()
@@ -1167,6 +1173,9 @@ func (s *Store) Next() *Account {
 	var candidates []*Account
 
 	for _, acc := range s.accounts {
+		if exclude != nil && exclude[acc.DBID] {
+			continue
+		}
 		if !acc.IsAvailable() {
 			continue
 		}
