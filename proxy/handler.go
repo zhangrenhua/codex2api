@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/api"
@@ -1222,6 +1223,9 @@ func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []by
 		log.Printf("账号 %d 被限速 (plan=%s)，冷却 %v", account.ID(), account.GetPlanType(), cooldown)
 		h.store.MarkCooldown(account, cooldown, "rate_limited")
 	case http.StatusUnauthorized:
+		// 原子标志瞬间置位，阻止其他并发请求再选到该账号
+		atomic.StoreInt32(&account.Disabled, 1)
+
 		if h.store.GetAutoCleanUnauthorized() {
 			// 开启自动清理时，401 立即从号池删除
 			log.Printf("账号 %d 收到 401，立即清理", account.ID())

@@ -87,6 +87,7 @@ type Account struct {
 	ActiveRequests int64 // 当前并发请求数
 	TotalRequests  int64 // 累计总请求数
 	LastUsedAt     int64 // 最后使用时间（UnixNano）
+	Disabled       int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
 
 }
 
@@ -356,6 +357,11 @@ func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64
 
 // IsAvailable 检查账号是否可用
 func (a *Account) IsAvailable() bool {
+	// 原子标志优先：401 时瞬间置位，无需等锁即可拦截并发请求
+	if atomic.LoadInt32(&a.Disabled) != 0 {
+		return false
+	}
+
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -1423,6 +1429,7 @@ func (s *Store) ClearCooldown(acc *Account) {
 		return
 	}
 
+	atomic.StoreInt32(&acc.Disabled, 0) // 清除原子禁用标志
 	acc.mu.Lock()
 	wasCooling := acc.Status == StatusCooldown
 	if acc.Status == StatusCooldown {
@@ -1747,6 +1754,7 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 				log.Printf("[账号 %d] 恢复探测失败: %v", account.DBID, err)
 			} else {
 				// 探测成功：将账号从 banned 升级到 warm，给予重新调度的机会
+				atomic.StoreInt32(&account.Disabled, 0) // 清除原子禁用标志
 				account.mu.Lock()
 				if account.HealthTier == HealthTierBanned {
 					account.HealthTier = HealthTierWarm
