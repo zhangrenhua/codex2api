@@ -968,12 +968,14 @@ func (s *Store) GetAutoCleanExpired() bool {
 	return s.autoCleanExpired.Load()
 }
 
-// SetAutoCleanExpired 设置是否自动清理过期账号（开启时立即执行一次）
+// SetAutoCleanExpired 设置是否自动清理过期账号
 func (s *Store) SetAutoCleanExpired(enabled bool) {
 	s.autoCleanExpired.Store(enabled)
-	if enabled {
-		go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
-	}
+}
+
+// CleanExpiredNow 立即执行一次过期清理，返回清理数量
+func (s *Store) CleanExpiredNow() int {
+	return s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
 }
 
 // Init 初始化：从数据库加载账号
