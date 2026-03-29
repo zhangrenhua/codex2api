@@ -110,10 +110,10 @@ func New(driver string, dsn string) (*DB, error) {
 		conn.SetConnMaxIdleTime(30 * time.Minute)  // 增加空闲连接最大闲置时间
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pingCancel()
 
-	if err := conn.PingContext(ctx); err != nil {
+	if err := conn.PingContext(pingCtx); err != nil {
 		return nil, fmt.Errorf("数据库连接测试失败: %w", err)
 	}
 
@@ -124,11 +124,14 @@ func New(driver string, dsn string) (*DB, error) {
 		logBufCap: 128,
 	}
 	if db.isSQLite() {
-		if err := db.configureSQLite(ctx); err != nil {
+		if err := db.configureSQLite(pingCtx); err != nil {
 			return nil, fmt.Errorf("配置 SQLite 失败: %w", err)
 		}
 	}
-	if err := db.migrate(ctx); err != nil {
+	// 迁移可能涉及大表 ALTER COLUMN TYPE，需要更长超时
+	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer migrateCancel()
+	if err := db.migrate(migrateCtx); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
 
@@ -143,7 +146,7 @@ func New(driver string, dsn string) (*DB, error) {
 			INSERT OR IGNORE INTO usage_stats_baseline (id) VALUES (1)
 		`
 	}
-	_, err = db.conn.ExecContext(ctx, `
+	_, err = db.conn.ExecContext(migrateCtx, `
 		CREATE TABLE IF NOT EXISTS usage_stats_baseline (
 			id              INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
 			total_requests  BIGINT NOT NULL DEFAULT 0,
@@ -158,7 +161,7 @@ func New(driver string, dsn string) (*DB, error) {
 	}
 
 	// 确保 baseline 行存在
-	_, err = db.conn.ExecContext(ctx, baselineInsert)
+	_, err = db.conn.ExecContext(migrateCtx, baselineInsert)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 usage_stats_baseline 失败: %w", err)
 	}
