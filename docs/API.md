@@ -449,7 +449,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 #### GET /api/admin/accounts/export
 
-导出账号（CPA JSON 格式）。
+导出账号（标准 JSON 格式）。
 
 **查询参数:**
 - `filter`: healthy (只导出健康账号)

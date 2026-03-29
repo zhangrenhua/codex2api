@@ -7,8 +7,6 @@ Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管
 
 它对外提供兼容 OpenAI 风格的接口，并在内部维护一套基于 **Refresh Token 账号池** 的调度、刷新、测试、限流恢复、用量观测与后台管理能力。
 
-本项目在设计与实现思路上参考并鸣谢 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 与 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api)。
-
 ---
 
 ## 目录
