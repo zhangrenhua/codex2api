@@ -865,7 +865,7 @@ export default function ApiReference() {
         allKeys={allKeys}
         defaultBody={`{
   "name": "at-account",
-  "access_token": "at_xxxxx...",
+  "access_token": "eyJhbGciOi...",
   "proxy_url": ""
 }`}
         curlExample={`curl --request POST \\
@@ -874,7 +874,7 @@ export default function ApiReference() {
   --header 'Content-Type: application/json' \\
   --data '{
   "name": "at-account",
-  "access_token": "at_xxxxx...",
+  "access_token": "eyJhbGciOi...",
   "proxy_url": ""
 }'`}
         responseExamples={[
