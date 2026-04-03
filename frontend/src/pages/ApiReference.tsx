@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Copy, Check } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
@@ -145,6 +145,7 @@ function EndpointDoc({ method, path, title, description, curlExample, responseEx
 
 export default function ApiReference() {
   const { t } = useTranslation()
+  const baseUrl = useMemo(() => window.location.origin, [])
 
   return (
     <>
@@ -178,7 +179,7 @@ export default function ApiReference() {
         title={t('apiRef.responses.title')}
         description={t('apiRef.responses.desc')}
         curlExample={`curl --request POST \\
-  --url http://your-server:8080/v1/responses \\
+  --url ${baseUrl}/v1/responses \\
   --header 'Authorization: Bearer <token>' \\
   --header 'Content-Type: application/json' \\
   --data '{
@@ -250,7 +251,7 @@ export default function ApiReference() {
         title={t('apiRef.chat.title')}
         description={t('apiRef.chat.desc')}
         curlExample={`curl --request POST \\
-  --url http://your-server:8080/v1/chat/completions \\
+  --url ${baseUrl}/v1/chat/completions \\
   --header 'Authorization: Bearer <token>' \\
   --header 'Content-Type: application/json' \\
   --data '{
@@ -307,7 +308,7 @@ export default function ApiReference() {
         title={t('apiRef.messages.title')}
         description={t('apiRef.messages.desc')}
         curlExample={`curl --request POST \\
-  --url http://your-server:8080/v1/messages \\
+  --url ${baseUrl}/v1/messages \\
   --header 'x-api-key: <token>' \\
   --header 'Content-Type: application/json' \\
   --header 'anthropic-version: 2023-06-01' \\
@@ -370,7 +371,7 @@ export default function ApiReference() {
         title={t('apiRef.models.title')}
         description={t('apiRef.models.desc')}
         curlExample={`curl --request GET \\
-  --url http://your-server:8080/v1/models \\
+  --url ${baseUrl}/v1/models \\
   --header 'Authorization: Bearer <token>'`}
         responseExamples={[
           { code: 200, body: `{
@@ -402,7 +403,7 @@ export default function ApiReference() {
         title={t('apiRef.health.title')}
         description={t('apiRef.health.desc')}
         curlExample={`curl --request GET \\
-  --url http://your-server:8080/health`}
+  --url ${baseUrl}/health`}
         responseExamples={[
           { code: 200, body: `{
   "status": "ok",
