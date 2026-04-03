@@ -6,6 +6,7 @@ import PageHeader from '../components/PageHeader'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -232,15 +233,14 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
                 {allKeys.length > 0 && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground shrink-0">{t('apiRef.tryIt.selectKey')}</span>
-                    <select
-                      className="flex-1 px-2.5 py-1.5 rounded-lg border border-border bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 appearance-none cursor-pointer"
+                    <Select
                       value={token}
-                      onChange={e => setToken(e.target.value)}
-                    >
-                      {allKeys.map((k, i) => (
-                        <option key={i} value={k.key}>{k.name} — {k.key.length > 20 ? k.key.slice(0, 8) + '...' + k.key.slice(-4) : k.key}</option>
-                      ))}
-                    </select>
+                      onValueChange={v => setToken(v)}
+                      options={allKeys.map(k => ({
+                        label: `${k.name} — ${k.key.length > 20 ? k.key.slice(0, 8) + '...' + k.key.slice(-4) : k.key}`,
+                        value: k.key,
+                      }))}
+                    />
                   </div>
                 )}
               </div>
@@ -253,7 +253,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
                   <span className="text-sm font-semibold text-foreground">Request Body</span>
                 </div>
                 <textarea
-                  className="w-full h-56 p-4 bg-background font-mono text-[13px] leading-relaxed resize-none focus:outline-none border-0"
+                  className="w-full h-56 p-4 bg-background font-mono text-[15px] leading-relaxed resize-none focus:outline-none border-0"
                   value={body}
                   onChange={e => setBody(e.target.value)}
                   spellCheck={false}
@@ -276,7 +276,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
               </div>
               <div className="flex-1 overflow-auto">
                 {response ? (
-                  <pre className="p-4 font-mono text-[13px] text-foreground leading-relaxed whitespace-pre-wrap">
+                  <pre className="p-4 font-mono text-[15px] text-foreground leading-relaxed whitespace-pre-wrap">
                     <code>{response}</code>
                   </pre>
                 ) : (
