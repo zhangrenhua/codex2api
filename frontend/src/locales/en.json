@@ -150,7 +150,7 @@
     "importTxt": "TXT File",
     "importTxtDesc": "One refresh token per line",
     "importJson": "JSON File",
-    "importJsonDesc": "Compatible with CLIProxyAPI credential JSON",
+    "importJsonDesc": "Compatible with CLIProxyAPI and Sub2Api JSON",
     "export": "Export",
     "exporting": "Exporting…",
     "exportTitle": "Select Export Method",
