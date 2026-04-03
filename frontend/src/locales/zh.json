@@ -598,7 +598,7 @@
     "pagination": "共 {{total}} 个代理，第 {{page}}/{{totalPages}} 页"
   },
   "nav2": {
-    "guide": "使用教程",
+    "docs": "使用文档",
     "apiRef": "API 文档"
   },
   "guide": {

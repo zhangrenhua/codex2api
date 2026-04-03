@@ -598,7 +598,7 @@
     "pagination": "{{total}} proxies, page {{page}}/{{totalPages}}"
   },
   "nav2": {
-    "guide": "Guide",
+    "docs": "Docs",
     "apiRef": "API Reference"
   },
   "guide": {
