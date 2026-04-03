@@ -81,15 +81,16 @@ function StatusTabs({ tabs, active, onChange }: { tabs: { code: number; label?: 
 }
 
 // 方法颜色
-function MethodBadge({ method }: { method: string }) {
+function MethodBadge({ method, sm }: { method: string; sm?: boolean }) {
   const colors: Record<string, string> = {
     GET: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800',
     POST: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 border-blue-200 dark:border-blue-800',
     PUT: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border-amber-200 dark:border-amber-800',
     DELETE: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-800',
   }
+  const size = sm ? 'px-1.5 py-0.5 rounded text-[10px]' : 'px-2.5 py-1 rounded-lg text-xs'
   return (
-    <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold border ${colors[method] || 'bg-muted text-foreground border-border'}`}>
+    <span className={`inline-flex items-center font-bold border ${size} ${colors[method] || 'bg-muted text-foreground border-border'}`}>
       {method}
     </span>
   )
@@ -173,16 +174,16 @@ export default function ApiReference() {
         description={t('apiRef.description')}
       />
 
-      {/* 固定导航栏 */}
-      <div className="sticky top-0 z-30 -mx-6 px-6 py-2 mb-4 bg-background/80 backdrop-blur-lg border-b border-border">
-        <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-thin">
+      {/* 悬浮导航栏 */}
+      <div className="sticky top-2 z-30 mb-4">
+        <div className="flex flex-wrap items-center gap-x-1 gap-y-1 px-4 py-2.5 rounded-2xl border border-border bg-background/80 backdrop-blur-lg shadow-sm">
           {navItems.map(item => (
             <button
               key={item.id}
               onClick={() => scrollTo(item.id)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/60"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/60"
             >
-              {item.method && <MethodBadge method={item.method} />}
+              {item.method && <MethodBadge method={item.method} sm />}
               <span>{item.label}</span>
             </button>
           ))}
