@@ -96,7 +96,8 @@ function MethodBadge({ method }: { method: string }) {
 }
 
 // 单个端点文档
-function EndpointDoc({ method, path, title, description, curlExample, responseExamples }: {
+function EndpointDoc({ id, method, path, title, description, curlExample, responseExamples }: {
+  id?: string
   method: string
   path: string
   title: string
@@ -108,7 +109,7 @@ function EndpointDoc({ method, path, title, description, curlExample, responseEx
   const activeBody = responseExamples.find(r => r.code === activeStatus)?.body ?? ''
 
   return (
-    <Card className="mb-6">
+    <Card id={id} className="mb-6 scroll-mt-20">
       <CardContent className="p-6">
         {/* 标题 */}
         <h3 className="text-xl font-bold text-foreground mb-1">{title}</h3>
@@ -147,6 +148,24 @@ export default function ApiReference() {
   const { t } = useTranslation()
   const baseUrl = useMemo(() => window.location.origin, [])
 
+  const navItems = [
+    { id: 'auth', label: t('apiRef.authSection'), method: '' },
+    { id: 'responses', label: '/v1/responses', method: 'POST' },
+    { id: 'chat', label: '/v1/chat/completions', method: 'POST' },
+    { id: 'messages', label: '/v1/messages', method: 'POST' },
+    { id: 'models', label: '/v1/models', method: 'GET' },
+    { id: 'health', label: '/health', method: 'GET' },
+    { id: 'add-account', label: t('apiRef.addAccount.title'), method: 'POST' },
+    { id: 'add-account-at', label: t('apiRef.addATAccount.title'), method: 'POST' },
+    { id: 'import-accounts', label: t('apiRef.importAccounts.title'), method: 'POST' },
+    { id: 'delete-account', label: '/accounts/:id', method: 'DELETE' },
+    { id: 'list-accounts', label: '/accounts', method: 'GET' },
+  ]
+
+  const scrollTo = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  }
+
   return (
     <>
       <PageHeader
@@ -154,8 +173,24 @@ export default function ApiReference() {
         description={t('apiRef.description')}
       />
 
+      {/* 固定导航栏 */}
+      <div className="sticky top-0 z-30 -mx-6 px-6 py-2 mb-4 bg-background/80 backdrop-blur-lg border-b border-border">
+        <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-thin">
+          {navItems.map(item => (
+            <button
+              key={item.id}
+              onClick={() => scrollTo(item.id)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/60"
+            >
+              {item.method && <MethodBadge method={item.method} />}
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* 认证说明 */}
-      <Card className="mb-6">
+      <Card id="auth" className="mb-6 scroll-mt-20">
         <CardContent className="p-6">
           <h3 className="text-base font-semibold text-foreground mb-2">{t('apiRef.authSection')}</h3>
           <p className="text-sm text-muted-foreground mb-3">{t('apiRef.authDesc')}</p>
@@ -174,6 +209,7 @@ export default function ApiReference() {
 
       {/* POST /v1/responses */}
       <EndpointDoc
+        id="responses"
         method="POST"
         path="/v1/responses"
         title={t('apiRef.responses.title')}
@@ -246,6 +282,7 @@ export default function ApiReference() {
 
       {/* POST /v1/chat/completions */}
       <EndpointDoc
+        id="chat"
         method="POST"
         path="/v1/chat/completions"
         title={t('apiRef.chat.title')}
@@ -303,6 +340,7 @@ export default function ApiReference() {
 
       {/* POST /v1/messages */}
       <EndpointDoc
+        id="messages"
         method="POST"
         path="/v1/messages"
         title={t('apiRef.messages.title')}
@@ -366,6 +404,7 @@ export default function ApiReference() {
 
       {/* GET /v1/models */}
       <EndpointDoc
+        id="models"
         method="GET"
         path="/v1/models"
         title={t('apiRef.models.title')}
@@ -398,6 +437,7 @@ export default function ApiReference() {
 
       {/* GET /health */}
       <EndpointDoc
+        id="health"
         method="GET"
         path="/health"
         title={t('apiRef.health.title')}
@@ -421,6 +461,7 @@ export default function ApiReference() {
 
       {/* POST /api/admin/accounts — RT 导入 */}
       <EndpointDoc
+        id="add-account"
         method="POST"
         path="/api/admin/accounts"
         title={t('apiRef.addAccount.title')}
@@ -451,6 +492,7 @@ export default function ApiReference() {
 
       {/* POST /api/admin/accounts — 批量 RT */}
       <EndpointDoc
+        id="add-account-batch"
         method="POST"
         path="/api/admin/accounts"
         title={t('apiRef.addAccountBatch.title')}
@@ -475,6 +517,7 @@ export default function ApiReference() {
 
       {/* POST /api/admin/accounts/at — AT 导入 */}
       <EndpointDoc
+        id="add-account-at"
         method="POST"
         path="/api/admin/accounts/at"
         title={t('apiRef.addATAccount.title')}
@@ -502,6 +545,7 @@ export default function ApiReference() {
 
       {/* POST /api/admin/accounts/import — 文件导入 */}
       <EndpointDoc
+        id="import-accounts"
         method="POST"
         path="/api/admin/accounts/import"
         title={t('apiRef.importAccounts.title')}
@@ -545,6 +589,7 @@ curl --request POST \\
 
       {/* DELETE /api/admin/accounts/:id */}
       <EndpointDoc
+        id="delete-account"
         method="DELETE"
         path="/api/admin/accounts/:id"
         title={t('apiRef.deleteAccount.title')}
@@ -564,6 +609,7 @@ curl --request POST \\
 
       {/* GET /api/admin/accounts */}
       <EndpointDoc
+        id="list-accounts"
         method="GET"
         path="/api/admin/accounts"
         title={t('apiRef.listAccounts.title')}
