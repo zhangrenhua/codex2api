@@ -154,6 +154,8 @@
     "export": "导出",
     "exporting": "导出中…",
     "exportTitle": "选择导出方式",
+    "exportScopeHealthy": "所有健康账号",
+    "exportScopeSelected": "已选账号（{{count}} 个）",
     "exportHealthyJson": "CPA JSON（健康）",
     "exportHealthyJsonDesc": "导出所有健康账号",
     "exportHealthyTxt": "TXT（健康）",
