@@ -112,7 +112,7 @@ export default function Accounts() {
 
   const totalAccounts = accounts.length
   const normalAccounts = accounts.filter((account) => account.status === 'active' || account.status === 'ready').length
-  const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited').length
+  const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited' || account.status === 'usage_exhausted').length
   const bannedAccounts = accounts.filter((account) => account.status === 'unauthorized').length
   const lockedAccounts = accounts.filter((account) => account.locked).length
   const healthyAccounts = accounts.filter((account) => account.health_tier === 'healthy').length
@@ -126,7 +126,7 @@ export default function Accounts() {
         if (account.status !== 'active' && account.status !== 'ready') return false
         break
       case 'rate_limited':
-        if (account.status !== 'rate_limited') return false
+        if (account.status !== 'rate_limited' && account.status !== 'usage_exhausted') return false
         break
       case 'banned':
         if (account.status !== 'unauthorized') return false
