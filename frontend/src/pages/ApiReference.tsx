@@ -142,7 +142,7 @@ function EndpointDoc({ id, method, path, title, description, curlExample, respon
               onChange={setActiveStatus}
             />
           </div>
-          <pre className="p-4 font-mono text-sm text-muted-foreground overflow-x-auto leading-[1.8] bg-muted/5 max-h-[400px]">
+          <pre className="p-4 font-mono text-[15px] text-muted-foreground overflow-x-auto leading-[1.8] bg-muted/5 max-h-[400px]">
             <code>{activeBody}</code>
           </pre>
         </div>
