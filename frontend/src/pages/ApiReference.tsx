@@ -253,7 +253,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
                   <span className="text-sm font-semibold text-foreground">Request Body</span>
                 </div>
                 <textarea
-                  className="w-full h-56 p-4 bg-background font-mono text-[15px] leading-relaxed resize-none focus:outline-none border-0"
+                  className="w-full h-56 p-4 bg-background font-mono text-[20px] leading-relaxed resize-none focus:outline-none border-0"
                   value={body}
                   onChange={e => setBody(e.target.value)}
                   spellCheck={false}
@@ -276,7 +276,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
               </div>
               <div className="flex-1 overflow-auto">
                 {response ? (
-                  <pre className="p-4 font-mono text-[15px] text-foreground leading-relaxed whitespace-pre-wrap">
+                  <pre className="p-4 font-mono text-[20px] text-foreground leading-relaxed whitespace-pre-wrap">
                     <code>{response}</code>
                   </pre>
                 ) : (
