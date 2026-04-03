@@ -187,7 +187,7 @@
     "email": "Email",
     "plan": "Plan",
     "status": "Status",
-    "requests": "Requests",
+    "requests": "Requests(7d)",
     "usage": "Usage",
     "updatedAt": "Updated",
     "importTime": "Import Time",

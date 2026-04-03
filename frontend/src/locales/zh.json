@@ -187,7 +187,7 @@
     "email": "邮箱",
     "plan": "计划",
     "status": "状态",
-    "requests": "请求统计",
+    "requests": "请求(7d)",
     "usage": "用量",
     "updatedAt": "更新时间",
     "importTime": "导入时间",
