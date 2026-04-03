@@ -793,7 +793,7 @@ export default function ApiReference() {
         allKeys={allKeys}
         defaultBody={`{
   "name": "my-account",
-  "refresh_token": "eyJhbGciOi...",
+  "refresh_token": "rt_XPqsKO3Ld...\\nrt_H2qdhY",
   "proxy_url": ""
 }`}
         curlExample={`curl --request POST \\
@@ -802,7 +802,7 @@ export default function ApiReference() {
   --header 'Content-Type: application/json' \\
   --data '{
   "name": "my-account",
-  "refresh_token": "eyJhbGciOi...",
+  "refresh_token": "rt_XPqsKO3Ld...\\nrt_H2qdhY",
   "proxy_url": ""
 }'`}
         responseExamples={[
@@ -865,7 +865,7 @@ export default function ApiReference() {
         allKeys={allKeys}
         defaultBody={`{
   "name": "at-account",
-  "access_token": "eyJhbGciOi...",
+  "access_token": "at_xxxxx...",
   "proxy_url": ""
 }`}
         curlExample={`curl --request POST \\
@@ -874,7 +874,7 @@ export default function ApiReference() {
   --header 'Content-Type: application/json' \\
   --data '{
   "name": "at-account",
-  "access_token": "eyJhbGciOi...",
+  "access_token": "at_xxxxx...",
   "proxy_url": ""
 }'`}
         responseExamples={[
