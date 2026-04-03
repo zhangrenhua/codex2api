@@ -1388,6 +1388,15 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 					pageSize = n
 				}
 			}
+			var apiKeyID *int64
+			if apiKeyIDStr := c.Query("api_key_id"); apiKeyIDStr != "" {
+				parsed, err := strconv.ParseInt(apiKeyIDStr, 10, 64)
+				if err != nil || parsed <= 0 {
+					writeError(c, http.StatusBadRequest, "api_key_id 参数无效，需要正整数")
+					return
+				}
+				apiKeyID = &parsed
+			}
 
 			filter := database.UsageLogFilter{
 				Start:    startTime,
@@ -1397,6 +1406,7 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 				Email:    c.Query("email"),
 				Model:    c.Query("model"),
 				Endpoint: c.Query("endpoint"),
+				APIKeyID: apiKeyID,
 			}
 			if fastStr := c.Query("fast"); fastStr != "" {
 				v := fastStr == "true"
