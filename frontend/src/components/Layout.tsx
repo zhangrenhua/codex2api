@@ -1,6 +1,6 @@
 import { type PropsWithChildren, type ReactNode, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe, BookOpen } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
 import { useTheme } from '../hooks/useTheme'
@@ -21,6 +21,7 @@ const navDefs: NavDef[] = [
   { to: '/ops/scheduler', labelKey: 'nav.scheduler', icon: <Workflow className="size-[18px]" />, end: true },
   { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
   { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[18px]" /> },
+  { to: '/guide', labelKey: 'nav2.guide', icon: <BookOpen className="size-[18px]" /> },
 ]
 
 export default function Layout({ children }: PropsWithChildren) {

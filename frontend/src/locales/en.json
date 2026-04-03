@@ -596,5 +596,42 @@
     "test": "Test",
     "testProxy": "Test Proxy",
     "pagination": "{{total}} proxies, page {{page}}/{{totalPages}}"
+  },
+  "nav2": {
+    "guide": "Guide"
+  },
+  "guide": {
+    "title": "Usage Guide",
+    "description": "Learn how to configure and call CodexProxy API endpoints",
+    "endpoints": "API Endpoints",
+    "endpointsDesc": "CodexProxy provides three API endpoints compatible with different client formats.",
+    "responsesTitle": "POST /v1/responses",
+    "responsesDesc": "Native Codex Responses API endpoint. Directly proxies requests to upstream. For Codex CLI, OpenAI SDK and other native clients.",
+    "chatTitle": "POST /v1/chat/completions",
+    "chatDesc": "OpenAI Chat Completions compatible endpoint. Accepts OpenAI format, translates to Codex format, and translates responses back. For ChatGPT compatible clients.",
+    "messagesTitle": "POST /v1/messages",
+    "messagesDesc": "Anthropic Messages API compatible endpoint. Accepts Claude format, translates to Codex format, and translates responses back. For Claude Code and other Anthropic clients.",
+    "claudeCodeTitle": "Using with Claude Code",
+    "claudeCodeDesc": "Set two environment variables to let Claude Code use Codex models through this proxy:",
+    "claudeCodeNote": "Replace YOUR_API_KEY with the API Key created in Settings. Model mapping can be configured in Settings.",
+    "authTitle": "Authentication",
+    "authDesc": "All endpoints support the following authentication methods (in priority order):",
+    "authBearer": "Authorization: Bearer <key> (standard)",
+    "authXApiKey": "x-api-key: <key> (Anthropic SDK default)",
+    "authAnthropicToken": "anthropic-auth-token: <key> (fallback)",
+    "modelMappingTitle": "Model Mapping",
+    "modelMappingDesc": "When using the /v1/messages endpoint, Claude model names are automatically mapped to Codex model names. Mapping rules can be customized in Settings.",
+    "exampleTitle": "Request Examples",
+    "responsesExample": "Responses API Example",
+    "chatExample": "Chat Completions Example",
+    "messagesExample": "Messages API Example (Claude Code format)"
+  },
+  "settings2": {
+    "modelMapping": "Model Mapping",
+    "modelMappingDesc": "Configure Anthropic model name to Codex model name mapping (for /v1/messages endpoint)",
+    "anthropicModel": "Anthropic Model",
+    "codexModel": "Codex Model",
+    "addMapping": "Add Mapping",
+    "messagesEndpoint": "Anthropic Messages API endpoint (Claude Code)"
   }
 }

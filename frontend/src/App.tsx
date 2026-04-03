@@ -7,6 +7,7 @@ import Operations from './pages/Operations'
 import Proxies from './pages/Proxies'
 import SchedulerBoard from './pages/SchedulerBoard'
 import Settings from './pages/Settings'
+import Guide from './pages/Guide'
 import Usage from './pages/Usage'
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/ops/scheduler" element={<SchedulerBoard />} />
           <Route path="/usage" element={<Usage />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/guide" element={<Guide />} />
         </Routes>
       </Layout>
     </AuthGate>

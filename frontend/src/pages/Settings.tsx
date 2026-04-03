@@ -26,6 +26,80 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
+import { Trash2 } from 'lucide-react'
+
+// 模型映射编辑器组件
+function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { t } = useTranslation()
+
+  let mappings: [string, string][] = []
+  try {
+    const parsed = JSON.parse(value || '{}')
+    mappings = Object.entries(parsed) as [string, string][]
+  } catch {
+    mappings = []
+  }
+
+  const updateMappings = (entries: [string, string][]) => {
+    const obj: Record<string, string> = {}
+    for (const [k, v] of entries) {
+      if (k.trim()) obj[k.trim()] = v.trim()
+    }
+    onChange(JSON.stringify(obj))
+  }
+
+  const handleChange = (index: number, field: 0 | 1, val: string) => {
+    const next = [...mappings]
+    next[index] = [...next[index]] as [string, string]
+    next[index][field] = val
+    updateMappings(next)
+  }
+
+  const handleRemove = (index: number) => {
+    const next = mappings.filter((_, i) => i !== index)
+    updateMappings(next)
+  }
+
+  const handleAdd = () => {
+    updateMappings([...mappings, ['', '']])
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[1fr_1fr_40px] gap-2 text-xs font-semibold text-muted-foreground">
+        <span>{t('settings2.anthropicModel')}</span>
+        <span>{t('settings2.codexModel')}</span>
+        <span />
+      </div>
+      {mappings.map(([k, v], i) => (
+        <div key={i} className="grid grid-cols-[1fr_1fr_40px] gap-2 items-center">
+          <Input
+            className="font-mono text-[13px]"
+            placeholder="claude-opus-4-6"
+            value={k}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
+          />
+          <Input
+            className="font-mono text-[13px]"
+            placeholder="gpt-5.4"
+            value={v}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
+          />
+          <button
+            onClick={() => handleRemove(i)}
+            className="flex items-center justify-center size-9 rounded-lg text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+          >
+            <Trash2 className="size-4" />
+          </button>
+        </div>
+      ))}
+      <Button variant="outline" size="sm" onClick={handleAdd}>
+        + {t('settings2.addMapping')}
+      </Button>
+    </div>
+  )
+}
+
 function maskKey(key: string): string {
   if (!key || key.length < 12) return key
   return key.slice(0, 7) + '???????' + key.slice(-4)
@@ -62,6 +136,7 @@ export default function Settings() {
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
     cache_label: 'Redis',
+    model_mapping: '{}',
   })
   const [savingSettings, setSavingSettings] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
@@ -559,6 +634,18 @@ export default function Settings() {
           </CardContent>
         </Card>
 
+        {/* Model Mapping */}
+        <Card className="mb-4">
+          <CardContent className="p-6">
+            <h3 className="text-base font-semibold text-foreground mb-2">{t('settings2.modelMapping')}</h3>
+            <p className="text-xs text-muted-foreground mb-4">{t('settings2.modelMappingDesc')}</p>
+            <ModelMappingEditor
+              value={settingsForm.model_mapping}
+              onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
+            />
+          </CardContent>
+        </Card>
+
         {/* API Endpoints */}
         <Card>
           <CardContent className="p-6">
@@ -582,6 +669,11 @@ export default function Settings() {
                     <TableCell><Badge variant="outline" className="text-[13px]">POST</Badge></TableCell>
                     <TableCell className="font-mono text-[20px]">/v1/responses</TableCell>
                     <TableCell className="text-[14px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="outline" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[20px]">/v1/messages</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
                   </TableRow>
                   <TableRow>
                     <TableCell><Badge variant="secondary" className="text-[13px]">GET</Badge></TableCell>
