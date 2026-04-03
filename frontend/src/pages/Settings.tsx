@@ -28,6 +28,17 @@ import {
 
 import { Trash2 } from 'lucide-react'
 
+// 默认模型映射
+const DEFAULT_MODEL_MAPPING: Record<string, string> = {
+  'claude-opus-4-6': 'gpt-5.4',
+  'claude-opus-4-6-20250610': 'gpt-5.4',
+  'claude-haiku-4-5-20251001': 'gpt-5.4-mini',
+  'claude-haiku-4-5': 'gpt-5.4-mini',
+  'claude-sonnet-4-6': 'gpt-5.3-codex',
+  'claude-sonnet-4-5-20250929': 'gpt-5.2-codex',
+  'claude-opus-4-5-20251101': 'gpt-5.3-codex',
+}
+
 // 模型映射编辑器组件
 function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { t } = useTranslation()
@@ -35,9 +46,11 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
   let mappings: [string, string][] = []
   try {
     const parsed = JSON.parse(value || '{}')
-    mappings = Object.entries(parsed) as [string, string][]
+    const entries = Object.entries(parsed) as [string, string][]
+    // 如果数据库中为空，用默认值填充
+    mappings = entries.length > 0 ? entries : Object.entries(DEFAULT_MODEL_MAPPING) as [string, string][]
   } catch {
-    mappings = []
+    mappings = Object.entries(DEFAULT_MODEL_MAPPING) as [string, string][]
   }
 
   const updateMappings = (entries: [string, string][]) => {
