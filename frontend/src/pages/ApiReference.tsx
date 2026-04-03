@@ -412,6 +412,183 @@ export default function ApiReference() {
 }` },
         ]}
       />
+
+      {/* 账号管理分隔 */}
+      <div className="mt-10 mb-6">
+        <h2 className="text-lg font-bold text-foreground mb-1">{t('apiRef.accountSection')}</h2>
+        <p className="text-sm text-muted-foreground">{t('apiRef.accountSectionDesc')}</p>
+      </div>
+
+      {/* POST /api/admin/accounts — RT 导入 */}
+      <EndpointDoc
+        method="POST"
+        path="/api/admin/accounts"
+        title={t('apiRef.addAccount.title')}
+        description={t('apiRef.addAccount.desc')}
+        curlExample={`curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "name": "my-account",
+  "refresh_token": "eyJhbGciOi...",
+  "proxy_url": ""
+}'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "成功添加 1 个账号",
+  "success": 1,
+  "failed": 0
+}` },
+          { code: 400, body: `{
+  "error": "refresh_token 是必填字段"
+}` },
+          { code: 401, body: `{
+  "error": "Unauthorized"
+}` },
+        ]}
+      />
+
+      {/* POST /api/admin/accounts — 批量 RT */}
+      <EndpointDoc
+        method="POST"
+        path="/api/admin/accounts"
+        title={t('apiRef.addAccountBatch.title')}
+        description={t('apiRef.addAccountBatch.desc')}
+        curlExample={`curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "name": "batch",
+  "refresh_token": "token_1\\ntoken_2\\ntoken_3",
+  "proxy_url": ""
+}'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "成功添加 3 个账号",
+  "success": 3,
+  "failed": 0
+}` },
+        ]}
+      />
+
+      {/* POST /api/admin/accounts/at — AT 导入 */}
+      <EndpointDoc
+        method="POST"
+        path="/api/admin/accounts/at"
+        title={t('apiRef.addATAccount.title')}
+        description={t('apiRef.addATAccount.desc')}
+        curlExample={`curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/at \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "name": "at-account",
+  "access_token": "eyJhbGciOi...",
+  "proxy_url": ""
+}'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "成功添加 1 个 AT-only 账号",
+  "success": 1,
+  "failed": 0
+}` },
+          { code: 400, body: `{
+  "error": "access_token 是必填字段"
+}` },
+        ]}
+      />
+
+      {/* POST /api/admin/accounts/import — 文件导入 */}
+      <EndpointDoc
+        method="POST"
+        path="/api/admin/accounts/import"
+        title={t('apiRef.importAccounts.title')}
+        description={t('apiRef.importAccounts.desc')}
+        curlExample={`# TXT 格式（每行一个 Refresh Token）
+curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/import \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --form 'file=@tokens.txt' \\
+  --form 'format=txt' \\
+  --form 'proxy_url='
+
+# JSON 格式（兼容 CLIProxyAPI 凭证导出）
+curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/import \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --form 'file=@credentials.json' \\
+  --form 'format=json' \\
+  --form 'proxy_url='
+
+# AT TXT 格式（每行一个 Access Token）
+curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/import \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --form 'file=@access_tokens.txt' \\
+  --form 'format=at_txt' \\
+  --form 'proxy_url='`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "导入完成：成功 5，失败 0，重复 2",
+  "total": 7,
+  "success": 5,
+  "failed": 0,
+  "duplicate": 2
+}` },
+          { code: 400, body: `{
+  "error": "请上传文件（字段名: file）"
+}` },
+        ]}
+      />
+
+      {/* DELETE /api/admin/accounts/:id */}
+      <EndpointDoc
+        method="DELETE"
+        path="/api/admin/accounts/:id"
+        title={t('apiRef.deleteAccount.title')}
+        description={t('apiRef.deleteAccount.desc')}
+        curlExample={`curl --request DELETE \\
+  --url ${baseUrl}/api/admin/accounts/1 \\
+  --header 'X-Admin-Key: <admin_secret>'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "账号已删除"
+}` },
+          { code: 404, body: `{
+  "error": "账号不存在"
+}` },
+        ]}
+      />
+
+      {/* GET /api/admin/accounts */}
+      <EndpointDoc
+        method="GET"
+        path="/api/admin/accounts"
+        title={t('apiRef.listAccounts.title')}
+        description={t('apiRef.listAccounts.desc')}
+        curlExample={`curl --request GET \\
+  --url ${baseUrl}/api/admin/accounts \\
+  --header 'X-Admin-Key: <admin_secret>'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "accounts": [
+    {
+      "id": 1,
+      "name": "my-account",
+      "email": "user@example.com",
+      "plan_type": "team",
+      "status": "active",
+      "proxy_url": "",
+      "created_at": "2025-01-01T00:00:00Z",
+      "total_requests": 128,
+      "success_requests": 125
+    }
+  ]
+}` },
+        ]}
+      />
     </>
   )
 }
