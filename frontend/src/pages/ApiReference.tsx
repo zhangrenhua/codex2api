@@ -62,20 +62,26 @@ function CodeBlock({ label, content, lang }: { label?: string; content: string; 
 // 状态码 Tab 切换
 function StatusTabs({ tabs, active, onChange }: { tabs: { code: number; label?: string }[]; active: number; onChange: (c: number) => void }) {
   return (
-    <div className="flex items-center gap-1 border-b border-border mb-0">
-      {tabs.map(tab => (
-        <button
-          key={tab.code}
-          onClick={() => onChange(tab.code)}
-          className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-            active === tab.code
-              ? 'border-foreground text-foreground'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          {tab.code}
-        </button>
-      ))}
+    <div className="flex items-center gap-0.5 border-b border-border mb-0">
+      {tabs.map(tab => {
+        const isActive = active === tab.code
+        const codeColor = tab.code < 300 ? 'text-emerald-600 dark:text-emerald-400'
+          : tab.code < 400 ? 'text-amber-600 dark:text-amber-400'
+          : 'text-red-500 dark:text-red-400'
+        return (
+          <button
+            key={tab.code}
+            onClick={() => onChange(tab.code)}
+            className={`px-3 py-2 text-[13px] font-semibold border-b-2 transition-colors ${
+              isActive
+                ? `border-foreground ${codeColor}`
+                : 'border-transparent text-muted-foreground/60 hover:text-muted-foreground'
+            }`}
+          >
+            {tab.code}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -129,14 +135,14 @@ function EndpointDoc({ id, method, path, title, description, curlExample, respon
 
         {/* 响应示例 */}
         <div className="border border-border rounded-xl overflow-hidden">
-          <div className="px-4 pt-2 bg-muted/30">
+          <div className="px-4 pt-1.5 bg-muted/30">
             <StatusTabs
               tabs={responseExamples.map(r => ({ code: r.code }))}
               active={activeStatus}
               onChange={setActiveStatus}
             />
           </div>
-          <pre className="p-4 font-mono text-[13px] text-foreground overflow-x-auto leading-relaxed bg-muted/10 max-h-[400px]">
+          <pre className="p-4 font-mono text-[12px] text-muted-foreground overflow-x-auto leading-[1.7] bg-muted/5 max-h-[400px]">
             <code>{activeBody}</code>
           </pre>
         </div>
@@ -245,15 +251,15 @@ export default function ApiReference() {
       <Card id="auth" className="mb-6 scroll-mt-20">
         <CardContent className="p-6">
           <h3 className="text-base font-semibold text-foreground mb-2">{t('apiRef.authSection')}</h3>
-          <p className="text-sm text-muted-foreground mb-3">{t('apiRef.authDesc')}</p>
-          <div className="space-y-1.5 text-sm font-mono">
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="text-[11px]">Header</Badge>
-              <code className="text-[13px]">Authorization: Bearer &lt;key&gt;</code>
+          <p className="text-sm text-muted-foreground mb-4">{t('apiRef.authDesc')}</p>
+          <div className="space-y-2.5">
+            <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border">
+              <Badge variant="outline" className="text-[10px] font-bold shrink-0">Header</Badge>
+              <code className="font-mono text-[13px] font-medium text-foreground/80">Authorization: Bearer <span className="text-muted-foreground italic">&lt;key&gt;</span></code>
             </div>
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="text-[11px]">Header</Badge>
-              <code className="text-[13px]">x-api-key: &lt;key&gt;</code>
+            <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border">
+              <Badge variant="outline" className="text-[10px] font-bold shrink-0">Header</Badge>
+              <code className="font-mono text-[13px] font-medium text-foreground/80">x-api-key: <span className="text-muted-foreground italic">&lt;key&gt;</span></code>
             </div>
           </div>
         </CardContent>
