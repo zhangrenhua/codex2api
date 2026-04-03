@@ -699,7 +699,8 @@
       "button": "Try it",
       "send": "Send",
       "sending": "Sending…",
-      "placeholder": "Click Send to make a request"
+      "placeholder": "Click Send to make a request",
+      "selectKey": "Select key:"
     }
   }
 }

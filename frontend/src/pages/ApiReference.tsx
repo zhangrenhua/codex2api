@@ -111,7 +111,7 @@ function MethodBadge({ method, sm }: { method: string; sm?: boolean }) {
 }
 
 // Try It 测试弹窗
-function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl }: {
+function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl, allKeys }: {
   open: boolean
   onClose: () => void
   method: string
@@ -119,6 +119,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
   defaultBody: string
   apiKey: string
   baseUrl: string
+  allKeys: { name: string; key: string }[]
 }) {
   const { t } = useTranslation()
   const [body, setBody] = useState(defaultBody)
@@ -210,7 +211,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
               <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
                 <span className="text-sm font-semibold text-foreground">Authorization</span>
               </div>
-              <div className="p-4 space-y-2.5">
+              <div className="p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="flex items-center gap-2">
@@ -222,12 +223,26 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
                     <Badge variant="destructive" className="mt-1 text-[10px] px-1.5 py-0">required</Badge>
                   </div>
                   <input
-                    className="w-48 px-3 py-1.5 rounded-lg border border-border bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    className="w-52 px-3 py-1.5 rounded-lg border border-border bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
                     placeholder="enter token"
                     value={token}
                     onChange={e => setToken(e.target.value)}
                   />
                 </div>
+                {allKeys.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground shrink-0">{t('apiRef.tryIt.selectKey')}</span>
+                    <select
+                      className="flex-1 px-2.5 py-1.5 rounded-lg border border-border bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 appearance-none cursor-pointer"
+                      value={token}
+                      onChange={e => setToken(e.target.value)}
+                    >
+                      {allKeys.map((k, i) => (
+                        <option key={i} value={k.key}>{k.name} — {k.key.length > 20 ? k.key.slice(0, 8) + '...' + k.key.slice(-4) : k.key}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -286,7 +301,7 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
 }
 
 // 单个端点文档
-function EndpointDoc({ id, method, path, title, description, curlExample, responseExamples, defaultBody, apiKey, baseUrl }: {
+function EndpointDoc({ id, method, path, title, description, curlExample, responseExamples, defaultBody, apiKey, baseUrl, allKeys }: {
   id?: string
   method: string
   path: string
@@ -297,6 +312,7 @@ function EndpointDoc({ id, method, path, title, description, curlExample, respon
   defaultBody?: string
   apiKey?: string
   baseUrl?: string
+  allKeys?: { name: string; key: string }[]
 }) {
   const { t } = useTranslation()
   const [activeStatus, setActiveStatus] = useState(responseExamples[0]?.code ?? 200)
@@ -332,6 +348,7 @@ function EndpointDoc({ id, method, path, title, description, curlExample, respon
           defaultBody={defaultBody || ''}
           apiKey={apiKey || ''}
           baseUrl={baseUrl || ''}
+          allKeys={allKeys || []}
         />
 
         {/* cURL 示例 */}
@@ -361,11 +378,13 @@ export default function ApiReference() {
   const { t } = useTranslation()
   const baseUrl = useMemo(() => window.location.origin, [])
   const [firstKey, setFirstKey] = useState('')
+  const [allKeys, setAllKeys] = useState<{ name: string; key: string }[]>([])
 
-  // 加载第一个 API Key 用于 Try it
+  // 加载 API Key 列表
   useEffect(() => {
     api.getAPIKeys().then(res => {
-      const keys = res.keys ?? []
+      const keys = (res.keys ?? []).map(k => ({ name: k.name, key: k.key }))
+      setAllKeys(keys)
       if (keys.length > 0) setFirstKey(keys[0].key)
     }).catch(() => {})
   }, [])
@@ -489,6 +508,7 @@ export default function ApiReference() {
         description={t('apiRef.responses.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "model": "gpt-5.4",
   "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
@@ -569,6 +589,7 @@ export default function ApiReference() {
         description={t('apiRef.chat.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "model": "gpt-5.4",
   "messages": [{"role": "user", "content": "Hello"}],
@@ -634,6 +655,7 @@ export default function ApiReference() {
         description={t('apiRef.messages.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "model": "claude-sonnet-4-5-20250514",
   "max_tokens": 1024,
@@ -705,6 +727,7 @@ export default function ApiReference() {
         description={t('apiRef.models.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         curlExample={`curl --request GET \\
   --url ${baseUrl}/v1/models \\
   --header 'Authorization: Bearer <token>'`}
@@ -740,6 +763,7 @@ export default function ApiReference() {
         description={t('apiRef.health.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         curlExample={`curl --request GET \\
   --url ${baseUrl}/health`}
         responseExamples={[
@@ -766,6 +790,7 @@ export default function ApiReference() {
         description={t('apiRef.addAccount.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "name": "my-account",
   "refresh_token": "eyJhbGciOi...",
@@ -804,6 +829,7 @@ export default function ApiReference() {
         description={t('apiRef.addAccountBatch.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "name": "batch",
   "refresh_token": "token_1\\ntoken_2\\ntoken_3",
@@ -836,6 +862,7 @@ export default function ApiReference() {
         description={t('apiRef.addATAccount.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         defaultBody={`{
   "name": "at-account",
   "access_token": "eyJhbGciOi...",
@@ -871,6 +898,7 @@ export default function ApiReference() {
         description={t('apiRef.importAccounts.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         curlExample={`# TXT 格式（每行一个 Refresh Token）
 curl --request POST \\
   --url ${baseUrl}/api/admin/accounts/import \\
@@ -917,6 +945,7 @@ curl --request POST \\
         description={t('apiRef.deleteAccount.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         path="/api/admin/accounts/:id"
         title={t('apiRef.deleteAccount.title')}
         description={t('apiRef.deleteAccount.desc')}
@@ -942,6 +971,7 @@ curl --request POST \\
         description={t('apiRef.listAccounts.desc')}
         apiKey={firstKey}
         baseUrl={baseUrl}
+        allKeys={allKeys}
         curlExample={`curl --request GET \\
   --url ${baseUrl}/api/admin/accounts \\
   --header 'X-Admin-Key: <admin_secret>'`}
