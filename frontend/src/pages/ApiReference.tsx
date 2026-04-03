@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Copy, Check } from 'lucide-react'
 import PageHeader from '../components/PageHeader'
@@ -163,7 +163,48 @@ export default function ApiReference() {
     { id: 'list-accounts', label: '/accounts', method: 'GET' },
   ]
 
+  const [activeNav, setActiveNav] = useState(navItems[0].id)
+  const navRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const [indicator, setIndicator] = useState({ left: 0, width: 0 })
+
+  const updateIndicator = useCallback((id: string) => {
+    const el = navRefs.current[id]
+    if (!el) return
+    const parent = el.parentElement
+    if (!parent) return
+    setIndicator({
+      left: el.offsetLeft,
+      width: el.offsetWidth,
+    })
+  }, [])
+
+  useEffect(() => {
+    updateIndicator(activeNav)
+  }, [activeNav, updateIndicator])
+
+  // 滚动时自动高亮当前可见的端点
+  useEffect(() => {
+    const ids = navItems.map(n => n.id)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setActiveNav(entry.target.id)
+            break
+          }
+        }
+      },
+      { rootMargin: '-80px 0px -60% 0px', threshold: 0.1 }
+    )
+    for (const id of ids) {
+      const el = document.getElementById(id)
+      if (el) observer.observe(el)
+    }
+    return () => observer.disconnect()
+  }, [])
+
   const scrollTo = (id: string) => {
+    setActiveNav(id)
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
   }
 
@@ -176,12 +217,22 @@ export default function ApiReference() {
 
       {/* 悬浮导航栏 */}
       <div className="sticky top-2 z-30 mb-4">
-        <div className="flex flex-wrap items-center gap-x-1 gap-y-1 px-4 py-2.5 rounded-2xl border border-border bg-background/80 backdrop-blur-lg shadow-sm">
+        <div className="relative flex flex-wrap items-center gap-x-0.5 gap-y-1 px-3 py-2 rounded-2xl border border-border bg-background/80 backdrop-blur-lg shadow-sm">
+          {/* 滑动指示器 */}
+          <div
+            className="absolute top-2 h-[calc(100%-16px)] rounded-xl bg-primary/8 border border-primary/15 transition-all duration-300 ease-out pointer-events-none"
+            style={{ left: indicator.left, width: indicator.width }}
+          />
           {navItems.map(item => (
             <button
               key={item.id}
+              ref={el => { navRefs.current[item.id] = el }}
               onClick={() => scrollTo(item.id)}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/60"
+              className={`relative flex items-center gap-1 px-2 py-1.5 rounded-xl text-[11px] font-medium whitespace-nowrap transition-colors ${
+                activeNav === item.id
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
             >
               {item.method && <MethodBadge method={item.method} sm />}
               <span>{item.label}</span>
