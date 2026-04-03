@@ -698,7 +698,8 @@
     "tryIt": {
       "button": "Try it",
       "send": "发送请求",
-      "sending": "发送中…"
+      "sending": "发送中…",
+      "placeholder": "点击 Send 发送请求"
     }
   }
 }

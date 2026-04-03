@@ -122,12 +122,21 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
 }) {
   const { t } = useTranslation()
   const [body, setBody] = useState(defaultBody)
+  const [token, setToken] = useState(apiKey)
   const [response, setResponse] = useState('')
   const [status, setStatus] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [duration, setDuration] = useState<number | null>(null)
 
-  useEffect(() => { if (open) { setBody(defaultBody); setResponse(''); setStatus(null); setDuration(null) } }, [open, defaultBody])
+  useEffect(() => {
+    if (open) {
+      setBody(defaultBody)
+      setToken(apiKey)
+      setResponse('')
+      setStatus(null)
+      setDuration(null)
+    }
+  }, [open, defaultBody, apiKey])
 
   const handleSend = async () => {
     setLoading(true)
@@ -139,19 +148,19 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
       const isAdmin = path.startsWith('/api/admin')
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (isAdmin) {
-        headers['X-Admin-Key'] = apiKey
+        headers['X-Admin-Key'] = token
       } else if (path === '/v1/messages') {
-        headers['x-api-key'] = apiKey
+        headers['x-api-key'] = token
         headers['anthropic-version'] = '2023-06-01'
       } else {
-        headers['Authorization'] = `Bearer ${apiKey}`
+        headers['Authorization'] = `Bearer ${token}`
       }
 
       const isGet = method === 'GET'
       const url = baseUrl + path
       const res = await fetch(url, {
         method,
-        headers: isGet ? { 'Authorization': `Bearer ${apiKey}`, 'X-Admin-Key': apiKey } : headers,
+        headers: isGet ? { 'Authorization': `Bearer ${token}`, 'X-Admin-Key': token } : headers,
         body: isGet ? undefined : body.trim() || undefined,
       })
       setStatus(res.status)
@@ -171,54 +180,105 @@ function TryItDialog({ open, onClose, method, path, defaultBody, apiKey, baseUrl
   }
 
   const statusColor = status === null ? '' : status < 300 ? 'text-emerald-600' : status < 400 ? 'text-amber-600' : 'text-red-500'
+  const statusBg = status === null ? '' : status < 300 ? 'bg-emerald-50 dark:bg-emerald-900/20' : status < 400 ? 'bg-amber-50 dark:bg-amber-900/20' : 'bg-red-50 dark:bg-red-900/20'
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose() }}>
-      <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-hidden flex flex-col gap-0 p-0" showCloseButton={false}>
+        {/* 顶部端点栏 + Send */}
+        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border bg-muted/30">
+          <div className="flex items-center gap-2.5 flex-1 px-3 py-2 rounded-xl border border-border bg-background">
             <MethodBadge method={method} />
-            <code className="font-mono text-sm">{path}</code>
-          </DialogTitle>
-        </DialogHeader>
+            <code className="font-mono text-sm font-medium text-foreground">{path}</code>
+          </div>
+          <Button
+            onClick={() => void handleSend()}
+            disabled={loading}
+            className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 shrink-0"
+          >
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+            {loading ? t('apiRef.tryIt.sending') : 'Send'}
+          </Button>
+        </div>
 
-        <div className="flex-1 overflow-auto space-y-3 min-h-0">
-          {/* 请求体编辑 */}
-          {method !== 'GET' && (
-            <div>
-              <label className="text-xs font-semibold text-muted-foreground mb-1 block">Request Body</label>
-              <textarea
-                className="w-full h-48 p-3 rounded-xl border border-border bg-zinc-900 text-zinc-100 font-mono text-[13px] leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
-                value={body}
-                onChange={e => setBody(e.target.value)}
-                spellCheck={false}
-              />
+        {/* 内容区：左右分栏 */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+          {/* 左侧：参数 */}
+          <div className="flex-1 overflow-auto p-5 space-y-4 border-r border-border">
+            {/* Authorization */}
+            <div className="rounded-xl border border-border overflow-hidden">
+              <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
+                <span className="text-sm font-semibold text-foreground">Authorization</span>
+              </div>
+              <div className="p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-foreground">
+                        {path === '/v1/messages' ? 'x-api-key' : path.startsWith('/api/admin') ? 'X-Admin-Key' : 'Authorization'}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground font-mono">string</span>
+                    </div>
+                    <Badge variant="destructive" className="mt-1 text-[10px] px-1.5 py-0">required</Badge>
+                  </div>
+                  <input
+                    className="w-48 px-3 py-1.5 rounded-lg border border-border bg-background text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    placeholder="enter token"
+                    value={token}
+                    onChange={e => setToken(e.target.value)}
+                  />
+                </div>
+              </div>
             </div>
-          )}
 
-          {/* 发送按钮 */}
-          <div className="flex items-center gap-3">
-            <Button onClick={() => void handleSend()} disabled={loading} className="gap-2">
-              {loading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {loading ? t('apiRef.tryIt.sending') : t('apiRef.tryIt.send')}
-            </Button>
-            {status !== null && (
-              <div className="flex items-center gap-3 text-sm">
-                <span className={`font-bold ${statusColor}`}>{status}</span>
-                {duration !== null && <span className="text-muted-foreground">{duration}ms</span>}
+            {/* Request Body */}
+            {method !== 'GET' && method !== 'DELETE' && (
+              <div className="rounded-xl border border-border overflow-hidden">
+                <div className="px-4 py-2.5 bg-muted/30 border-b border-border">
+                  <span className="text-sm font-semibold text-foreground">Request Body</span>
+                </div>
+                <textarea
+                  className="w-full h-56 p-4 bg-background font-mono text-[13px] leading-relaxed resize-none focus:outline-none border-0"
+                  value={body}
+                  onChange={e => setBody(e.target.value)}
+                  spellCheck={false}
+                />
               </div>
             )}
           </div>
 
-          {/* 响应 */}
-          {response && (
-            <div>
-              <label className="text-xs font-semibold text-muted-foreground mb-1 block">Response</label>
-              <pre className="p-3 rounded-xl border border-border bg-muted/5 font-mono text-[13px] text-foreground overflow-auto max-h-[300px] leading-relaxed">
-                <code>{response}</code>
-              </pre>
+          {/* 右侧：响应 */}
+          <div className="flex-1 overflow-auto p-5">
+            <div className="rounded-xl border border-border overflow-hidden h-full flex flex-col">
+              <div className="px-4 py-2.5 bg-muted/30 border-b border-border flex items-center justify-between">
+                <span className="text-sm font-semibold text-foreground">Response</span>
+                {status !== null && (
+                  <div className="flex items-center gap-2.5">
+                    <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${statusColor} ${statusBg}`}>{status}</span>
+                    {duration !== null && <span className="text-xs text-muted-foreground">{duration}ms</span>}
+                  </div>
+                )}
+              </div>
+              <div className="flex-1 overflow-auto">
+                {response ? (
+                  <pre className="p-4 font-mono text-[13px] text-foreground leading-relaxed whitespace-pre-wrap">
+                    <code>{response}</code>
+                  </pre>
+                ) : (
+                  <div className="flex items-center justify-center h-full min-h-[200px] text-sm text-muted-foreground">
+                    {loading ? (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="size-4 animate-spin" />
+                        <span>{t('apiRef.tryIt.sending')}</span>
+                      </div>
+                    ) : (
+                      <span>{t('apiRef.tryIt.placeholder')}</span>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          )}
+          </div>
         </div>
       </DialogContent>
     </Dialog>

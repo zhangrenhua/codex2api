@@ -698,7 +698,8 @@
     "tryIt": {
       "button": "Try it",
       "send": "Send",
-      "sending": "Sending…"
+      "sending": "Sending…",
+      "placeholder": "Click Send to make a request"
     }
   }
 }
