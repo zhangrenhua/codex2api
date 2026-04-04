@@ -284,7 +284,7 @@ func (m *Manager) AcquireConnection(
 
 	if v, ok := m.connections.Load(key); ok {
 		wc := v.(*WsConnection)
-		if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && wc.session.PendingCount() == 0 {
+		if canReuseConnection(wc) {
 			wc.Touch()
 			return wc, nil
 		}
@@ -307,6 +307,19 @@ func (m *Manager) AcquireConnection(
 	}
 
 	return wc, nil
+}
+
+func canReuseConnection(wc *WsConnection) bool {
+	if wc == nil {
+		return false
+	}
+	if !wc.IsConnected() || wc.IsExpired() {
+		return false
+	}
+	if wc.session == nil {
+		return false
+	}
+	return wc.session.PendingCount() == 0
 }
 
 // createConnection 创建新 WebSocket 连接

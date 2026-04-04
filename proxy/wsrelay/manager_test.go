@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 )
@@ -58,4 +59,48 @@ func TestPoolKeyKeepsSameSessionStable(t *testing.T) {
 	if keyA != keyB {
 		t.Fatal("expected identical session keys to produce the same pool key")
 	}
+}
+
+func TestCanReuseConnection(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	t.Run("idle connected session can be reused", func(t *testing.T) {
+		session := NewSession(42, manager)
+		session.SetConnected(true)
+		conn := &WsConnection{session: session}
+		conn.SetState(StateConnected)
+		conn.Touch()
+
+		if !canReuseConnection(conn) {
+			t.Fatal("expected connection to be reusable")
+		}
+	})
+
+	t.Run("pending request blocks reuse", func(t *testing.T) {
+		session := NewSession(42, manager)
+		session.SetConnected(true)
+		pending := session.AddPendingRequest("session-a")
+		t.Cleanup(func() { session.RemovePendingRequest(pending.RequestID) })
+
+		conn := &WsConnection{session: session}
+		conn.SetState(StateConnected)
+		conn.Touch()
+
+		if canReuseConnection(conn) {
+			t.Fatal("expected connection with pending request to be non-reusable")
+		}
+	})
+
+	t.Run("expired connection cannot be reused", func(t *testing.T) {
+		session := NewSession(42, manager)
+		session.SetConnected(true)
+		conn := &WsConnection{session: session}
+		conn.SetState(StateConnected)
+		conn.lastUsed.Store(time.Now().Add(-IdleTimeout - time.Second).UnixNano())
+
+		if canReuseConnection(conn) {
+			t.Fatal("expected expired connection to be non-reusable")
+		}
+	})
 }
