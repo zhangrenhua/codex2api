@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,9 @@ type WsConnection struct {
 
 	// 连接 URL
 	URL string
+
+	// 连接池键
+	PoolKey string
 
 	// 连接状态
 	state atomic.Int32
@@ -267,15 +271,16 @@ func (m *Manager) getOnConnected() func(accountID int64, session *Session) {
 }
 
 // AcquireConnection 获取或创建连接
-// 注意：WebSocket 连接不支持并发读取，因此始终创建新连接而非复用
+// 仅在同一逻辑 session 且连接空闲时复用，避免不同会话共用一条已握手连接。
 func (m *Manager) AcquireConnection(
 	ctx context.Context,
 	account *auth.Account,
 	wsURL string,
+	sessionKey string,
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, error) {
-	key := m.poolKey(account.ID(), wsURL)
+	key := m.poolKey(account.ID(), wsURL, sessionKey)
 
 	if v, ok := m.connections.Load(key); ok {
 		wc := v.(*WsConnection)
@@ -288,7 +293,7 @@ func (m *Manager) AcquireConnection(
 	}
 
 	// 始终创建新连接，避免多个请求复用同一个 websocket.Conn 导致并发读取
-	wc, err := m.createConnection(ctx, account, wsURL, headers, proxyOverride)
+	wc, err := m.createConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +314,7 @@ func (m *Manager) createConnection(
 	ctx context.Context,
 	account *auth.Account,
 	wsURL string,
+	sessionKey string,
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, error) {
@@ -338,24 +344,28 @@ func (m *Manager) createConnection(
 	}
 
 	// 创建会话（先关闭旧 session 避免泄漏）
-	sessionKey := m.poolKey(account.ID(), wsURL)
-	if oldSessionVal, ok := m.sessions.Load(sessionKey); ok {
+	poolKey := m.poolKey(account.ID(), wsURL, sessionKey)
+	if oldSessionVal, ok := m.sessions.Load(poolKey); ok {
 		oldSession := oldSessionVal.(*Session)
 		oldSession.Close()
 	}
 	session := NewSession(account.ID(), m)
-	m.sessions.Store(sessionKey, session)
+	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" {
+		session.ID = trimmed
+	}
+	m.sessions.Store(poolKey, session)
 
 	// 拨号连接
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
-		m.sessions.Delete(sessionKey)
+		m.sessions.Delete(poolKey)
 		session.Close()
 		return nil, fmt.Errorf("websocket handshake failed: %w", err)
 	}
 
 	// 创建连接包装
 	wc := NewWsConnection(conn, session, wsURL)
+	wc.PoolKey = poolKey
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
 	session.SetConnected(true)
@@ -379,8 +389,8 @@ func (m *Manager) ReleaseConnection(wc *WsConnection) {
 }
 
 // RemoveConnection 移除连接
-func (m *Manager) RemoveConnection(accountID int64, wsURL string) {
-	key := m.poolKey(accountID, wsURL)
+func (m *Manager) RemoveConnection(accountID int64, wsURL string, sessionKey string) {
+	key := m.poolKey(accountID, wsURL, sessionKey)
 	if v, ok := m.connections.LoadAndDelete(key); ok {
 		wc := v.(*WsConnection)
 		wc.Close()
@@ -389,13 +399,13 @@ func (m *Manager) RemoveConnection(accountID int64, wsURL string) {
 }
 
 // poolKey 生成连接池键
-func (m *Manager) poolKey(accountID int64, wsURL string) string {
-	return fmt.Sprintf("%d|%s", accountID, wsURL)
+func (m *Manager) poolKey(accountID int64, wsURL string, sessionKey string) string {
+	return fmt.Sprintf("%d|%s|%s", accountID, wsURL, strings.TrimSpace(sessionKey))
 }
 
 // GetSession 获取会话
-func (m *Manager) GetSession(accountID int64, wsURL string) (*Session, bool) {
-	if v, ok := m.sessions.Load(m.poolKey(accountID, wsURL)); ok {
+func (m *Manager) GetSession(accountID int64, wsURL string, sessionKey string) (*Session, bool) {
+	if v, ok := m.sessions.Load(m.poolKey(accountID, wsURL, sessionKey)); ok {
 		return v.(*Session), true
 	}
 	return nil, false
@@ -426,14 +436,15 @@ func (m *Manager) ReplaceConnection(
 	ctx context.Context,
 	account *auth.Account,
 	wsURL string,
+	sessionKey string,
 	headers http.Header,
 	proxyOverride string,
 ) (*WsConnection, error) {
 	// 先移除旧连接
-	m.RemoveConnection(account.ID(), wsURL)
+	m.RemoveConnection(account.ID(), wsURL, sessionKey)
 
 	// 创建新连接
-	return m.AcquireConnection(ctx, account, wsURL, headers, proxyOverride)
+	return m.AcquireConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
 }
 
 // SendHeartbeat 发送心跳 Ping
@@ -450,7 +461,10 @@ func (m *Manager) SendHeartbeat(wc *WsConnection) error {
 	if err != nil {
 		log.Printf("WebSocket Ping 失败 (account %d): %v", wc.session.AccountID, err)
 		wc.Close()
-		m.connections.Delete(m.poolKey(wc.session.AccountID, wc.URL))
+		if wc.PoolKey != "" {
+			m.connections.Delete(wc.PoolKey)
+			m.sessions.Delete(wc.PoolKey)
+		}
 		return err
 	}
 	return nil
