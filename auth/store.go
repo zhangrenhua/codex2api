@@ -1313,6 +1313,23 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	s.sessionMu.Unlock()
 }
 
+// UnbindSessionAffinity removes a session binding when it still points to the failed account.
+func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
+	if s == nil || accountID == 0 {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+
+	s.sessionMu.Lock()
+	if binding, ok := s.sessionBindings[key]; ok && binding.accountID == accountID {
+		delete(s.sessionBindings, key)
+	}
+	s.sessionMu.Unlock()
+}
+
 // NextForSession 优先复用已绑定的账号和代理，失败时回退到普通选号。
 func (s *Store) NextForSession(key string, exclude map[int64]bool) (*Account, string) {
 	if s == nil {
