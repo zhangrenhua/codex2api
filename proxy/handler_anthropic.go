@@ -119,7 +119,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account := h.store.NextExcluding(excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
 			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
 			if account == nil {
@@ -133,7 +133,10 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 
 		start := time.Now()
-		proxyURL := h.store.NextProxy()
+		proxyURL := stickyProxyURL
+		if proxyURL == "" {
+			proxyURL = h.store.NextProxy()
+		}
 		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
@@ -361,6 +364,8 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			continue
 		}
+
+		h.store.BindSessionAffinity(sessionID, account, proxyURL)
 
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
