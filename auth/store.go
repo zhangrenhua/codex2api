@@ -1378,6 +1378,12 @@ func (s *Store) takeByIDExcluding(id int64, exclude map[int64]bool) *Account {
 
 // WaitForAvailable 等待可用账号（带超时的请求排队）
 func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration) *Account {
+	acc, _ := s.WaitForSessionAvailable(ctx, "", timeout, nil)
+	return acc
+}
+
+// WaitForSessionAvailable waits for a session-preferred account and proxy pair.
+func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout time.Duration, exclude map[int64]bool) (*Account, string) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -1388,13 +1394,13 @@ func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration) *Ac
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return nil, ""
 		case <-deadline.C:
-			return nil
+			return nil, ""
 		default:
-			acc := s.Next()
+			acc, proxyURL := s.NextForSession(key, exclude)
 			if acc != nil {
-				return acc
+				return acc, proxyURL
 			}
 			// 等待一下再重试（指数退避，最大 500ms）
 			backoffTimer.Reset(backoff)
@@ -1404,9 +1410,9 @@ func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration) *Ac
 					backoff *= 2
 				}
 			case <-ctx.Done():
-				return nil
+				return nil, ""
 			case <-deadline.C:
-				return nil
+				return nil, ""
 			}
 		}
 	}

@@ -454,7 +454,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -823,7 +823,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)

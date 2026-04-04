@@ -121,7 +121,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "All accounts rate limited")
