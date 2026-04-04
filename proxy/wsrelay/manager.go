@@ -90,7 +90,10 @@ func (wc *WsConnection) Close() error {
 		if wc.onDisconnected != nil && wc.session != nil {
 			wc.onDisconnected(wc.session.AccountID)
 		}
-		return wc.conn.Close()
+		if wc.conn != nil {
+			return wc.conn.Close()
+		}
+		return nil
 	}
 	return nil
 }
@@ -274,9 +277,13 @@ func (m *Manager) AcquireConnection(
 ) (*WsConnection, error) {
 	key := m.poolKey(account.ID(), wsURL)
 
-	// 清理可能存在的旧连接（避免泄漏）
-	if v, ok := m.connections.LoadAndDelete(key); ok {
+	if v, ok := m.connections.Load(key); ok {
 		wc := v.(*WsConnection)
+		if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && wc.session.PendingCount() == 0 {
+			wc.Touch()
+			return wc, nil
+		}
+		m.connections.Delete(key)
 		wc.Close()
 	}
 

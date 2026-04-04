@@ -22,7 +22,7 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 		"Originator": []string{"custom-originator"},
 	}
 
-	headers := exec.prepareWebsocketHeaders("token-123", "42", "api-key-1", cfg, ginHeaders)
+	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", cfg, ginHeaders)
 
 	if got := headers.Get("Authorization"); got != "Bearer token-123" {
 		t.Fatalf("Authorization = %q", got)
@@ -44,5 +44,8 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	}
 	if got := headers.Get("Chatgpt-Account-Id"); got != "42" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "session-123" {
+		t.Fatalf("Conversation_id = %q", got)
 	}
 }

@@ -86,7 +86,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, apiKey, deviceCfg, ginHeaders)
+	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, sessionID, apiKey, deviceCfg, ginHeaders)
 
 	// 获取或创建连接
 	wc, err := e.manager.AcquireConnection(ctx, account, wsURL, headers, proxyOverride)
@@ -162,7 +162,7 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
+func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -206,6 +206,9 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, apiKey string
 	// Account ID
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
+	}
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		headers.Set("Conversation_id", sessionID)
 	}
 
 	return headers
