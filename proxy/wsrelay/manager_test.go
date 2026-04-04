@@ -30,13 +30,20 @@ func TestAcquireConnectionReusesIdleConnectedConnection(t *testing.T) {
 	manager.connections.Store(key, conn)
 	manager.sessions.Store(key, session)
 
-	got, err := manager.AcquireConnection(context.Background(), account, wsURL, "session-1", http.Header{}, "")
+	got, pr, err := manager.AcquireConnection(context.Background(), account, wsURL, "session-1", http.Header{}, "")
 	if err != nil {
 		t.Fatalf("AcquireConnection() error = %v", err)
 	}
 	if got != conn {
 		t.Fatal("expected existing connection to be reused")
 	}
+	if pr == nil {
+		t.Fatal("expected pending request reservation")
+	}
+	if session.PendingCount() != 1 {
+		t.Fatalf("PendingCount = %d, want %d", session.PendingCount(), 1)
+	}
+	session.RemovePendingRequest(pr.RequestID)
 }
 
 func TestPoolKeyIncludesSessionKey(t *testing.T) {
@@ -114,4 +121,37 @@ func TestCanReuseConnection(t *testing.T) {
 			t.Fatal("expected expired connection to be non-reusable")
 		}
 	})
+}
+
+func TestAcquireConnectionWaitsWhileSessionHasPendingRequest(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	account := &auth.Account{DBID: 42}
+	wsURL := "wss://example.test/responses"
+	key := manager.poolKey(account.ID(), wsURL, "session-1", "")
+
+	session := NewSession(account.ID(), manager)
+	session.SetConnected(true)
+	blocking := session.AddPendingRequest("session-1")
+	t.Cleanup(func() { session.RemovePendingRequest(blocking.RequestID) })
+
+	conn := &WsConnection{
+		session:  session,
+		URL:      wsURL,
+		PoolKey:  key,
+		httpResp: &http.Response{StatusCode: http.StatusSwitchingProtocols},
+	}
+	conn.SetState(StateConnected)
+	conn.Touch()
+	manager.connections.Store(key, conn)
+	manager.sessions.Store(key, session)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, _, err := manager.AcquireConnection(ctx, account, wsURL, "session-1", http.Header{}, "")
+	if err == nil {
+		t.Fatal("expected acquire to stop when session stays busy until context timeout")
+	}
 }

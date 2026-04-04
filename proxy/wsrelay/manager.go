@@ -175,6 +175,9 @@ type Manager struct {
 
 	// 读写锁保护回调设置
 	mu sync.RWMutex
+
+	// pool key 级别串行化，避免同一逻辑 session 在 acquire 阶段竞争同一条连接
+	keyLocks sync.Map
 }
 
 // NewManager 创建连接池管理器
@@ -283,6 +286,17 @@ func (m *Manager) getOnConnected() func(accountID int64, session *Session) {
 	return m.onConnected
 }
 
+func (m *Manager) keyLock(key string) *sync.Mutex {
+	if v, ok := m.keyLocks.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	if actual, loaded := m.keyLocks.LoadOrStore(key, mu); loaded {
+		return actual.(*sync.Mutex)
+	}
+	return mu
+}
+
 // AcquireConnection 获取或创建连接
 // 仅在同一逻辑 session 且连接空闲时复用，避免不同会话共用一条已握手连接。
 func (m *Manager) AcquireConnection(
@@ -292,34 +306,52 @@ func (m *Manager) AcquireConnection(
 	sessionKey string,
 	headers http.Header,
 	proxyOverride string,
-) (*WsConnection, error) {
+) (*WsConnection, *PendingRequest, error) {
 	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
+	lock := m.keyLock(key)
+	wait := 10 * time.Millisecond
 
-	if v, ok := m.connections.Load(key); ok {
-		wc := v.(*WsConnection)
-		if canReuseConnection(wc) {
-			wc.Touch()
-			return wc, nil
+	for {
+		lock.Lock()
+		if v, ok := m.connections.Load(key); ok {
+			wc := v.(*WsConnection)
+			if canReuseConnection(wc) {
+				pr := wc.session.AddPendingRequest(sessionKey)
+				wc.Touch()
+				lock.Unlock()
+				return wc, pr, nil
+			}
+			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil {
+				lock.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
+			m.connections.Delete(key)
+			m.sessions.Delete(key)
+			wc.Close()
 		}
-		m.connections.Delete(key)
-		wc.Close()
+
+		wc, err := m.createConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
+		if err != nil {
+			lock.Unlock()
+			return nil, nil, err
+		}
+
+		// 存储新连接并立即占位 pending request，避免返回后才记账产生竞态
+		m.connections.Store(key, wc)
+		pr := wc.session.AddPendingRequest(sessionKey)
+		lock.Unlock()
+
+		if fn := m.getOnConnected(); fn != nil {
+			fn(account.ID(), wc.session)
+		}
+
+		return wc, pr, nil
 	}
-
-	// 始终创建新连接，避免多个请求复用同一个 websocket.Conn 导致并发读取
-	wc, err := m.createConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
-	if err != nil {
-		return nil, err
-	}
-
-	// 存储新连接
-	m.connections.Store(key, wc)
-
-	// 调用连接回调
-	if fn := m.getOnConnected(); fn != nil {
-		fn(account.ID(), wc.session)
-	}
-
-	return wc, nil
 }
 
 func canReuseConnection(wc *WsConnection) bool {
@@ -459,7 +491,7 @@ func (m *Manager) ReplaceConnection(
 	sessionKey string,
 	headers http.Header,
 	proxyOverride string,
-) (*WsConnection, error) {
+) (*WsConnection, *PendingRequest, error) {
 	// 先移除旧连接
 	m.RemoveConnection(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
 

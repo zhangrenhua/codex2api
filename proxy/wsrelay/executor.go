@@ -89,13 +89,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, sessionID, apiKey, deviceCfg, ginHeaders)
 
 	// 获取或创建连接
-	wc, err := e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+	wc, pr, err := e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
 	if err != nil {
 		return nil, err
 	}
-
-	// 创建请求
-	pr := wc.session.AddPendingRequest(sessionID)
 
 	// 发送请求
 	if err := e.sendRequest(wc, wsBody, pr.RequestID); err != nil {
@@ -103,12 +100,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.RemoveConnection(account.ID(), wsURL, sessionID, proxyOverride)
 
-		wc, err = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+		wc, pr, err = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
 		if err != nil {
 			return nil, err
 		}
 
-		pr = wc.session.AddPendingRequest(sessionID)
 		if err := e.sendRequest(wc, wsBody, pr.RequestID); err != nil {
 			wc.session.RemovePendingRequest(pr.RequestID)
 			e.manager.ReleaseConnection(wc)
