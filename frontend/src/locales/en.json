@@ -332,7 +332,8 @@
     "resetStatusSuccess": "Account status has been reset",
     "resetStatusFailed": "Reset failed: {{error}}",
     "batchResetStatus": "Reset Status",
-    "batchResetStatusDone": "Batch reset complete: {{success}} succeeded, {{fail}} failed"
+    "batchResetStatusDone": "Batch reset complete: {{success}} succeeded, {{fail}} failed",
+    "testAutoReset": "Test passed, account status has been automatically restored to normal"
   },
   "status": {
     "active": "Available",

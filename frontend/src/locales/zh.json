@@ -332,7 +332,8 @@
     "resetStatusSuccess": "账号状态已重置",
     "resetStatusFailed": "重置失败：{{error}}",
     "batchResetStatus": "重置状态",
-    "batchResetStatusDone": "批量重置完成：成功 {{success}}，失败 {{fail}}"
+    "batchResetStatusDone": "批量重置完成：成功 {{success}}，失败 {{fail}}",
+    "testAutoReset": "测试成功，账号状态已自动恢复为正常"
   },
   "status": {
     "active": "可用",
