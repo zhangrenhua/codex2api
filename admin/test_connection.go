@@ -114,6 +114,10 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		case "response.completed":
 			// 测试成功即重置冷却状态，用量限制由调度器自行判断
 			h.store.ClearCooldown(account)
+			// 如果上游未返回用量头，清除旧的用量缓存，避免显示过期数据
+			if !hasUsage {
+				account.ClearUsageCache()
+			}
 			duration := time.Since(start).Milliseconds()
 			sendTestEvent(c, testEvent{
 				Type: "content",

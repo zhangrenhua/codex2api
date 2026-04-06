@@ -1409,6 +1409,7 @@ func (h *Handler) ResetAccountStatus(c *gin.Context) {
 	}
 
 	h.store.ClearCooldown(acc)
+	acc.ClearUsageCache()
 	writeMessage(c, http.StatusOK, "账号状态已重置")
 }
 
@@ -1431,6 +1432,7 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 			continue
 		}
 		h.store.ClearCooldown(acc)
+		acc.ClearUsageCache()
 		success++
 	}
 
