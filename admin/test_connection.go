@@ -112,10 +112,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 				sendTestEvent(c, testEvent{Type: "content", Text: delta})
 			}
 		case "response.completed":
-			// 只有用量未耗尽时才重置状态
-			if !hasUsage || usagePct < 100 {
-				h.store.ClearCooldown(account)
-			}
+			// 测试成功即重置冷却状态，用量限制由调度器自行判断
+			h.store.ClearCooldown(account)
 			duration := time.Since(start).Milliseconds()
 			sendTestEvent(c, testEvent{
 				Type: "content",
@@ -234,10 +232,8 @@ func (h *Handler) BatchTest(c *gin.Context) {
 				if hasUsage {
 					h.store.PersistUsageSnapshot(acc, usagePct)
 				}
-				// 只有用量未耗尽时才重置状态，避免把 100% 用量的账号放回可调度池
-				if !hasUsage || usagePct < 100 {
-					h.store.ClearCooldown(acc)
-				}
+				// 测试成功即重置冷却状态，用量限制由调度器自行判断
+				h.store.ClearCooldown(acc)
 				atomic.AddInt64(&successCount, 1)
 			case http.StatusUnauthorized:
 				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
