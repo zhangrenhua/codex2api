@@ -440,12 +440,12 @@ export default function Settings() {
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.maxConcurrency')}</label>
                 <Input
                   type="number"
-                  min={1}
+                  min={0}
                   max={50}
                   value={settingsForm.max_concurrency}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_concurrency: parseInt(e.target.value) || 1 }))}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_concurrency: Math.max(0, parseInt(e.target.value) || 0) }))}
                 />
-                <p className="text-xs text-muted-foreground mt-1">{t('settings.maxConcurrencyRange')}</p>
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.maxConcurrencyDesc')}</p>
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.globalRpm')}</label>
