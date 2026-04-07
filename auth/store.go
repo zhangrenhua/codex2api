@@ -1168,11 +1168,19 @@ func (s *Store) StartBackgroundRefresh() {
 		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
 		// 添加定时重建 FastScheduler 以优化性能
 		rebuildSchedulerTicker := time.NewTicker(10 * time.Minute)
+		// session 绑定清理 + account_events 历史清理
+		sessionCleanupTicker := time.NewTicker(10 * time.Minute)
+		eventsPruneTicker := time.NewTicker(24 * time.Hour)
 		defer refreshTicker.Stop()
 		defer autoCleanupTicker.Stop()
 		defer fullUsageCleanupTicker.Stop()
 		defer expiredCleanupTicker.Stop()
 		defer rebuildSchedulerTicker.Stop()
+		defer sessionCleanupTicker.Stop()
+		defer eventsPruneTicker.Stop()
+
+		// 启动时先执行一次 account_events 清理
+		s.pruneAccountEvents()
 
 		for {
 			select {
@@ -1196,11 +1204,39 @@ func (s *Store) StartBackgroundRefresh() {
 				if s.FastSchedulerEnabled() {
 					s.rebuildFastScheduler()
 				}
+			case <-sessionCleanupTicker.C:
+				s.cleanExpiredSessions()
+			case <-eventsPruneTicker.C:
+				s.pruneAccountEvents()
 			case <-s.stopCh:
 				return
 			}
 		}
 	}()
+}
+
+// cleanExpiredSessions 清理过期的 session 绑定
+func (s *Store) cleanExpiredSessions() {
+	now := time.Now()
+	s.sessionMu.Lock()
+	for key, binding := range s.sessionBindings {
+		if now.After(binding.expiresAt) {
+			delete(s.sessionBindings, key)
+		}
+	}
+	s.sessionMu.Unlock()
+}
+
+// pruneAccountEvents 清理 30 天前的 account_events 记录
+func (s *Store) pruneAccountEvents() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	deleted, err := s.db.PruneAccountEvents(ctx, 30)
+	if err != nil {
+		log.Printf("[维护] account_events 清理失败: %v", err)
+	} else if deleted > 0 {
+		log.Printf("[维护] account_events 已清理 %d 条过期记录（>30天）", deleted)
+	}
 }
 
 // Stop 停止后台刷新

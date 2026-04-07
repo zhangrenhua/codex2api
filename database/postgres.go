@@ -1821,3 +1821,21 @@ func (db *DB) GetAccountEventTrend(ctx context.Context, start, end time.Time, bu
 	}
 	return result, rows.Err()
 }
+
+// PruneAccountEvents 删除指定天数之前的 account_events 记录，返回删除行数
+func (db *DB) PruneAccountEvents(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	var query string
+	if db.isSQLite() {
+		query = `DELETE FROM account_events WHERE created_at < datetime('now', '-' || $1 || ' days')`
+	} else {
+		query = `DELETE FROM account_events WHERE created_at < NOW() - ($1 || ' days')::interval`
+	}
+	res, err := db.conn.ExecContext(ctx, query, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
