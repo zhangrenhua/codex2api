@@ -1561,15 +1561,23 @@ func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float
 	return db.UpdateCredentials(ctx, id, fields)
 }
 
-// SetError 标记账号错误状态
+// SetError 标记账号错误状态（errorMsg 为 "deleted" 时 status 设为 'deleted'，否则 'error'）
 func (db *DB) SetError(ctx context.Context, id int64, errorMsg string) error {
-	query := `UPDATE accounts SET status = 'error', error_message = $1, cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
-	_, err := db.conn.ExecContext(ctx, query, errorMsg, id)
+	status := "error"
+	if errorMsg == "deleted" {
+		status = "deleted"
+	}
+	query := `UPDATE accounts SET status = $1, error_message = $2, cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+	_, err := db.conn.ExecContext(ctx, query, status, errorMsg, id)
 	return err
 }
 
 // BatchSetError 批量标记账号错误状态，分批执行避免 SQL 参数过多
 func (db *DB) BatchSetError(ctx context.Context, ids []int64, errorMsg string) error {
+	status := "error"
+	if errorMsg == "deleted" {
+		status = "deleted"
+	}
 	const batchSize = 500
 	for i := 0; i < len(ids); i += batchSize {
 		end := i + batchSize
@@ -1578,17 +1586,17 @@ func (db *DB) BatchSetError(ctx context.Context, ids []int64, errorMsg string) e
 		}
 		batch := ids[i:end]
 
-		// 构建 $2, $3, ... 占位符（$1 留给 errorMsg）
+		// 构建 $3, $4, ... 占位符（$1=status, $2=errorMsg）
 		placeholders := make([]string, len(batch))
-		args := make([]interface{}, 0, len(batch)+1)
-		args = append(args, errorMsg)
+		args := make([]interface{}, 0, len(batch)+2)
+		args = append(args, status, errorMsg)
 		for j, id := range batch {
-			placeholders[j] = fmt.Sprintf("$%d", j+2)
+			placeholders[j] = fmt.Sprintf("$%d", j+3)
 			args = append(args, id)
 		}
 
 		query := fmt.Sprintf(
-			`UPDATE accounts SET status = 'error', error_message = $1, cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (%s)`,
+			`UPDATE accounts SET status = $1, error_message = $2, cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (%s)`,
 			strings.Join(placeholders, ","),
 		)
 		if _, err := db.conn.ExecContext(ctx, query, args...); err != nil {
