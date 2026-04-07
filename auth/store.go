@@ -372,6 +372,8 @@ func (a *Account) IsAvailable() bool {
 		return false
 	}
 	// 每次请求后的冷却检查（原子操作，无需锁）
+	// 注意：此检查始终生效，但 Release() 仅在 maxConcurrency==0 时设置冷却，
+	// 因此当 maxConcurrency>0 时 RequestCooldownUntil 不会被设置，此检查自然跳过。
 	if until := atomic.LoadInt64(&a.RequestCooldownUntil); until > 0 && time.Now().UnixNano() < until {
 		return false
 	}
@@ -1464,10 +1466,12 @@ func (s *Store) Release(acc *Account) {
 	if acc == nil {
 		return
 	}
-	// 设置每次请求后的冷却时间
-	if cd := atomic.LoadInt64(&s.accountCooldown); cd > 0 {
-		until := time.Now().Add(time.Duration(cd) * time.Second).UnixNano()
-		atomic.StoreInt64(&acc.RequestCooldownUntil, until)
+	// 仅当 maxConcurrency == 0（无并发限制模式）时，才启用请求冷却
+	if atomic.LoadInt64(&s.maxConcurrency) == 0 {
+		if cd := atomic.LoadInt64(&s.accountCooldown); cd > 0 {
+			until := time.Now().Add(time.Duration(cd) * time.Second).UnixNano()
+			atomic.StoreInt64(&acc.RequestCooldownUntil, until)
+		}
 	}
 	if scheduler := s.getFastScheduler(); scheduler != nil {
 		scheduler.Release(acc)
@@ -1479,6 +1483,14 @@ func (s *Store) Release(acc *Account) {
 // SetMaxConcurrency 动态更新每账号并发上限
 func (s *Store) SetMaxConcurrency(n int) {
 	atomic.StoreInt64(&s.maxConcurrency, int64(n))
+	// 切换到并发模式（>0）时，清除所有账号的请求冷却状态，避免残留冷却阻塞调度
+	if n > 0 {
+		s.mu.RLock()
+		for _, acc := range s.accounts {
+			atomic.StoreInt64(&acc.RequestCooldownUntil, 0)
+		}
+		s.mu.RUnlock()
+	}
 	s.recomputeAllAccountSchedulerState()
 	s.rebuildFastScheduler()
 }

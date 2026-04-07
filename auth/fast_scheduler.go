@@ -349,9 +349,11 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
 		available = false
 	}
-	// 每次请求后的冷却检查
-	if until := atomic.LoadInt64(&a.RequestCooldownUntil); until > 0 && now.UnixNano() < until {
-		available = false
+	// 每次请求后的冷却检查（仅在 maxConcurrency == 0 即无并发限制模式下生效）
+	if baseLimit == 0 {
+		if until := atomic.LoadInt64(&a.RequestCooldownUntil); until > 0 && now.UnixNano() < until {
+			available = false
+		}
 	}
 	// Free 账号 7d 用量耗尽，不参与调度
 	if a.usageExhaustedLocked() {

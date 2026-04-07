@@ -1857,8 +1857,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	if req.MaxConcurrency != nil {
 		v := *req.MaxConcurrency
-		if v < 1 {
-			v = 1
+		if v < 0 {
+			v = 0
 		}
 		if v > 50 {
 			v = 50
