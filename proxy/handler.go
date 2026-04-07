@@ -453,8 +453,12 @@ func (h *Handler) Responses(c *gin.Context) {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
-			// 排队等待可用账号（最多 30s）
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
+			// 排队等待可用账号（超时 = max(30s, 账号冷却+5s)）
+			waitTimeout := 30 * time.Second
+			if cd := h.store.GetAccountCooldownDuration() + 5*time.Second; cd > waitTimeout {
+				waitTimeout = cd
+			}
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, waitTimeout, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -824,8 +828,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
-			// 排队等待可用账号（最多 30s）
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
+			// 排队等待可用账号（超时 = max(30s, 账号冷却+5s)）
+			waitTimeout := 30 * time.Second
+			if cd := h.store.GetAccountCooldownDuration() + 5*time.Second; cd > waitTimeout {
+				waitTimeout = cd
+			}
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, waitTimeout, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)

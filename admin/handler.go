@@ -1763,6 +1763,7 @@ type settingsResponse struct {
 	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
 	MaxRetries            int    `json:"max_retries"`
+	AccountCooldown       int    `json:"account_cooldown"`
 	AllowRemoteMigration  bool   `json:"allow_remote_migration"`
 	DatabaseDriver        string `json:"database_driver"`
 	DatabaseLabel         string `json:"database_label"`
@@ -1789,6 +1790,7 @@ type updateSettingsReq struct {
 	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
 	MaxRetries            *int    `json:"max_retries"`
+	AccountCooldown       *int    `json:"account_cooldown"`
 	AllowRemoteMigration  *bool   `json:"allow_remote_migration"`
 	ModelMapping          *string `json:"model_mapping"`
 }
@@ -1821,6 +1823,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AccountCooldown:       h.store.GetAccountCooldown(),
 		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,
@@ -1976,6 +1979,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: max_retries = %d", v)
 	}
 
+	if req.AccountCooldown != nil {
+		v := *req.AccountCooldown
+		if v < 0 {
+			v = 0
+		}
+		if v > 3600 {
+			v = 3600
+		}
+		h.store.SetAccountCooldown(v)
+		log.Printf("设置已更新: account_cooldown = %d", v)
+	}
+
 	if req.AllowRemoteMigration != nil {
 		if *req.AllowRemoteMigration && !hasAdminSecret {
 			writeError(c, http.StatusBadRequest, "请先设置管理密钥，再启用远程迁移")
@@ -2010,6 +2025,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AccountCooldown:       h.store.GetAccountCooldown(),
 		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && hasAdminSecret,
 		ModelMapping:          h.store.GetModelMapping(),
 	})
@@ -2048,6 +2064,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
 		MaxRetries:            h.store.GetMaxRetries(),
+		AccountCooldown:       h.store.GetAccountCooldown(),
 		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:        h.databaseDriver,
 		DatabaseLabel:         h.databaseLabel,

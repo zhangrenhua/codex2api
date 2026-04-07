@@ -184,6 +184,7 @@ export interface SystemSettings {
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
   max_retries: number
+  account_cooldown: number
   allow_remote_migration: boolean
   database_driver: string
   database_label: string

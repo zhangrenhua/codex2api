@@ -86,8 +86,9 @@ type Account struct {
 	// 高并发调度指标（原子操作，无需锁）
 	ActiveRequests int64 // 当前并发请求数
 	TotalRequests  int64 // 累计总请求数
-	LastUsedAt     int64 // 最后使用时间（UnixNano）
-	Disabled       int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
+	LastUsedAt            int64 // 最后使用时间（UnixNano）
+	RequestCooldownUntil int64 // 每次请求后的冷却截止时间（UnixNano），0 = 无冷却
+	Disabled              int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
 	AddedAt        int64 // 加入号池的时间（UnixNano），用于过期清理
 	Locked         int32 // 原子标志，1 = 锁定，自动清理跳过此账号
 
@@ -368,6 +369,10 @@ func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64
 func (a *Account) IsAvailable() bool {
 	// 原子标志优先：401 时瞬间置位，无需等锁即可拦截并发请求
 	if atomic.LoadInt32(&a.Disabled) != 0 {
+		return false
+	}
+	// 每次请求后的冷却检查（原子操作，无需锁）
+	if until := atomic.LoadInt64(&a.RequestCooldownUntil); until > 0 && time.Now().UnixNano() < until {
 		return false
 	}
 
@@ -724,6 +729,7 @@ type Store struct {
 	autoCleanExpired      atomic.Bool
 	autoCleanupBatch      atomic.Bool
 	maxRetries            int64 // 请求失败最大重试次数（换号重试）
+	accountCooldown       int64 // 账号冷却时间（秒），默认 30
 	stopCh                chan struct{}
 	wg                    sync.WaitGroup
 
@@ -802,6 +808,11 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		retries = 2 // 默认重试 2 次
 	}
 	atomic.StoreInt64(&s.maxRetries, retries)
+	cooldown := int64(settings.AccountCooldown)
+	if cooldown <= 0 {
+		cooldown = 30
+	}
+	atomic.StoreInt64(&s.accountCooldown, cooldown)
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	if settings.ModelMapping != "" {
 		s.modelMapping.Store(settings.ModelMapping)
@@ -1448,10 +1459,15 @@ func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout
 	}
 }
 
-// Release 释放账号（请求完成后调用，递减并发计数）
+// Release 释放账号（请求完成后调用，递减并发计数 + 设置请求冷却）
 func (s *Store) Release(acc *Account) {
 	if acc == nil {
 		return
+	}
+	// 设置每次请求后的冷却时间
+	if cd := atomic.LoadInt64(&s.accountCooldown); cd > 0 {
+		until := time.Now().Add(time.Duration(cd) * time.Second).UnixNano()
+		atomic.StoreInt64(&acc.RequestCooldownUntil, until)
 	}
 	if scheduler := s.getFastScheduler(); scheduler != nil {
 		scheduler.Release(acc)
@@ -1483,6 +1499,24 @@ func (s *Store) SetMaxRetries(n int) {
 // GetMaxRetries 获取当前最大重试次数
 func (s *Store) GetMaxRetries() int {
 	return int(atomic.LoadInt64(&s.maxRetries))
+}
+
+// SetAccountCooldown 动态更新账号冷却时间（秒）
+func (s *Store) SetAccountCooldown(seconds int) {
+	if seconds < 0 {
+		seconds = 0
+	}
+	atomic.StoreInt64(&s.accountCooldown, int64(seconds))
+}
+
+// GetAccountCooldown 获取账号冷却时间（秒）
+func (s *Store) GetAccountCooldown() int {
+	return int(atomic.LoadInt64(&s.accountCooldown))
+}
+
+// GetAccountCooldownDuration 获取账号冷却时间 Duration
+func (s *Store) GetAccountCooldownDuration() time.Duration {
+	return time.Duration(atomic.LoadInt64(&s.accountCooldown)) * time.Second
 }
 
 // GetAllowRemoteMigration 获取是否允许远程迁移
@@ -1634,7 +1668,8 @@ func (s *Store) ClearCooldown(acc *Account) {
 		return
 	}
 
-	atomic.StoreInt32(&acc.Disabled, 0) // 清除原子禁用标志
+	atomic.StoreInt32(&acc.Disabled, 0)              // 清除原子禁用标志
+	atomic.StoreInt64(&acc.RequestCooldownUntil, 0) // 清除请求冷却
 	acc.mu.Lock()
 	wasCooling := acc.Status == StatusCooldown
 	if acc.Status == StatusCooldown {

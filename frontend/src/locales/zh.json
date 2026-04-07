@@ -555,6 +555,8 @@
     "globalRpmRange": "每分钟最大请求数，0 = 不限制",
     "maxRetries": "最大重试次数",
     "maxRetriesRange": "请求失败后自动换号重试的次数（0~10），0 = 不重试",
+    "accountCooldown": "账号冷却时间",
+    "accountCooldownRange": "账号被限速后的冷却秒数（0~3600），默认 30 秒",
     "testModelLabel": "测试连接模型",
     "testModelHint": "账号测试连接时使用的模型",
     "testConcurrencyRange": "批量测试连接时的并发数（范围 1~200）",
