@@ -7,7 +7,7 @@ services:
     ports:
       - "${CODEX_PORT:-8080}:${CODEX_PORT:-8080}"
     env_file:
-      - .env.example
+      - .env.sqlite.example
     volumes:
       - ./sqlite-data-local:/data
       - ./logs:/app/logs
