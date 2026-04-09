@@ -1030,6 +1030,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		} else {
 			var fullContent strings.Builder
 			var toolCalls []ToolCallResult
+			// 从 output_item.done 事件实时收集 function_call（上游 completed 中 output 可能为空）
+			pendingToolCalls := make(map[string]*ToolCallResult) // item_id → result
+			var toolCallOrder []string                           // 保持顺序
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -1043,14 +1046,29 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					delta := parsed.Get("delta").String()
 					deltaCharCount += len(delta)
 					fullContent.WriteString(delta)
+				case "response.output_item.added":
+					// 记录 function_call item，后续用 delta 填充 arguments
+					if parsed.Get("item.type").String() == "function_call" {
+						itemID := parsed.Get("item.id").String()
+						tc := &ToolCallResult{
+							ID:   parsed.Get("item.call_id").String(),
+							Name: parsed.Get("item.name").String(),
+						}
+						pendingToolCalls[itemID] = tc
+						toolCallOrder = append(toolCallOrder, itemID)
+					}
 				case "response.function_call_arguments.delta":
 					deltaCharCount += len(parsed.Get("delta").String())
+					itemID := parsed.Get("item_id").String()
+					if tc, ok := pendingToolCalls[itemID]; ok {
+						tc.Arguments += parsed.Get("delta").String()
+					}
 				case "response.completed":
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
-					// 从 response.output 提取 function_call 项
+					// 优先从 completed 的 output 提取，回退到收集的 items
 					toolCalls = ExtractToolCallsFromOutput(data)
 					gotTerminal = true
 					return false
@@ -1061,6 +1079,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 				return true
 			})
+
+			// 如果 completed 中没有 tool calls，使用从事件流收集的
+			if len(toolCalls) == 0 && len(pendingToolCalls) > 0 {
+				for _, itemID := range toolCallOrder {
+					tc := pendingToolCalls[itemID]
+					if tc.Arguments == "" {
+						tc.Arguments = "{}"
+					}
+					toolCalls = append(toolCalls, *tc)
+				}
+			}
 
 			compactResult = BuildCompactResponse(chunkID, model, created, fullContent.String(), toolCalls, usage)
 		}
