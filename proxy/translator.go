@@ -337,13 +337,17 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 					}
 				}
 			}
-			// 递归清理不支持的 JSON Schema 关键字
-			if params, ok := toolMap["parameters"].(map[string]any); ok {
-				stripUnsupportedSchemaKeys(params)
-			}
-			// 确保 parameters 存在且合法
-			if toolMap["parameters"] == nil {
-				toolMap["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+			// 仅对 function 类型工具处理 parameters
+			toolType, _ := toolMap["type"].(string)
+			if toolType == "function" {
+				// 递归清理不支持的 JSON Schema 关键字
+				if params, ok := toolMap["parameters"].(map[string]any); ok {
+					stripUnsupportedSchemaKeys(params)
+				}
+				// 确保 parameters 存在且合法
+				if toolMap["parameters"] == nil {
+					toolMap["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
 			}
 		}
 	}
