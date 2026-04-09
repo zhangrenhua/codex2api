@@ -182,11 +182,10 @@ func toCodexCallID(anthropicID string) string {
 }
 
 // fromCodexCallID 将 Codex call_id 转回 Anthropic tool_use id
+// 无条件剥离 fc_ 前缀，toCodexCallID 会在发送时加回
 func fromCodexCallID(codexID string) string {
 	if after, ok := strings.CutPrefix(codexID, "fc_"); ok {
-		if strings.HasPrefix(after, "toolu_") || strings.HasPrefix(after, "call_") {
-			return after
-		}
+		return after
 	}
 	return codexID
 }
