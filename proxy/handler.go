@@ -17,9 +17,12 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
+	"encoding/json"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Handler API 路由处理器
@@ -623,6 +626,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		} else {
 			// 非流式收集
 			var lastResponseData []byte
+			var outputItems []json.RawMessage // 收集 output_item.done 中的完整 item
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
@@ -633,6 +637,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				// 累计 delta 字符数
 				if eventType == "response.output_text.delta" {
 					deltaCharCount += len(parsed.Get("delta").String())
+				}
+				// 收集完整的 output item（上游 completed 事件中 output 可能为空数组）
+				if eventType == "response.output_item.done" {
+					if item := parsed.Get("item"); item.Exists() {
+						outputItems = append(outputItems, json.RawMessage(item.Raw))
+					}
 				}
 				if eventType == "response.completed" {
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
@@ -658,6 +668,14 @@ func (h *Handler) Responses(c *gin.Context) {
 				responseObj := gjson.GetBytes(lastResponseData, "response")
 				if responseObj.Exists() {
 					responseJSON = []byte(responseObj.Raw)
+					// 如果 response.output 为空但收集到了 output items，注入它们
+					if len(outputItems) > 0 {
+						existingOutput := gjson.GetBytes(responseJSON, "output")
+						if !existingOutput.Exists() || (existingOutput.IsArray() && len(existingOutput.Array()) == 0) {
+							outputArray, _ := json.Marshal(outputItems)
+							responseJSON, _ = sjson.SetRawBytes(responseJSON, "output", outputArray)
+						}
+					}
 				}
 			}
 		}
