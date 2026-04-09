@@ -393,64 +393,72 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			// 构建 Anthropic 响应
-			var content []anthropicContentBlock
-			if thinkingText.Len() > 0 {
-				content = append(content, anthropicContentBlock{
-					Type:     "thinking",
-					Thinking: thinkingText.String(),
-				})
-			}
-			if fullText.Len() > 0 {
-				content = append(content, anthropicContentBlock{
-					Type: "text",
-					Text: fullText.String(),
-				})
-			}
-			content = append(content, toolCalls...)
+			var anthropicResult *anthropicResponse
 
-			// 确定 stop_reason
-			stopReason := "end_turn"
-			if len(toolCalls) > 0 {
-				stopReason = "tool_use"
-			}
-			if lastCompletedData != nil {
-				status := gjson.GetBytes(lastCompletedData, "response.status").String()
-				if status == "incomplete" {
-					reason := gjson.GetBytes(lastCompletedData, "response.incomplete_details.reason").String()
-					if reason == "max_output_tokens" {
-						stopReason = "max_tokens"
+			if fullText.Len() == 0 && thinkingText.Len() == 0 && len(toolCalls) == 0 && lastCompletedData != nil {
+				// delta 未累积到任何内容，回退到从 response.completed 提取完整 output
+				log.Printf("[/v1/messages 非流式] delta 为空，回退到 response.completed 提取 output")
+				anthropicResult = buildAnthropicResponseFromCompleted(lastCompletedData, originalModel)
+			} else {
+				var content []anthropicContentBlock
+				if thinkingText.Len() > 0 {
+					content = append(content, anthropicContentBlock{
+						Type:     "thinking",
+						Thinking: thinkingText.String(),
+					})
+				}
+				if fullText.Len() > 0 {
+					content = append(content, anthropicContentBlock{
+						Type: "text",
+						Text: fullText.String(),
+					})
+				}
+				content = append(content, toolCalls...)
+
+				// 确定 stop_reason
+				stopReason := "end_turn"
+				if len(toolCalls) > 0 {
+					stopReason = "tool_use"
+				}
+				if lastCompletedData != nil {
+					status := gjson.GetBytes(lastCompletedData, "response.status").String()
+					if status == "incomplete" {
+						reason := gjson.GetBytes(lastCompletedData, "response.incomplete_details.reason").String()
+						if reason == "max_output_tokens" {
+							stopReason = "max_tokens"
+						}
 					}
 				}
-			}
 
-			// 提取 usage
-			var anthropicUsg anthropicUsage
-			if lastCompletedData != nil {
-				usg := gjson.GetBytes(lastCompletedData, "response.usage")
-				if usg.Exists() {
-					anthropicUsg = anthropicUsage{
-						InputTokens:          int(usg.Get("input_tokens").Int()),
-						OutputTokens:         int(usg.Get("output_tokens").Int()),
-						CacheReadInputTokens: int(usg.Get("input_tokens_details.cached_tokens").Int()),
+				// 提取 usage
+				var anthropicUsg anthropicUsage
+				if lastCompletedData != nil {
+					usg := gjson.GetBytes(lastCompletedData, "response.usage")
+					if usg.Exists() {
+						anthropicUsg = anthropicUsage{
+							InputTokens:          int(usg.Get("input_tokens").Int()),
+							OutputTokens:         int(usg.Get("output_tokens").Int()),
+							CacheReadInputTokens: int(usg.Get("input_tokens_details.cached_tokens").Int()),
+						}
 					}
 				}
-			}
 
-			if content == nil {
-				content = []anthropicContentBlock{}
-			}
+				if content == nil {
+					content = []anthropicContentBlock{}
+				}
 
-			convID := uuid.New().String()
-			anthropicResult := &anthropicResponse{
-				ID:             "msg_" + convID[:24],
-				Type:           "message",
-				Role:           "assistant",
-				Model:          originalModel,
-				Content:        content,
-				StopReason:     stopReason,
-				Usage:          anthropicUsg,
-				ConversationID: convID,
-				ConvID:         convID,
+				convID := uuid.New().String()
+				anthropicResult = &anthropicResponse{
+					ID:             "msg_" + convID[:24],
+					Type:           "message",
+					Role:           "assistant",
+					Model:          originalModel,
+					Content:        content,
+					StopReason:     stopReason,
+					Usage:          anthropicUsg,
+					ConversationID: convID,
+					ConvID:         convID,
+				}
 			}
 			c.JSON(http.StatusOK, anthropicResult)
 		}
