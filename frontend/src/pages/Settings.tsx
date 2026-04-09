@@ -702,6 +702,9 @@ export default function Settings() {
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.resinPlatformNameDesc')}</p>
               </div>
             </div>
+            <Button className="mt-4" onClick={() => void handleSaveSettings()} disabled={savingSettings}>
+              {savingSettings ? t('common.saving') : t('settings.saveSettings')}
+            </Button>
           </CardContent>
         </Card>
 
