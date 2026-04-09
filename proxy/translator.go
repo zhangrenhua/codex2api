@@ -403,7 +403,7 @@ func normalizeReasoningEffort(effort string) string {
 // isAllowedServiceTier 判断 service_tier 是否在上游允许的范围内
 func isAllowedServiceTier(tier string) bool {
 	switch tier {
-	case "auto", "default", "flex", "priority", "scale":
+	case "auto", "default", "flex", "priority", "scale", "fast":
 		return true
 	default:
 		return false
@@ -601,7 +601,7 @@ func sanitizeServiceTierForUpstream(body []byte) []byte {
 		return body
 	}
 	switch tier {
-	case "auto", "default", "flex", "priority", "scale":
+	case "auto", "default", "flex", "priority", "scale", "fast":
 		body, _ = sjson.DeleteBytes(body, "serviceTier")
 		return body
 	default:
