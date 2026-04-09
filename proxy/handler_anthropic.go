@@ -13,6 +13,7 @@ import (
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ==================== Anthropic 错误格式 ====================
@@ -316,6 +317,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		} else {
 			// 非流式：缓冲所有事件后构建完整 JSON 响应
 			var lastCompletedData []byte
+			var outputItemsRaw [][]byte // 收集 output_item.done 中的完整 item
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -327,6 +329,12 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				if eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
 					deltaCharCount += len(parsed.Get("delta").String())
+				}
+				// 收集完整的 output item（上游 completed 事件中 output 可能为空数组）
+				if eventType == "response.output_item.done" {
+					if item := parsed.Get("item"); item.Exists() {
+						outputItemsRaw = append(outputItemsRaw, []byte(item.Raw))
+					}
 				}
 				if eventType == "response.completed" {
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
@@ -343,6 +351,17 @@ func (h *Handler) Messages(c *gin.Context) {
 			})
 
 			if lastCompletedData != nil {
+				// 如果 completed 中 output 为空但收集到了 items，注入到 completedData 中
+				if len(outputItemsRaw) > 0 {
+					existingOutput := gjson.GetBytes(lastCompletedData, "response.output")
+					if !existingOutput.Exists() || (existingOutput.IsArray() && len(existingOutput.Array()) == 0) {
+						// 构建 output JSON 数组
+						outputArrayJSON := buildRawJSONArray(outputItemsRaw)
+						if patched, err := sjson.SetRawBytes(lastCompletedData, "response.output", outputArrayJSON); err == nil {
+							lastCompletedData = patched
+						}
+					}
+				}
 				anthropicResp := buildAnthropicResponseFromCompleted(lastCompletedData, originalModel)
 				c.JSON(http.StatusOK, anthropicResp)
 			} else {
@@ -442,4 +461,17 @@ func (h *Handler) Messages(c *gin.Context) {
 		errType := mapHTTPStatusToAnthropicError(lastStatusCode)
 		sendAnthropicError(c, lastStatusCode, errType, fmt.Sprintf("Upstream returned status %d", lastStatusCode))
 	}
+}
+
+// buildRawJSONArray 将多个原始 JSON 片段拼接为 JSON 数组
+func buildRawJSONArray(items [][]byte) []byte {
+	buf := []byte("[")
+	for i, item := range items {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, item...)
+	}
+	buf = append(buf, ']')
+	return buf
 }
