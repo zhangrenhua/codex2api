@@ -90,12 +90,12 @@ type anthropicUsage struct {
 // ==================== Anthropic 流式事件类型 ====================
 
 type anthropicStreamEvent struct {
-	Type         string                 `json:"type"`
-	Message      *anthropicResponse     `json:"message,omitempty"`
-	Index        *int                   `json:"index,omitempty"`
-	ContentBlock *anthropicContentBlock `json:"content_block,omitempty"`
-	Delta        *anthropicDelta        `json:"delta,omitempty"`
-	Usage        *anthropicUsage        `json:"usage,omitempty"`
+	Type         string             `json:"type"`
+	Message      *anthropicResponse `json:"message,omitempty"`
+	Index        *int               `json:"index,omitempty"`
+	ContentBlock json.RawMessage    `json:"content_block,omitempty"`
+	Delta        *anthropicDelta    `json:"delta,omitempty"`
+	Usage        *anthropicUsage    `json:"usage,omitempty"`
 }
 
 type anthropicDelta struct {
@@ -325,6 +325,12 @@ func appendUserBlocks(input []any, blocks []anthropicContentBlock) []any {
 		case "tool_result":
 			// tool_result → function_call_output（独立 item）
 			output := extractToolResultText(b)
+			// is_error: Codex 无对应字段，将错误语义嵌入 output 文本
+			if b.IsError && output != "" {
+				output = "[TOOL ERROR] " + output
+			} else if b.IsError {
+				output = "[TOOL ERROR] tool call failed"
+			}
 			input = append(input, map[string]any{
 				"type":    "function_call_output",
 				"call_id": toCodexCallID(b.ToolUseID),
@@ -593,12 +599,9 @@ func (t *anthropicStreamTranslator) handleOutputItemAdded(data []byte) []anthrop
 		t.contentBlockOpen = true
 		t.currentBlockType = "thinking"
 		events = append(events, anthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &anthropicContentBlock{
-				Type:     "thinking",
-				Thinking: "",
-			},
+			Type:         "content_block_start",
+			Index:        &idx,
+			ContentBlock: json.RawMessage(`{"type":"thinking","thinking":""}`),
 		})
 
 	case "function_call":
@@ -612,15 +615,16 @@ func (t *anthropicStreamTranslator) handleOutputItemAdded(data []byte) []anthrop
 		t.currentToolUseID = callID
 		t.currentToolUseName = name
 		t.hasToolUse = true
+		toolUseBlock, _ := json.Marshal(map[string]any{
+			"type":  "tool_use",
+			"id":    callID,
+			"name":  name,
+			"input": map[string]any{},
+		})
 		events = append(events, anthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &anthropicContentBlock{
-				Type:  "tool_use",
-				ID:    callID,
-				Name:  name,
-				Input: json.RawMessage("{}"),
-			},
+			Type:         "content_block_start",
+			Index:        &idx,
+			ContentBlock: toolUseBlock,
 		})
 
 	case "message":
@@ -652,12 +656,9 @@ func (t *anthropicStreamTranslator) handleTextDelta(data []byte) []anthropicStre
 		t.contentBlockOpen = true
 		t.currentBlockType = "text"
 		events = append(events, anthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &anthropicContentBlock{
-				Type: "text",
-				Text: "",
-			},
+			Type:         "content_block_start",
+			Index:        &idx,
+			ContentBlock: json.RawMessage(`{"type":"text","text":""}`),
 		})
 	}
 
@@ -693,12 +694,9 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 		t.contentBlockOpen = true
 		t.currentBlockType = "thinking"
 		events = append(events, anthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &anthropicContentBlock{
-				Type:     "thinking",
-				Thinking: "",
-			},
+			Type:         "content_block_start",
+			Index:        &idx,
+			ContentBlock: json.RawMessage(`{"type":"thinking","thinking":""}`),
 		})
 	}
 
