@@ -318,8 +318,12 @@ func (h *Handler) Messages(c *gin.Context) {
 		} else {
 			// 非流式：从 delta 事件累积内容，构建完整 Anthropic 响应
 			var lastCompletedData []byte
-			var fullText strings.Builder
-			var thinkingText strings.Builder
+			var fullText strings.Builder     // delta 累积
+			var doneText strings.Builder     // .done 权威源
+			var gotDoneText bool
+			var thinkingText strings.Builder // delta 累积
+			var doneThinking strings.Builder // .done 权威源
+			var gotDoneThinking bool
 			var toolCalls []anthropicContentBlock
 			// 用于从 delta 事件收集 function_call 参数
 			pendingToolCalls := make(map[string]*anthropicContentBlock) // item_id → block
@@ -338,8 +342,15 @@ func (h *Handler) Messages(c *gin.Context) {
 					delta := parsed.Get("delta").String()
 					deltaCharCount += len(delta)
 					fullText.WriteString(delta)
+				case "response.output_text.done":
+					// 权威文本源：追加（支持多 content part）
+					gotDoneText = true
+					doneText.WriteString(parsed.Get("text").String())
 				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 					thinkingText.WriteString(parsed.Get("delta").String())
+				case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+					gotDoneThinking = true
+					doneThinking.WriteString(parsed.Get("text").String())
 				case "response.output_item.added":
 					if parsed.Get("item.type").String() == "function_call" {
 						itemID := parsed.Get("item.id").String()
@@ -365,6 +376,15 @@ func (h *Handler) Messages(c *gin.Context) {
 						}
 						block.Input = json.RawMessage(existing + parsed.Get("delta").String())
 					}
+				case "response.function_call_arguments.done":
+					// 权威参数源：用 .done 事件覆盖 delta 累积
+					itemID := parsed.Get("item_id").String()
+					if block, ok := pendingToolCalls[itemID]; ok {
+						args := parsed.Get("arguments").String()
+						if args != "" {
+							block.Input = json.RawMessage(args)
+						}
+					}
 				case "response.completed":
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					lastCompletedData = data
@@ -377,6 +397,16 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				return true
 			})
+
+			// 优先使用 .done 权威源
+			if gotDoneText {
+				fullText.Reset()
+				fullText.WriteString(doneText.String())
+			}
+			if gotDoneThinking {
+				thinkingText.Reset()
+				thinkingText.WriteString(doneThinking.String())
+			}
 
 			// 调试日志：非流式 delta 收集结果
 			if fullText.Len() == 0 && len(pendingToolCalls) == 0 && thinkingText.Len() == 0 {

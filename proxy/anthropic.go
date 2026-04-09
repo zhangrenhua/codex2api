@@ -99,11 +99,13 @@ type anthropicStreamEvent struct {
 }
 
 type anthropicDelta struct {
-	Type        string `json:"type,omitempty"`
-	Text        string `json:"text,omitempty"`
-	PartialJSON string `json:"partial_json,omitempty"`
-	Thinking    string `json:"thinking,omitempty"`
-	StopReason  string `json:"stop_reason,omitempty"`
+	Type         string  `json:"type,omitempty"`
+	Text         string  `json:"text,omitempty"`
+	PartialJSON  string  `json:"partial_json,omitempty"`
+	Thinking     string  `json:"thinking,omitempty"`
+	Signature    string  `json:"signature,omitempty"`
+	StopReason   string  `json:"stop_reason,omitempty"`
+	StopSequence *string `json:"stop_sequence,omitempty"`
 }
 
 // ==================== 模型映射 ====================
@@ -774,8 +776,8 @@ func (t *anthropicStreamTranslator) handleCompleted(data []byte) []anthropicStre
 	events = append(events, anthropicStreamEvent{
 		Type: "message_delta",
 		Delta: &anthropicDelta{
-			Type:       "message_delta",
-			StopReason: stopReason,
+			StopReason:   stopReason,
+			StopSequence: nil,
 		},
 		Usage: &anthropicUsage{
 			InputTokens:         t.inputTokens,
@@ -798,8 +800,8 @@ func (t *anthropicStreamTranslator) handleFailed() []anthropicStreamEvent {
 	events = append(events, anthropicStreamEvent{
 		Type: "message_delta",
 		Delta: &anthropicDelta{
-			Type:       "message_delta",
-			StopReason: "end_turn",
+			StopReason:   "end_turn",
+			StopSequence: nil,
 		},
 		Usage: &anthropicUsage{},
 	})
@@ -830,8 +832,8 @@ func (t *anthropicStreamTranslator) finalize() []anthropicStreamEvent {
 	events = append(events, anthropicStreamEvent{
 		Type: "message_delta",
 		Delta: &anthropicDelta{
-			Type:       "message_delta",
-			StopReason: "end_turn",
+			StopReason:   "end_turn",
+			StopSequence: nil,
 		},
 		Usage: &anthropicUsage{
 			InputTokens:  t.inputTokens,

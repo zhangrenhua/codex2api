@@ -1089,10 +1089,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			})
 		} else {
 			var fullContent strings.Builder
+			var doneContent strings.Builder
+			var gotDoneContent bool
 			var toolCalls []ToolCallResult
 			// 从 output_item.done 事件实时收集 function_call（上游 completed 中 output 可能为空）
 			pendingToolCalls := make(map[string]*ToolCallResult) // item_id → result
 			var toolCallOrder []string                           // 保持顺序
+
+			var lastCompletedData []byte
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -1106,6 +1110,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					delta := parsed.Get("delta").String()
 					deltaCharCount += len(delta)
 					fullContent.WriteString(delta)
+				case "response.output_text.done":
+					// 权威文本源（追加，支持多 content part）
+					gotDoneContent = true
+					doneContent.WriteString(parsed.Get("text").String())
 				case "response.output_item.added":
 					// 记录 function_call item，后续用 delta 填充 arguments
 					if parsed.Get("item.type").String() == "function_call" {
@@ -1123,6 +1131,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					if tc, ok := pendingToolCalls[itemID]; ok {
 						tc.Arguments += parsed.Get("delta").String()
 					}
+				case "response.function_call_arguments.done":
+					// 权威参数源
+					itemID := parsed.Get("item_id").String()
+					if tc, ok := pendingToolCalls[itemID]; ok {
+						args := parsed.Get("arguments").String()
+						if args != "" {
+							tc.Arguments = args
+						}
+					}
 				case "response.completed":
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
@@ -1130,6 +1147,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					}
 					// 优先从 completed 的 output 提取，回退到收集的 items
 					toolCalls = ExtractToolCallsFromOutput(data)
+					lastCompletedData = data
 					gotTerminal = true
 					return false
 				case "response.failed":
@@ -1149,6 +1167,27 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					}
 					toolCalls = append(toolCalls, *tc)
 				}
+			}
+
+			// 优先使用 .done 权威源
+			if gotDoneContent {
+				fullContent.Reset()
+				fullContent.WriteString(doneContent.String())
+			}
+
+			// 如果仍无文本，从 response.completed 的 output 中提取
+			if fullContent.Len() == 0 && lastCompletedData != nil {
+				gjson.GetBytes(lastCompletedData, "response.output").ForEach(func(_, item gjson.Result) bool {
+					if item.Get("type").String() == "message" {
+						item.Get("content").ForEach(func(_, part gjson.Result) bool {
+							if part.Get("type").String() == "output_text" {
+								fullContent.WriteString(part.Get("text").String())
+							}
+							return true
+						})
+					}
+					return true
+				})
 			}
 
 			compactResult = BuildCompactResponse(chunkID, model, created, fullContent.String(), toolCalls, usage)
@@ -1296,7 +1335,10 @@ func (h *Handler) handleStreamResponse(c *gin.Context, body io.Reader, model, ch
 // handleCompactResponse 处理非流式响应
 func (h *Handler) handleCompactResponse(c *gin.Context, body io.Reader, model, chunkID string, created int64) {
 	var fullContent strings.Builder
+	var doneContent strings.Builder
+	var gotDoneContent bool
 	var usage *UsageInfo
+	var lastCompletedData []byte
 
 	_ = ReadSSEStream(body, func(data []byte) bool {
 		eventType := gjson.GetBytes(data, "type").String()
@@ -1304,14 +1346,40 @@ func (h *Handler) handleCompactResponse(c *gin.Context, body io.Reader, model, c
 		case "response.output_text.delta":
 			delta := gjson.GetBytes(data, "delta").String()
 			fullContent.WriteString(delta)
+		case "response.output_text.done":
+			// 权威文本源（追加，支持多 content part）
+			gotDoneContent = true
+			doneContent.WriteString(gjson.GetBytes(data, "text").String())
 		case "response.completed":
 			usage = extractUsage(data)
+			lastCompletedData = append([]byte(nil), data...)
 			return false
 		case "response.failed":
 			return false
 		}
 		return true
 	})
+
+	// 优先使用 .done 权威源
+	if gotDoneContent {
+		fullContent.Reset()
+		fullContent.WriteString(doneContent.String())
+	}
+
+	// 如果仍无文本，从 response.completed 的 output 中提取
+	if fullContent.Len() == 0 && lastCompletedData != nil {
+		gjson.GetBytes(lastCompletedData, "response.output").ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "message" {
+				item.Get("content").ForEach(func(_, part gjson.Result) bool {
+					if part.Get("type").String() == "output_text" {
+						fullContent.WriteString(part.Get("text").String())
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
 
 	result := BuildCompactResponse(chunkID, model, created, fullContent.String(), nil, usage)
 
