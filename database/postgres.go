@@ -255,7 +255,7 @@ func (db *DB) migrate(ctx context.Context) error {
 
 	CREATE TABLE IF NOT EXISTS system_settings (
 		id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-		max_concurrency    INT DEFAULT 2,
+		max_concurrency    INT DEFAULT 0,
 		global_rpm         INT DEFAULT 0,
 		test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
 		test_concurrency   INT DEFAULT 50,
@@ -398,7 +398,7 @@ type SystemSettings struct {
 	MaxRetries            int
 	AllowRemoteMigration  bool
 	ModelMapping          string // JSON: {"anthropic_model": "codex_model", ...}
-	AccountCooldown       int    // 账号冷却时间（秒），默认 30
+	AccountCooldown       int    // 账号冷却时间（秒），默认 60
 }
 
 // GetSystemSettings 加载全局设置
@@ -414,7 +414,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(auto_clean_error, false),
 		       COALESCE(auto_clean_expired, false),
 		       COALESCE(model_mapping, '{}'),
-		       COALESCE(account_cooldown, 30)
+		       COALESCE(account_cooldown, 60)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,

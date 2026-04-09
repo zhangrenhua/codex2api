@@ -237,6 +237,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		deltaCharCount := 0
 		var readErr error
 		var writeErr error
+		var failedData []byte // 捕获 response.failed 事件数据，用于流内冷却
 		wroteAnyBody := false
 
 		if isStream {
@@ -279,6 +280,7 @@ func (h *Handler) Messages(c *gin.Context) {
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
+					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 				}
 
@@ -333,6 +335,7 @@ func (h *Handler) Messages(c *gin.Context) {
 					return false
 				}
 				if eventType == "response.failed" {
+					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 					return false
 				}
@@ -346,6 +349,9 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusBadGateway, "api_error", "No complete response received from upstream")
 			}
 		}
+
+		// 流内 response.failed 冷却（如 429/401）
+		h.applyStreamFailedCooldown(account, failedData, resp)
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
@@ -367,7 +373,10 @@ func (h *Handler) Messages(c *gin.Context) {
 			continue
 		}
 
-		h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		streamFailed := len(failedData) > 0
+		if !streamFailed {
+			h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		}
 
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
@@ -413,7 +422,10 @@ func (h *Handler) Messages(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
-		if outcome.penalize {
+		if streamFailed {
+			recyclePooledClientForAccount(account)
+			h.store.ReportRequestFailure(account, "stream_failed", time.Duration(totalDuration)*time.Millisecond)
+		} else if outcome.penalize {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {

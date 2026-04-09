@@ -71,7 +71,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			max_concurrency INTEGER DEFAULT 2,
+			max_concurrency INTEGER DEFAULT 0,
 			global_rpm INTEGER DEFAULT 0,
 			test_model TEXT DEFAULT 'gpt-5.4',
 			test_concurrency INTEGER DEFAULT 50,
@@ -146,7 +146,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
 		{"system_settings", "model_mapping", "TEXT DEFAULT '{}'"},
-		{"system_settings", "account_cooldown", "INTEGER DEFAULT 30"},
+		{"system_settings", "account_cooldown", "INTEGER DEFAULT 60"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},

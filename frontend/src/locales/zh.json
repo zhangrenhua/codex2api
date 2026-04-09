@@ -694,7 +694,7 @@
     },
     "importAccounts": {
       "title": "Import Accounts (File Upload)",
-      "desc": "通过文件上传批量导入账号。支持三种格式：txt（每行一个 RT）、json（兼容 CLIProxyAPI 凭证导出）、at_txt（每行一个 AT）。文件大小限制 2MB。"
+      "desc": "通过文件上传批量导入账号。支持三种格式：txt（每行一个 RT）、json（兼容 CLIProxyAPI 凭证导出）、at_txt（每行一个 AT）。"
     },
     "deleteAccount": {
       "title": "Delete Account",

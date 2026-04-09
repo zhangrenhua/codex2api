@@ -495,57 +495,81 @@ func (erl *EnhancedRateLimiter) Allow() bool {
 	return erl.globalLimiter.allow()
 }
 
+// getOrCreateAccountLimiter 获取或创建账号级限流器
+func (erl *EnhancedRateLimiter) getOrCreateAccountLimiter(accountID string) *LevelLimiter {
+	// 先尝试读锁查找
+	erl.mu.RLock()
+	limiter, exists := erl.accountLimiters[accountID]
+	erl.mu.RUnlock()
+	if exists {
+		return limiter
+	}
+
+	// 不存在，获取写锁创建
+	erl.mu.Lock()
+	defer erl.mu.Unlock()
+	// double-check
+	limiter, exists = erl.accountLimiters[accountID]
+	if !exists {
+		limiter = newLevelLimiter(accountID, LevelAccount, erl.accountRPM)
+		erl.accountLimiters[accountID] = limiter
+	}
+	return limiter
+}
+
+// getOrCreateModelLimiter 获取或创建模型级限流器
+func (erl *EnhancedRateLimiter) getOrCreateModelLimiter(model string) *LevelLimiter {
+	// 先尝试读锁查找
+	erl.mu.RLock()
+	limiter, exists := erl.modelLimiters[model]
+	erl.mu.RUnlock()
+	if exists {
+		return limiter
+	}
+
+	// 不存在，获取写锁创建
+	erl.mu.Lock()
+	defer erl.mu.Unlock()
+	// double-check
+	limiter, exists = erl.modelLimiters[model]
+	if !exists {
+		limiter = newLevelLimiter(model, LevelModel, erl.modelRPM)
+		erl.modelLimiters[model] = limiter
+	}
+	return limiter
+}
+
 // AllowWithContext 检查请求是否允许通过（带上下文的多级限流）
 func (erl *EnhancedRateLimiter) AllowWithContext(accountID, model string) bool {
 	if !erl.enabled {
 		return true
 	}
 
-	erl.mu.RLock()
-	defer erl.mu.RUnlock()
+	// 1. 先获取/创建所有需要的限流器（不消耗令牌）
+	var accLimiter *LevelLimiter
+	if erl.accountRPM > 0 && accountID != "" {
+		accLimiter = erl.getOrCreateAccountLimiter(accountID)
+	}
 
-	// 1. 检查全局限流
+	var modelLimiter *LevelLimiter
+	if erl.modelRPM > 0 && model != "" {
+		modelLimiter = erl.getOrCreateModelLimiter(model)
+	}
+
+	// 2. 按级别依次检查限流（每个 limiter 内部有自己的锁）
 	if !erl.globalLimiter.allow() {
 		atomic.AddInt64(&erl.totalLimited, 1)
 		return false
 	}
 
-	// 2. 检查账号级限流
-	if erl.accountRPM > 0 && accountID != "" {
-		accLimiter, exists := erl.accountLimiters[accountID]
-		if !exists {
-			// 需要升级锁来创建新的限流器
-			erl.mu.RUnlock()
-			erl.mu.Lock()
-			accLimiter, exists = erl.accountLimiters[accountID]
-			if !exists {
-				accLimiter = newLevelLimiter(accountID, LevelAccount, erl.accountRPM)
-				erl.accountLimiters[accountID] = accLimiter
-			}
-			erl.mu.Unlock()
-			erl.mu.RLock()
-		}
+	if accLimiter != nil {
 		if !accLimiter.allow() {
 			atomic.AddInt64(&erl.totalLimited, 1)
 			return false
 		}
 	}
 
-	// 3. 检查模型级限流
-	if erl.modelRPM > 0 && model != "" {
-		modelLimiter, exists := erl.modelLimiters[model]
-		if !exists {
-			// 需要升级锁来创建新的限流器
-			erl.mu.RUnlock()
-			erl.mu.Lock()
-			modelLimiter, exists = erl.modelLimiters[model]
-			if !exists {
-				modelLimiter = newLevelLimiter(model, LevelModel, erl.modelRPM)
-				erl.modelLimiters[model] = modelLimiter
-			}
-			erl.mu.Unlock()
-			erl.mu.RLock()
-		}
+	if modelLimiter != nil {
 		if !modelLimiter.allow() {
 			atomic.AddInt64(&erl.totalLimited, 1)
 			return false

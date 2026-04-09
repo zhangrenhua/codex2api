@@ -45,8 +45,8 @@ func TestLoadDefaultsToPostgresAndRedis(t *testing.T) {
 	if got := cfg.Database.SSLMode; got != "disable" {
 		t.Fatalf("Database.SSLMode = %q, want %q", got, "disable")
 	}
-	if got := cfg.Port; got != 8080 {
-		t.Fatalf("Port = %d, want %d", got, 8080)
+	if got := cfg.Port; got != 3000 {
+		t.Fatalf("Port = %d, want %d", got, 3000)
 	}
 }
 

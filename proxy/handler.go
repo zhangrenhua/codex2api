@@ -563,6 +563,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		var writeErr error
 		wroteAnyBody := false
 		var responseJSON []byte
+		var failedData []byte // 捕获 response.failed 事件数据，用于流内冷却
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -607,6 +608,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
+					failedData = append([]byte(nil), data...) // 复制一份，回调外使用
 					gotTerminal = true
 				}
 
@@ -644,6 +646,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					return false
 				}
 				if eventType == "response.failed" {
+					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 					lastResponseData = data
 					return false
@@ -658,6 +661,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 		}
+
+		// 流内 response.failed 冷却（如 429/401）
+		h.applyStreamFailedCooldown(account, failedData, resp)
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
@@ -678,7 +684,11 @@ func (h *Handler) Responses(c *gin.Context) {
 			continue
 		}
 
-		h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		// response.failed 冷却后不绑定 session，也不报告成功
+		streamFailed := len(failedData) > 0
+		if !streamFailed {
+			h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		}
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/responses, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -735,7 +745,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
-		if outcome.penalize {
+		if streamFailed {
+			recyclePooledClientForAccount(account)
+			h.store.ReportRequestFailure(account, "stream_failed", time.Duration(totalDuration)*time.Millisecond)
+		} else if outcome.penalize {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
@@ -929,6 +942,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		var failedData []byte // 捕获 response.failed 事件数据，用于流内冷却
 		var compactResult []byte
 
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
@@ -972,6 +986,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
+					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 				}
 
@@ -1022,6 +1037,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					gotTerminal = true
 					return false
 				case "response.failed":
+					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 					return false
 				}
@@ -1030,6 +1046,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 			compactResult = BuildCompactResponse(chunkID, model, created, fullContent.String(), toolCalls, usage)
 		}
+
+		// 流内 response.failed 冷却（如 429/401）
+		h.applyStreamFailedCooldown(account, failedData, resp)
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
@@ -1050,7 +1069,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			continue
 		}
 
-		h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		streamFailed := len(failedData) > 0
+		if !streamFailed {
+			h.store.BindSessionAffinity(sessionID, account, proxyURL)
+		}
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -1107,7 +1129,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
-		if outcome.penalize {
+		if streamFailed {
+			recyclePooledClientForAccount(account)
+			h.store.ReportRequestFailure(account, "stream_failed", time.Duration(totalDuration)*time.Millisecond)
+		} else if outcome.penalize {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
@@ -1238,6 +1263,33 @@ func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []by
 		} else {
 			h.store.MarkCooldown(account, 5*time.Minute, "unauthorized")
 		}
+	}
+}
+
+// applyStreamFailedCooldown 检查 SSE 流中 response.failed 事件是否包含需要冷却的错误（如 429）
+func (h *Handler) applyStreamFailedCooldown(account *auth.Account, failedData []byte, resp *http.Response) {
+	if len(failedData) == 0 {
+		return
+	}
+	// Codex response.failed 结构: {"type":"response.failed","response":{"status":"...","error":{"code":"rate_limit_exceeded","message":"...","resets_at":...}}}
+	// 注意：错误信息在 response.error 下，而 applyCooldown/parseRetryAfter 期望在 error 下
+	code := gjson.GetBytes(failedData, "response.error.code").String()
+
+	// 429 / rate_limit_exceeded
+	if code == "rate_limit_exceeded" {
+		// 提取 response.error 子对象，使其兼容 parseRetryAfter 期望的 error.resets_at 路径
+		errObj := gjson.GetBytes(failedData, "response.error")
+		var cooldownBody []byte
+		if errObj.Exists() {
+			cooldownBody = []byte(`{"error":` + errObj.Raw + `}`)
+		}
+		h.applyCooldown(account, http.StatusTooManyRequests, cooldownBody, resp)
+		return
+	}
+	// 401 / authentication_error
+	if code == "authentication_error" || code == "invalid_api_key" {
+		h.applyCooldown(account, http.StatusUnauthorized, failedData, resp)
+		return
 	}
 }
 

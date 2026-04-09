@@ -148,6 +148,15 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		ctx = context.Background()
 	}
 
+	// 上游请求超时保护：如果调用方未设置 deadline，包装一个超时 context。
+	// 超时涵盖整个请求生命周期（含 SSE 流读取），设为 10 分钟以容纳长推理响应。
+	// cancel 不能 defer（resp.Body 在返回后仍需读取），也不丢弃：
+	// 仅在出错时立即 cancel 释放资源，成功时由 10 分钟 timer 自然到期。
+	var timeoutCancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, timeoutCancel = context.WithTimeout(ctx, 10*time.Minute)
+	}
+
 	account.Mu().RLock()
 	accessToken := account.AccessToken
 	proxyURL := account.ProxyURL
@@ -159,6 +168,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	if accessToken == "" {
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
 		return nil, ErrNoAvailableAccount()
 	}
 
@@ -188,6 +200,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if err != nil {
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
 		return nil, ErrInternalError("创建请求失败", err)
 	}
 
@@ -199,6 +214,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)
 		}

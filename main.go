@@ -61,7 +61,7 @@ func main() {
 		// 初次运行，保存初始安全设置到数据库
 		log.Printf("初次运行，初始化系统默认设置...")
 		settings = &database.SystemSettings{
-			MaxConcurrency:        2,
+			MaxConcurrency:        0,
 			GlobalRPM:             0,
 			TestModel:             "gpt-5.4",
 			TestConcurrency:       50,
@@ -74,7 +74,7 @@ func main() {
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {
 		log.Printf("警告: 读取系统设置失败: %v，将采用安全后备策略", err)
-		settings = &database.SystemSettings{MaxConcurrency: 2, GlobalRPM: 0, TestModel: "gpt-5.4", TestConcurrency: 50, PgMaxConns: 50, RedisPoolSize: 30}
+		settings = &database.SystemSettings{MaxConcurrency: 0, GlobalRPM: 0, TestModel: "gpt-5.4", TestConcurrency: 50, PgMaxConns: 50, RedisPoolSize: 30}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
 			settings.ProxyURL, settings.MaxConcurrency, settings.GlobalRPM, settings.PgMaxConns, settings.RedisPoolSize)
@@ -141,12 +141,11 @@ func main() {
 	r.Use(api.RecoveryMiddleware())
 	r.Use(api.RequestContextMiddleware())
 	r.Use(api.VersionMiddleware())
-	r.Use(api.BodyCacheMiddleware())
 	r.Use(api.CORSMiddleware())
-	r.Use(api.SecurityHeadersMiddleware())
-	r.Use(loggerMiddleware())
 	r.Use(security.SecurityHeadersMiddleware())
+	r.Use(loggerMiddleware())
 	r.Use(security.RequestSizeLimiter(security.MaxRequestBodySize))
+	r.Use(api.BodyCacheMiddleware())
 
 	// handler 不再接收 cfg.APIKeys
 	// 从环境变量读取 Codex 画像与 Beta 配置。

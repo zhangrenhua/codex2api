@@ -781,17 +781,12 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 
 // importAccountsTXT 通过 TXT 文件导入（每行一个 RT）
 func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string) {
-	file, header, err := c.Request.FormFile("file")
+	file, _, err := c.Request.FormFile("file")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "请上传文件（字段名: file）")
 		return
 	}
 	defer file.Close()
-
-	if header.Size > 2*1024*1024 {
-		writeError(c, http.StatusBadRequest, "文件大小不能超过 2MB")
-		return
-	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -836,11 +831,6 @@ func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string) {
 	var allTokens []importToken
 
 	for _, fh := range files {
-		if fh.Size > 2*1024*1024 {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 大小超过 2MB", fh.Filename))
-			return
-		}
-
 		f, err := fh.Open()
 		if err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("打开文件 %s 失败", fh.Filename))
@@ -1112,17 +1102,12 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 // importAccountsATTXT 通过 TXT 文件导入 AT-only 账号（每行一个 Access Token）
 func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string) {
-	file, header, err := c.Request.FormFile("file")
+	file, _, err := c.Request.FormFile("file")
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "请上传文件（字段名: file）")
 		return
 	}
 	defer file.Close()
-
-	if header.Size > 2*1024*1024 {
-		writeError(c, http.StatusBadRequest, "文件大小不能超过 2MB")
-		return
-	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {

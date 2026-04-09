@@ -642,11 +642,28 @@ var unsupportedSchemaKeys = map[string]bool{
 	"maxProperties":    true,
 }
 
-// stripUnsupportedSchemaKeys 递归删除 schema 中上游不支持的关键字
+// stripUnsupportedSchemaKeys 递归删除 schema 中上游不支持的关键字，并修复常见合规性问题
 func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	for key := range unsupportedSchemaKeys {
 		delete(schema, key)
 	}
+
+	// 修复 required: null → 删除（上游要求 required 必须是 array）
+	if req, exists := schema["required"]; exists {
+		if req == nil {
+			delete(schema, "required")
+		} else if arr, ok := req.([]interface{}); ok && len(arr) == 0 {
+			delete(schema, "required")
+		}
+	}
+
+	// 修复 type: "object" 缺少 properties → 补空 properties
+	if schemaType, _ := schema["type"].(string); schemaType == "object" {
+		if _, hasProps := schema["properties"]; !hasProps {
+			schema["properties"] = map[string]interface{}{}
+		}
+	}
+
 	if props, ok := schema["properties"].(map[string]interface{}); ok {
 		for _, v := range props {
 			if sub, ok := v.(map[string]interface{}); ok {

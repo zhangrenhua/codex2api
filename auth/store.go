@@ -731,8 +731,9 @@ type Store struct {
 	autoCleanExpired      atomic.Bool
 	autoCleanupBatch      atomic.Bool
 	maxRetries            int64 // 请求失败最大重试次数（换号重试）
-	accountCooldown       int64 // 账号冷却时间（秒），默认 30
+	accountCooldown       int64 // 账号冷却时间（秒），默认 60
 	stopCh                chan struct{}
+	stopOnce              sync.Once
 	wg                    sync.WaitGroup
 
 	// 代理池
@@ -812,7 +813,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	atomic.StoreInt64(&s.maxRetries, retries)
 	cooldown := int64(settings.AccountCooldown)
 	if cooldown <= 0 {
-		cooldown = 30
+		cooldown = 60
 	}
 	atomic.StoreInt64(&s.accountCooldown, cooldown)
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
@@ -1239,9 +1240,11 @@ func (s *Store) pruneAccountEvents() {
 	}
 }
 
-// Stop 停止后台刷新
+// Stop 停止后台刷新（可安全多次调用）
 func (s *Store) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 	s.wg.Wait()
 }
 

@@ -81,7 +81,7 @@ func Load(envPath string) (*Config, error) {
 	}
 	_ = godotenv.Load(envPath)
 
-	cfg := &Config{Port: 8080}
+	cfg := &Config{Port: 3000}
 
 	// Web服务端口
 	if port := os.Getenv("CODEX_PORT"); port != "" {
