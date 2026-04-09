@@ -378,6 +378,11 @@ func (h *Handler) Messages(c *gin.Context) {
 				return true
 			})
 
+			// 调试日志：非流式 delta 收集结果
+			if fullText.Len() == 0 && len(pendingToolCalls) == 0 && thinkingText.Len() == 0 {
+				log.Printf("[/v1/messages 非流式] 未收集到任何 delta 内容 (gotTerminal=%v, deltaCharCount=%d)", gotTerminal, deltaCharCount)
+			}
+
 			// 构建 tool calls 列表
 			for _, itemID := range toolCallOrder {
 				block := pendingToolCalls[itemID]
@@ -435,7 +440,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				content = []anthropicContentBlock{}
 			}
 
-			resp := &anthropicResponse{
+			anthropicResult := &anthropicResponse{
 				ID:         "msg_" + uuid.New().String()[:24],
 				Type:       "message",
 				Role:       "assistant",
@@ -444,7 +449,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				StopReason: stopReason,
 				Usage:      anthropicUsg,
 			}
-			c.JSON(http.StatusOK, resp)
+			c.JSON(http.StatusOK, anthropicResult)
 		}
 
 		// 流内 response.failed 冷却（如 429/401）
