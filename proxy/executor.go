@@ -186,6 +186,15 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	endpoint := CodexBaseURL + "/responses"
 
+	// Resin 反向代理模式：改写 URL，使用标准 HTTP 客户端
+	var client *http.Client
+	if IsResinEnabled() {
+		endpoint = BuildReverseProxyURL(endpoint)
+		client = getResinHTTPClient(account)
+	} else {
+		client = getPooledClient(account, proxyURL)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, ErrInternalError("创建请求失败", err)
@@ -194,8 +203,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// ==================== 请求头（伪装 Codex CLI） ====================
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 
-	// 获取连接池 HTTP 客户端（账号级隔离，复用 TCP/TLS 连接）
-	client := getPooledClient(account, proxyURL)
+	// Resin 反代：注入账号身份头
+	if IsResinEnabled() {
+		req.Header.Set("X-Resin-Account", ResinAccountID(account))
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -246,6 +257,15 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// compact 端点
 	endpoint := CodexBaseURL + "/responses/compact"
 
+	// Resin 反向代理模式
+	var client *http.Client
+	if IsResinEnabled() {
+		endpoint = BuildReverseProxyURL(endpoint)
+		client = getResinHTTPClient(account)
+	} else {
+		client = getPooledClient(account, proxyURL)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, ErrInternalError("创建请求失败", err)
@@ -253,7 +273,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 
-	client := getPooledClient(account, proxyURL)
+	if IsResinEnabled() {
+		req.Header.Set("X-Resin-Account", ResinAccountID(account))
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

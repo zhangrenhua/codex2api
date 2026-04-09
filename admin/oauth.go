@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -248,7 +249,9 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		proxyURL = trimmed
 	}
 
-	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), req.Code, sess.CodeVerifier, sess.RedirectURI, proxyURL)
+	// Resin 临时身份用于 OAuth 兑换（新账号尚无 DBID）
+	resinTempID := "oauth-" + req.SessionID
+	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), req.Code, sess.CodeVerifier, sess.RedirectURI, proxyURL, resinTempID)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, "授权码兑换失败: "+err.Error())
 		return
@@ -277,6 +280,11 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		return
 	}
 	h.db.InsertAccountEventAsync(id, "added", "oauth")
+
+	// Resin 租约继承
+	if proxy.IsResinEnabled() {
+		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+	}
 
 	newAcc := &auth.Account{
 		DBID:         id,
@@ -319,7 +327,7 @@ type rawOAuthTokenResp struct {
 	ExpiresIn    int64  `json:"expires_in"`
 }
 
-func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, proxyURL string) (*rawOAuthTokenResp, *auth.AccountInfo, error) {
+func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, proxyURL string, resinTempID ...string) (*rawOAuthTokenResp, *auth.AccountInfo, error) {
 	form := neturl.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("client_id", oauthClientID)
@@ -327,7 +335,17 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", codeVerifier)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenURL, strings.NewReader(form.Encode()))
+	// Resin 反代模式：改写 URL
+	targetURL := oauthTokenURL
+	tempID := ""
+	if len(resinTempID) > 0 {
+		tempID = resinTempID[0]
+	}
+	if proxy.IsResinEnabled() && tempID != "" {
+		targetURL = proxy.BuildReverseProxyURL(oauthTokenURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -335,7 +353,17 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "codex-cli/0.91.0")
 
-	client := auth.BuildHTTPClient(proxyURL)
+	// Resin 反代：注入临时账号身份头
+	if proxy.IsResinEnabled() && tempID != "" {
+		req.Header.Set("X-Resin-Account", tempID)
+	}
+
+	var client *http.Client
+	if proxy.IsResinEnabled() && tempID != "" {
+		client = &http.Client{Timeout: 30 * time.Second}
+	} else {
+		client = auth.BuildHTTPClient(proxyURL)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("请求失败: %w", err)
@@ -370,7 +398,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		return
 	}
 
-	_, sess, ok := globalOAuthStore.findByState(state)
+	sessionID, sess, ok := globalOAuthStore.findByState(state)
 	if !ok {
 		c.String(http.StatusBadRequest, oauthCallbackPage("授权失败", "OAuth 会话不存在或已过期，请重新发起授权", false))
 		return
@@ -381,8 +409,9 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	sess.CallbackState = state
 	sess.CallbackAt = time.Now()
 
-	// 执行 code exchange
-	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), code, sess.CodeVerifier, sess.RedirectURI, sess.ProxyURL)
+	// 执行 code exchange（Resin 临时身份）
+	resinTempID := "oauth-" + sessionID
+	tokenResp, accountInfo, err := doOAuthCodeExchange(c.Request.Context(), code, sess.CodeVerifier, sess.RedirectURI, sess.ProxyURL, resinTempID)
 	if err != nil {
 		sess.ExchangeResult = &oauthExchangeResult{
 			Success: false,
@@ -423,6 +452,11 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		return
 	}
 	h.db.InsertAccountEventAsync(id, "added", "oauth_callback")
+
+	// Resin 租约继承：将临时身份的 IP 租约迁移到正式 DBID
+	if proxy.IsResinEnabled() {
+		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
+	}
 
 	newAcc := &auth.Account{
 		DBID:         id,

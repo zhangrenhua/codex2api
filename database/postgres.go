@@ -278,6 +278,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_error BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS model_mapping TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
 
 	CREATE TABLE IF NOT EXISTS proxies (
 		id         SERIAL PRIMARY KEY,
@@ -398,6 +400,8 @@ type SystemSettings struct {
 	MaxRetries            int
 	AllowRemoteMigration  bool
 	ModelMapping          string // JSON: {"anthropic_model": "codex_model", ...}
+	ResinURL              string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
+	ResinPlatformName     string // Resin 平台标识，例如 codex2api
 }
 
 // GetSystemSettings 加载全局设置
@@ -412,13 +416,16 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(allow_remote_migration, false),
 		       COALESCE(auto_clean_error, false),
 		       COALESCE(auto_clean_expired, false),
-		       COALESCE(model_mapping, '{}')
+		       COALESCE(model_mapping, '{}'),
+		       COALESCE(resin_url, ''),
+		       COALESCE(resin_platform_name, '')
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.ModelMapping,
+		&s.ResinURL, &s.ResinPlatformName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -432,9 +439,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		INSERT INTO system_settings (
 			id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
-			fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping
+			fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping,
+			resin_url, resin_platform_name
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		ON CONFLICT (id) DO UPDATE SET
 			max_concurrency         = EXCLUDED.max_concurrency,
 			global_rpm              = EXCLUDED.global_rpm,
@@ -453,10 +461,13 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			allow_remote_migration  = EXCLUDED.allow_remote_migration,
 			auto_clean_error        = EXCLUDED.auto_clean_error,
 			auto_clean_expired      = EXCLUDED.auto_clean_expired,
-			model_mapping           = EXCLUDED.model_mapping
+			model_mapping           = EXCLUDED.model_mapping,
+			resin_url               = EXCLUDED.resin_url,
+			resin_platform_name     = EXCLUDED.resin_platform_name
 	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
-		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping)
+		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping,
+		s.ResinURL, s.ResinPlatformName)
 	return err
 }
 
