@@ -435,12 +435,16 @@ func convertAnthropicTools(tools []anthropicTool) []any {
 		if t.Description != "" {
 			item["description"] = t.Description
 		}
-		if len(t.InputSchema) > 0 {
+		if len(t.InputSchema) > 0 && string(t.InputSchema) != "null" {
 			var params map[string]any
 			if json.Unmarshal(t.InputSchema, &params) == nil {
 				stripUnsupportedSchemaKeys(params)
 				item["parameters"] = params
 			}
+		}
+		// 确保 parameters 存在且合法（上游要求 object + properties）
+		if _, has := item["parameters"]; !has {
+			item["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		result = append(result, item)
 	}
@@ -472,11 +476,10 @@ func convertAnthropicToolChoice(raw json.RawMessage) any {
 		return "none"
 	case "tool":
 		if tc.Name != "" {
+			// Codex 格式：{type:"function", name:"xxx"}（无嵌套 function 层）
 			return map[string]any{
 				"type": "function",
-				"function": map[string]any{
-					"name": tc.Name,
-				},
+				"name": tc.Name,
 			}
 		}
 		return "auto"

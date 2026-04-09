@@ -86,7 +86,7 @@ type streamChoice struct {
 // streamDelta 流式块中的增量内容
 type streamDelta struct {
 	Role             string          `json:"role,omitempty"`
-	Content          *string         `json:"content,omitempty"`
+	Content          *string         `json:"content"`
 	ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	ToolCalls        []toolCallDelta `json:"tool_calls,omitempty"`
 }
@@ -341,6 +341,10 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 			if params, ok := toolMap["parameters"].(map[string]any); ok {
 				stripUnsupportedSchemaKeys(params)
 			}
+			// 确保 parameters 存在且合法
+			if toolMap["parameters"] == nil {
+				toolMap["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
 		}
 	}
 
@@ -365,6 +369,23 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 	if inputVal, ok := body["input"]; ok {
 		if b, err := json.Marshal(inputVal); err == nil {
 			expandedInputRaw = string(b)
+		}
+	}
+
+	// 6.5 tool_choice 格式转换：OpenAI {type,function:{name}} → Codex {type,name}
+	if tc, ok := body["tool_choice"].(map[string]any); ok {
+		if fn, ok := tc["function"].(map[string]any); ok {
+			name, _ := fn["name"].(string)
+			if name != "" {
+				// 替换为 Codex 格式（扁平结构）
+				body["tool_choice"] = map[string]any{
+					"type": "function",
+					"name": name,
+				}
+			} else {
+				// function 子字段存在但 name 为空，降级为 auto
+				body["tool_choice"] = "auto"
+			}
 		}
 	}
 
@@ -564,12 +585,16 @@ func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
 		if parsed.Function.Description != "" {
 			item["description"] = parsed.Function.Description
 		}
-		if len(parsed.Function.Parameters) > 0 {
+		if len(parsed.Function.Parameters) > 0 && string(parsed.Function.Parameters) != "null" {
 			var params map[string]any
 			if json.Unmarshal(parsed.Function.Parameters, &params) == nil {
 				stripUnsupportedSchemaKeys(params)
 				item["parameters"] = params
 			}
+		}
+		// 确保 parameters 存在且合法
+		if _, has := item["parameters"]; !has {
+			item["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		if parsed.Function.Strict != nil {
 			item["strict"] = *parsed.Function.Strict
@@ -723,11 +748,12 @@ func newContentChunk(id, model string, created int64, content string) []byte {
 
 // newReasoningChunk 构建推理内容流式块
 func newReasoningChunk(id, model string, created int64, reasoning string) []byte {
+	empty := ""
 	chunk := openAIStreamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []streamChoice{{
 			Index: 0,
-			Delta: &streamDelta{ReasoningContent: &reasoning},
+			Delta: &streamDelta{Content: &empty, ReasoningContent: &reasoning},
 		}},
 	}
 	b, _ := json.Marshal(chunk)
@@ -736,12 +762,14 @@ func newReasoningChunk(id, model string, created int64, reasoning string) []byte
 
 // newToolCallAnnouncementChunk 构建 tool call 首块（含 id、type、function.name）
 func newToolCallAnnouncementChunk(id, model string, created int64, tcIndex int, callID, funcName string) []byte {
+	empty := ""
 	chunk := openAIStreamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []streamChoice{{
 			Index: 0,
 			Delta: &streamDelta{
-				Role: "assistant",
+				Role:    "assistant",
+				Content: &empty,
 				ToolCalls: []toolCallDelta{{
 					Index: tcIndex,
 					ID:    callID,
@@ -760,11 +788,13 @@ func newToolCallAnnouncementChunk(id, model string, created int64, tcIndex int, 
 
 // newToolCallDeltaChunk 构建 tool call 参数增量块
 func newToolCallDeltaChunk(id, model string, created int64, tcIndex int, argsDelta string) []byte {
+	empty := ""
 	chunk := openAIStreamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 		Choices: []streamChoice{{
 			Index: 0,
 			Delta: &streamDelta{
+				Content: &empty,
 				ToolCalls: []toolCallDelta{{
 					Index:    tcIndex,
 					Function: toolCallFuncDelta{Arguments: argsDelta},
@@ -984,7 +1014,6 @@ func TranslateCompactResponse(responseData []byte, model string, id string) []by
 }
 
 // BuildCompactResponse 构建非流式完整响应（供 handler.go 调用，替代内联 sjson）
-// 当有 toolCalls 且 content 为空时，content 输出为 JSON null
 func BuildCompactResponse(id, model string, created int64, content string, toolCalls []ToolCallResult, usage *UsageInfo) []byte {
 	finishReason := "stop"
 	msg := compactMessage{
@@ -994,9 +1023,7 @@ func BuildCompactResponse(id, model string, created int64, content string, toolC
 
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
-		if content == "" {
-			msg.Content = nil // JSON null
-		}
+		// 保留 content 为空字符串，避免下游客户端对 null 调用 .trim() 报错
 		msg.ToolCalls = make([]compactToolCallOut, len(toolCalls))
 		for i, tc := range toolCalls {
 			msg.ToolCalls[i] = compactToolCallOut{
