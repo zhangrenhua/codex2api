@@ -208,6 +208,64 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	return resp, nil
 }
 
+// ExecuteCompactRequest 向 Codex 上游发送 /responses/compact 请求（非流式压缩接口）
+func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	account.Mu().RLock()
+	accessToken := account.AccessToken
+	proxyURL := account.ProxyURL
+	account.Mu().RUnlock()
+
+	if proxyOverride != "" {
+		proxyURL = proxyOverride
+	}
+
+	if accessToken == "" {
+		return nil, ErrNoAvailableAccount()
+	}
+
+	// 与 ExecuteRequest 相同的请求体优化
+	if !gjson.GetBytes(requestBody, "instructions").Exists() {
+		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
+	}
+	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
+
+	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
+	cacheKey := existingCacheKey
+	if cacheKey == "" && sessionID != "" {
+		cacheKey = sessionID
+		requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", cacheKey)
+	}
+
+	// compact 端点
+	endpoint := CodexBaseURL + "/responses/compact"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
+	if err != nil {
+		return nil, ErrInternalError("创建请求失败", err)
+	}
+
+	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+
+	client := getPooledClient(account, proxyURL)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if shouldRecyclePooledClient(err) {
+			recyclePooledClient(account, proxyURL)
+		}
+		return nil, ErrUpstream(0, "请求上游失败", err)
+	}
+
+	return resp, nil
+}
+
 func codexVersionFromProfile(profile deviceProfile, fallback string) string {
 	if profile.HasVersion {
 		return fmt.Sprintf("%d.%d.%d", profile.Version.major, profile.Version.minor, profile.Version.patch)
