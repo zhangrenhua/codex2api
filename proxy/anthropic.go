@@ -558,11 +558,12 @@ func (t *anthropicStreamTranslator) handleCreated() []anthropicStreamEvent {
 	return []anthropicStreamEvent{{
 		Type: "message_start",
 		Message: &anthropicResponse{
-			ID:    t.responseID,
-			Type:  "message",
-			Role:  "assistant",
-			Model: t.model,
-			Usage: anthropicUsage{},
+			ID:      t.responseID,
+			Type:    "message",
+			Role:    "assistant",
+			Model:   t.model,
+			Content: []anthropicContentBlock{}, // 必须为空数组，客户端会 push
+			Usage:   anthropicUsage{},
 		},
 	}}
 }
@@ -851,10 +852,11 @@ func buildAnthropicResponseFromCompleted(completedData []byte, model string) *an
 	responseID := "msg_" + uuid.New().String()[:24]
 
 	resp := &anthropicResponse{
-		ID:    responseID,
-		Type:  "message",
-		Role:  "assistant",
-		Model: model,
+		ID:      responseID,
+		Type:    "message",
+		Role:    "assistant",
+		Model:   model,
+		Content: []anthropicContentBlock{}, // 初始化为空数组，避免 JSON null
 	}
 
 	// 提取 output 数组
