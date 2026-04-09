@@ -440,14 +440,17 @@ func (h *Handler) Messages(c *gin.Context) {
 				content = []anthropicContentBlock{}
 			}
 
+			convID := uuid.New().String()
 			anthropicResult := &anthropicResponse{
-				ID:         "msg_" + uuid.New().String()[:24],
-				Type:       "message",
-				Role:       "assistant",
-				Model:      originalModel,
-				Content:    content,
-				StopReason: stopReason,
-				Usage:      anthropicUsg,
+				ID:             "msg_" + convID[:24],
+				Type:           "message",
+				Role:           "assistant",
+				Model:          originalModel,
+				Content:        content,
+				StopReason:     stopReason,
+				Usage:          anthropicUsg,
+				ConversationID: convID,
+				ConvID:         convID,
 			}
 			c.JSON(http.StatusOK, anthropicResult)
 		}

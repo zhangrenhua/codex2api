@@ -68,14 +68,16 @@ type anthropicTool struct {
 
 // anthropicResponse 非流式响应
 type anthropicResponse struct {
-	ID           string                  `json:"id"`
-	Type         string                  `json:"type"`
-	Role         string                  `json:"role"`
-	Content      []anthropicContentBlock `json:"content"`
-	Model        string                  `json:"model"`
-	StopReason   string                  `json:"stop_reason"`
-	StopSequence *string                 `json:"stop_sequence"`
-	Usage        anthropicUsage          `json:"usage"`
+	ID             string                  `json:"id"`
+	Type           string                  `json:"type"`
+	Role           string                  `json:"role"`
+	Content        []anthropicContentBlock `json:"content"`
+	Model          string                  `json:"model"`
+	StopReason     string                  `json:"stop_reason"`
+	StopSequence   *string                 `json:"stop_sequence"`
+	Usage          anthropicUsage          `json:"usage"`
+	ConversationID string                  `json:"conversation_id,omitempty"`
+	ConvID         string                  `json:"conversationId,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -852,14 +854,17 @@ func anthropicEventToSSE(evt anthropicStreamEvent) string {
 
 // buildAnthropicResponseFromCompleted 从 response.completed 事件构建完整的 Anthropic 响应
 func buildAnthropicResponseFromCompleted(completedData []byte, model string) *anthropicResponse {
-	responseID := "msg_" + uuid.New().String()[:24]
+	convID := uuid.New().String()
+	responseID := "msg_" + convID[:24]
 
 	resp := &anthropicResponse{
-		ID:      responseID,
-		Type:    "message",
-		Role:    "assistant",
-		Model:   model,
-		Content: []anthropicContentBlock{}, // 初始化为空数组，避免 JSON null
+		ID:             responseID,
+		Type:           "message",
+		Role:           "assistant",
+		Model:          model,
+		Content:        []anthropicContentBlock{}, // 初始化为空数组，避免 JSON null
+		ConversationID: convID,
+		ConvID:         convID,
 	}
 
 	// 提取 output 数组
