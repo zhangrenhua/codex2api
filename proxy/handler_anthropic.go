@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ==================== Anthropic 错误格式 ====================
@@ -315,9 +316,14 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 			}
 		} else {
-			// 非流式：缓冲所有事件后构建完整 JSON 响应
+			// 非流式：从 delta 事件累积内容，构建完整 Anthropic 响应
 			var lastCompletedData []byte
-			var outputItemsRaw [][]byte // 收集 output_item.done 中的完整 item
+			var fullText strings.Builder
+			var thinkingText strings.Builder
+			var toolCalls []anthropicContentBlock
+			// 用于从 delta 事件收集 function_call 参数
+			pendingToolCalls := make(map[string]*anthropicContentBlock) // item_id → block
+			var toolCallOrder []string
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -327,22 +333,44 @@ func (h *Handler) Messages(c *gin.Context) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
 				}
-				if eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
-					deltaCharCount += len(parsed.Get("delta").String())
-				}
-				// 收集完整的 output item（上游 completed 事件中 output 可能为空数组）
-				if eventType == "response.output_item.done" {
-					if item := parsed.Get("item"); item.Exists() {
-						outputItemsRaw = append(outputItemsRaw, []byte(item.Raw))
+				switch eventType {
+				case "response.output_text.delta":
+					delta := parsed.Get("delta").String()
+					deltaCharCount += len(delta)
+					fullText.WriteString(delta)
+				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+					thinkingText.WriteString(parsed.Get("delta").String())
+				case "response.output_item.added":
+					if parsed.Get("item.type").String() == "function_call" {
+						itemID := parsed.Get("item.id").String()
+						callID := fromCodexCallID(parsed.Get("item.call_id").String())
+						name := parsed.Get("item.name").String()
+						block := &anthropicContentBlock{
+							Type:  "tool_use",
+							ID:    callID,
+							Name:  name,
+							Input: json.RawMessage("{}"),
+						}
+						pendingToolCalls[itemID] = block
+						toolCallOrder = append(toolCallOrder, itemID)
 					}
-				}
-				if eventType == "response.completed" {
+				case "response.function_call_arguments.delta":
+					deltaCharCount += len(parsed.Get("delta").String())
+					itemID := parsed.Get("item_id").String()
+					if block, ok := pendingToolCalls[itemID]; ok {
+						// 累积 arguments JSON
+						existing := string(block.Input)
+						if existing == "{}" {
+							existing = ""
+						}
+						block.Input = json.RawMessage(existing + parsed.Get("delta").String())
+					}
+				case "response.completed":
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					lastCompletedData = data
 					gotTerminal = true
 					return false
-				}
-				if eventType == "response.failed" {
+				case "response.failed":
 					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 					return false
@@ -350,23 +378,73 @@ func (h *Handler) Messages(c *gin.Context) {
 				return true
 			})
 
+			// 构建 tool calls 列表
+			for _, itemID := range toolCallOrder {
+				block := pendingToolCalls[itemID]
+				if len(block.Input) == 0 {
+					block.Input = json.RawMessage("{}")
+				}
+				toolCalls = append(toolCalls, *block)
+			}
+
+			// 构建 Anthropic 响应
+			var content []anthropicContentBlock
+			if thinkingText.Len() > 0 {
+				content = append(content, anthropicContentBlock{
+					Type:     "thinking",
+					Thinking: thinkingText.String(),
+				})
+			}
+			if fullText.Len() > 0 {
+				content = append(content, anthropicContentBlock{
+					Type: "text",
+					Text: fullText.String(),
+				})
+			}
+			content = append(content, toolCalls...)
+
+			// 确定 stop_reason
+			stopReason := "end_turn"
+			if len(toolCalls) > 0 {
+				stopReason = "tool_use"
+			}
 			if lastCompletedData != nil {
-				// 如果 completed 中 output 为空但收集到了 items，注入到 completedData 中
-				if len(outputItemsRaw) > 0 {
-					existingOutput := gjson.GetBytes(lastCompletedData, "response.output")
-					if !existingOutput.Exists() || (existingOutput.IsArray() && len(existingOutput.Array()) == 0) {
-						// 构建 output JSON 数组
-						outputArrayJSON := buildRawJSONArray(outputItemsRaw)
-						if patched, err := sjson.SetRawBytes(lastCompletedData, "response.output", outputArrayJSON); err == nil {
-							lastCompletedData = patched
-						}
+				status := gjson.GetBytes(lastCompletedData, "response.status").String()
+				if status == "incomplete" {
+					reason := gjson.GetBytes(lastCompletedData, "response.incomplete_details.reason").String()
+					if reason == "max_output_tokens" {
+						stopReason = "max_tokens"
 					}
 				}
-				anthropicResp := buildAnthropicResponseFromCompleted(lastCompletedData, originalModel)
-				c.JSON(http.StatusOK, anthropicResp)
-			} else {
-				sendAnthropicError(c, http.StatusBadGateway, "api_error", "No complete response received from upstream")
 			}
+
+			// 提取 usage
+			var anthropicUsg anthropicUsage
+			if lastCompletedData != nil {
+				usg := gjson.GetBytes(lastCompletedData, "response.usage")
+				if usg.Exists() {
+					anthropicUsg = anthropicUsage{
+						InputTokens:          int(usg.Get("input_tokens").Int()),
+						OutputTokens:         int(usg.Get("output_tokens").Int()),
+						CacheReadInputTokens: int(usg.Get("input_tokens_details.cached_tokens").Int()),
+					}
+				}
+			}
+
+			if content == nil {
+				content = []anthropicContentBlock{}
+			}
+
+			resp := &anthropicResponse{
+				ID:         "msg_" + uuid.New().String()[:24],
+				Type:       "message",
+				Role:       "assistant",
+				Model:      originalModel,
+				Content:    content,
+				StopReason: stopReason,
+				Usage:      anthropicUsg,
+			}
+			c.JSON(http.StatusOK, resp)
 		}
 
 		// 流内 response.failed 冷却（如 429/401）

@@ -624,9 +624,21 @@ func (h *Handler) Responses(c *gin.Context) {
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
 		} else {
-			// 非流式收集
+			// 非流式收集：从 delta 事件累积内容
 			var lastResponseData []byte
-			var outputItems []json.RawMessage // 收集 output_item.done 中的完整 item
+			var fullText strings.Builder
+			var reasoningSummary strings.Builder
+			// function_call 收集
+			type fcItem struct {
+				ID        string
+				CallID    string
+				Name      string
+				Arguments strings.Builder
+			}
+			pendingFCs := make(map[string]*fcItem) // item_id → fcItem
+			var fcOrder []string
+			var hasMessage bool
+
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
@@ -634,28 +646,42 @@ func (h *Handler) Responses(c *gin.Context) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
 				}
-				// 累计 delta 字符数
-				if eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
-					deltaCharCount += len(parsed.Get("delta").String())
-				}
-				// 收集完整的 output item（上游 completed 事件中 output 可能为空数组）
-				if eventType == "response.output_item.done" {
-					if item := parsed.Get("item"); item.Exists() {
-						outputItems = append(outputItems, json.RawMessage(item.Raw))
+				switch eventType {
+				case "response.output_text.delta":
+					delta := parsed.Get("delta").String()
+					deltaCharCount += len(delta)
+					fullText.WriteString(delta)
+					hasMessage = true
+				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+					reasoningSummary.WriteString(parsed.Get("delta").String())
+				case "response.output_item.added":
+					if parsed.Get("item.type").String() == "function_call" {
+						itemID := parsed.Get("item.id").String()
+						fc := &fcItem{
+							ID:     itemID,
+							CallID: parsed.Get("item.call_id").String(),
+							Name:   parsed.Get("item.name").String(),
+						}
+						pendingFCs[itemID] = fc
+						fcOrder = append(fcOrder, itemID)
 					}
-				}
-				if eventType == "response.completed" {
+				case "response.function_call_arguments.delta":
+					delta := parsed.Get("delta").String()
+					deltaCharCount += len(delta)
+					itemID := parsed.Get("item_id").String()
+					if fc, ok := pendingFCs[itemID]; ok {
+						fc.Arguments.WriteString(delta)
+					}
+				case "response.completed":
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
-					// 缓存响应上下文，供后续 previous_response_id 展开使用
 					cacheCompletedResponse([]byte(expandedInputRaw), data)
 					gotTerminal = true
 					lastResponseData = data
 					return false
-				}
-				if eventType == "response.failed" {
+				case "response.failed":
 					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 					lastResponseData = data
@@ -668,11 +694,45 @@ func (h *Handler) Responses(c *gin.Context) {
 				responseObj := gjson.GetBytes(lastResponseData, "response")
 				if responseObj.Exists() {
 					responseJSON = []byte(responseObj.Raw)
-					// 如果 response.output 为空但收集到了 output items，注入它们
-					if len(outputItems) > 0 {
-						existingOutput := gjson.GetBytes(responseJSON, "output")
-						if !existingOutput.Exists() || (existingOutput.IsArray() && len(existingOutput.Array()) == 0) {
-							outputArray, _ := json.Marshal(outputItems)
+					// 检查 output 是否为空，如果是则从累积的 delta 构建
+					existingOutput := gjson.GetBytes(responseJSON, "output")
+					outputEmpty := !existingOutput.Exists() || (existingOutput.IsArray() && len(existingOutput.Array()) == 0)
+					if outputEmpty && (fullText.Len() > 0 || len(pendingFCs) > 0 || reasoningSummary.Len() > 0 || hasMessage) {
+						var outputItems []any
+						// reasoning item
+						if reasoningSummary.Len() > 0 {
+							outputItems = append(outputItems, map[string]any{
+								"type": "reasoning",
+								"summary": []any{
+									map[string]any{"type": "summary_text", "text": reasoningSummary.String()},
+								},
+							})
+						}
+						// message item
+						if hasMessage || fullText.Len() > 0 {
+							outputItems = append(outputItems, map[string]any{
+								"type": "message",
+								"content": []any{
+									map[string]any{"type": "output_text", "text": fullText.String()},
+								},
+							})
+						}
+						// function_call items
+						for _, itemID := range fcOrder {
+							fc := pendingFCs[itemID]
+							args := fc.Arguments.String()
+							if args == "" {
+								args = "{}"
+							}
+							outputItems = append(outputItems, map[string]any{
+								"type":      "function_call",
+								"id":        fc.ID,
+								"call_id":   fc.CallID,
+								"name":      fc.Name,
+								"arguments": args,
+							})
+						}
+						if outputArray, err := json.Marshal(outputItems); err == nil {
 							responseJSON, _ = sjson.SetRawBytes(responseJSON, "output", outputArray)
 						}
 					}
