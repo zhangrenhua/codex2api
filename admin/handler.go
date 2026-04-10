@@ -1746,55 +1746,61 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 // ==================== Settings ====================
 
 type settingsResponse struct {
-	MaxConcurrency        int    `json:"max_concurrency"`
-	GlobalRPM             int    `json:"global_rpm"`
-	TestModel             string `json:"test_model"`
-	TestConcurrency       int    `json:"test_concurrency"`
-	ProxyURL              string `json:"proxy_url"`
-	PgMaxConns            int    `json:"pg_max_conns"`
-	RedisPoolSize         int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited  bool   `json:"auto_clean_rate_limited"`
-	AdminSecret           string `json:"admin_secret"`
-	AdminAuthSource       string `json:"admin_auth_source"`
-	AutoCleanFullUsage    bool   `json:"auto_clean_full_usage"`
-	AutoCleanError        bool   `json:"auto_clean_error"`
-	AutoCleanExpired      bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
-	MaxRetries            int    `json:"max_retries"`
-	AllowRemoteMigration  bool   `json:"allow_remote_migration"`
-	DatabaseDriver        string `json:"database_driver"`
-	DatabaseLabel         string `json:"database_label"`
-	CacheDriver           string `json:"cache_driver"`
-	CacheLabel            string `json:"cache_label"`
-	ExpiredCleaned        int    `json:"expired_cleaned,omitempty"`
-	ModelMapping          string `json:"model_mapping"`
-	ResinURL              string `json:"resin_url"`
-	ResinPlatformName     string `json:"resin_platform_name"`
+	MaxConcurrency                   int    `json:"max_concurrency"`
+	GlobalRPM                        int    `json:"global_rpm"`
+	TestModel                        string `json:"test_model"`
+	TestConcurrency                  int    `json:"test_concurrency"`
+	BackgroundRefreshIntervalMinutes int    `json:"background_refresh_interval_minutes"`
+	UsageProbeMaxAgeMinutes          int    `json:"usage_probe_max_age_minutes"`
+	RecoveryProbeIntervalMinutes     int    `json:"recovery_probe_interval_minutes"`
+	ProxyURL                         string `json:"proxy_url"`
+	PgMaxConns                       int    `json:"pg_max_conns"`
+	RedisPoolSize                    int    `json:"redis_pool_size"`
+	AutoCleanUnauthorized            bool   `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited             bool   `json:"auto_clean_rate_limited"`
+	AdminSecret                      string `json:"admin_secret"`
+	AdminAuthSource                  string `json:"admin_auth_source"`
+	AutoCleanFullUsage               bool   `json:"auto_clean_full_usage"`
+	AutoCleanError                   bool   `json:"auto_clean_error"`
+	AutoCleanExpired                 bool   `json:"auto_clean_expired"`
+	ProxyPoolEnabled                 bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled             bool   `json:"fast_scheduler_enabled"`
+	MaxRetries                       int    `json:"max_retries"`
+	AllowRemoteMigration             bool   `json:"allow_remote_migration"`
+	DatabaseDriver                   string `json:"database_driver"`
+	DatabaseLabel                    string `json:"database_label"`
+	CacheDriver                      string `json:"cache_driver"`
+	CacheLabel                       string `json:"cache_label"`
+	ExpiredCleaned                   int    `json:"expired_cleaned,omitempty"`
+	ModelMapping                     string `json:"model_mapping"`
+	ResinURL                         string `json:"resin_url"`
+	ResinPlatformName                string `json:"resin_platform_name"`
 }
 
 type updateSettingsReq struct {
-	MaxConcurrency        *int    `json:"max_concurrency"`
-	GlobalRPM             *int    `json:"global_rpm"`
-	TestModel             *string `json:"test_model"`
-	TestConcurrency       *int    `json:"test_concurrency"`
-	ProxyURL              *string `json:"proxy_url"`
-	PgMaxConns            *int    `json:"pg_max_conns"`
-	RedisPoolSize         *int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized *bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited  *bool   `json:"auto_clean_rate_limited"`
-	AdminSecret           *string `json:"admin_secret"`
-	AutoCleanFullUsage    *bool   `json:"auto_clean_full_usage"`
-	AutoCleanError        *bool   `json:"auto_clean_error"`
-	AutoCleanExpired      *bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
-	MaxRetries            *int    `json:"max_retries"`
-	AllowRemoteMigration  *bool   `json:"allow_remote_migration"`
-	ModelMapping          *string `json:"model_mapping"`
-	ResinURL              *string `json:"resin_url"`
-	ResinPlatformName     *string `json:"resin_platform_name"`
+	MaxConcurrency                   *int    `json:"max_concurrency"`
+	GlobalRPM                        *int    `json:"global_rpm"`
+	TestModel                        *string `json:"test_model"`
+	TestConcurrency                  *int    `json:"test_concurrency"`
+	BackgroundRefreshIntervalMinutes *int    `json:"background_refresh_interval_minutes"`
+	UsageProbeMaxAgeMinutes          *int    `json:"usage_probe_max_age_minutes"`
+	RecoveryProbeIntervalMinutes     *int    `json:"recovery_probe_interval_minutes"`
+	ProxyURL                         *string `json:"proxy_url"`
+	PgMaxConns                       *int    `json:"pg_max_conns"`
+	RedisPoolSize                    *int    `json:"redis_pool_size"`
+	AutoCleanUnauthorized            *bool   `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited             *bool   `json:"auto_clean_rate_limited"`
+	AdminSecret                      *string `json:"admin_secret"`
+	AutoCleanFullUsage               *bool   `json:"auto_clean_full_usage"`
+	AutoCleanError                   *bool   `json:"auto_clean_error"`
+	AutoCleanExpired                 *bool   `json:"auto_clean_expired"`
+	ProxyPoolEnabled                 *bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled             *bool   `json:"fast_scheduler_enabled"`
+	MaxRetries                       *int    `json:"max_retries"`
+	AllowRemoteMigration             *bool   `json:"allow_remote_migration"`
+	ModelMapping                     *string `json:"model_mapping"`
+	ResinURL                         *string `json:"resin_url"`
+	ResinPlatformName                *string `json:"resin_platform_name"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1813,31 +1819,34 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		resinPlatformName = dbSettings.ResinPlatformName
 	}
 	c.JSON(http.StatusOK, settingsResponse{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           adminSecret,
-		AdminAuthSource:       adminAuthSource,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
-		DatabaseDriver:        h.databaseDriver,
-		DatabaseLabel:         h.databaseLabel,
-		CacheDriver:           h.cacheDriver,
-		CacheLabel:            h.cacheLabel,
-		ModelMapping:          h.store.GetModelMapping(),
-		ResinURL:              resinURL,
-		ResinPlatformName:     resinPlatformName,
+		MaxConcurrency:                   h.store.GetMaxConcurrency(),
+		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		TestModel:                        h.store.GetTestModel(),
+		TestConcurrency:                  h.store.GetTestConcurrency(),
+		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
+		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
+		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		ProxyURL:                         h.store.GetProxyURL(),
+		PgMaxConns:                       h.pgMaxConns,
+		RedisPoolSize:                    h.redisPoolSize,
+		AutoCleanUnauthorized:            h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:             h.store.GetAutoCleanRateLimited(),
+		AdminSecret:                      adminSecret,
+		AdminAuthSource:                  adminAuthSource,
+		AutoCleanFullUsage:               h.store.GetAutoCleanFullUsage(),
+		AutoCleanError:                   h.store.GetAutoCleanError(),
+		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
+		MaxRetries:                       h.store.GetMaxRetries(),
+		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		DatabaseDriver:                   h.databaseDriver,
+		DatabaseLabel:                    h.databaseLabel,
+		CacheDriver:                      h.cacheDriver,
+		CacheLabel:                       h.cacheLabel,
+		ModelMapping:                     h.store.GetModelMapping(),
+		ResinURL:                         resinURL,
+		ResinPlatformName:                resinPlatformName,
 	})
 }
 
@@ -1899,6 +1908,42 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		h.store.SetTestConcurrency(v)
 		log.Printf("设置已更新: test_concurrency = %d", v)
+	}
+
+	if req.BackgroundRefreshIntervalMinutes != nil {
+		v := *req.BackgroundRefreshIntervalMinutes
+		if v < 1 {
+			v = 1
+		}
+		if v > 1440 {
+			v = 1440
+		}
+		h.store.SetBackgroundRefreshInterval(time.Duration(v) * time.Minute)
+		log.Printf("设置已更新: background_refresh_interval_minutes = %d", v)
+	}
+
+	if req.UsageProbeMaxAgeMinutes != nil {
+		v := *req.UsageProbeMaxAgeMinutes
+		if v < 1 {
+			v = 1
+		}
+		if v > 10080 {
+			v = 10080
+		}
+		h.store.SetUsageProbeMaxAge(time.Duration(v) * time.Minute)
+		log.Printf("设置已更新: usage_probe_max_age_minutes = %d", v)
+	}
+
+	if req.RecoveryProbeIntervalMinutes != nil {
+		v := *req.RecoveryProbeIntervalMinutes
+		if v < 1 {
+			v = 1
+		}
+		if v > 10080 {
+			v = 10080
+		}
+		h.store.SetRecoveryProbeInterval(time.Duration(v) * time.Minute)
+		log.Printf("设置已更新: recovery_probe_interval_minutes = %d", v)
 	}
 
 	if req.ProxyURL != nil {
@@ -2027,26 +2072,29 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	// 持久化保存到数据库
 	err := h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           currentAdminSecret,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && hasAdminSecret,
-		ModelMapping:          h.store.GetModelMapping(),
-		ResinURL:              resinURL,
-		ResinPlatformName:     resinPlatformName,
+		MaxConcurrency:                   h.store.GetMaxConcurrency(),
+		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		TestModel:                        h.store.GetTestModel(),
+		TestConcurrency:                  h.store.GetTestConcurrency(),
+		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
+		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
+		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		ProxyURL:                         h.store.GetProxyURL(),
+		PgMaxConns:                       h.pgMaxConns,
+		RedisPoolSize:                    h.redisPoolSize,
+		AutoCleanUnauthorized:            h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:             h.store.GetAutoCleanRateLimited(),
+		AdminSecret:                      currentAdminSecret,
+		AutoCleanFullUsage:               h.store.GetAutoCleanFullUsage(),
+		AutoCleanError:                   h.store.GetAutoCleanError(),
+		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
+		MaxRetries:                       h.store.GetMaxRetries(),
+		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && hasAdminSecret,
+		ModelMapping:                     h.store.GetModelMapping(),
+		ResinURL:                         resinURL,
+		ResinPlatformName:                resinPlatformName,
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -2066,32 +2114,35 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, settingsResponse{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           adminSecretForDisplay,
-		AdminAuthSource:       adminAuthSource,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
-		DatabaseDriver:        h.databaseDriver,
-		DatabaseLabel:         h.databaseLabel,
-		CacheDriver:           h.cacheDriver,
-		CacheLabel:            h.cacheLabel,
-		ExpiredCleaned:        expiredCleaned,
-		ModelMapping:          h.store.GetModelMapping(),
-		ResinURL:              resinURL,
-		ResinPlatformName:     resinPlatformName,
+		MaxConcurrency:                   h.store.GetMaxConcurrency(),
+		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		TestModel:                        h.store.GetTestModel(),
+		TestConcurrency:                  h.store.GetTestConcurrency(),
+		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
+		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
+		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		ProxyURL:                         h.store.GetProxyURL(),
+		PgMaxConns:                       h.pgMaxConns,
+		RedisPoolSize:                    h.redisPoolSize,
+		AutoCleanUnauthorized:            h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:             h.store.GetAutoCleanRateLimited(),
+		AdminSecret:                      adminSecretForDisplay,
+		AdminAuthSource:                  adminAuthSource,
+		AutoCleanFullUsage:               h.store.GetAutoCleanFullUsage(),
+		AutoCleanError:                   h.store.GetAutoCleanError(),
+		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
+		MaxRetries:                       h.store.GetMaxRetries(),
+		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		DatabaseDriver:                   h.databaseDriver,
+		DatabaseLabel:                    h.databaseLabel,
+		CacheDriver:                      h.cacheDriver,
+		CacheLabel:                       h.cacheLabel,
+		ExpiredCleaned:                   expiredCleaned,
+		ModelMapping:                     h.store.GetModelMapping(),
+		ResinURL:                         resinURL,
+		ResinPlatformName:                resinPlatformName,
 	})
 }
 

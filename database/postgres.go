@@ -253,18 +253,21 @@ func (db *DB) migrate(ctx context.Context) error {
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
 
-	CREATE TABLE IF NOT EXISTS system_settings (
-		id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-		max_concurrency    INT DEFAULT 2,
-		global_rpm         INT DEFAULT 0,
-		test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
-		test_concurrency   INT DEFAULT 50,
-		proxy_url          VARCHAR(500) DEFAULT '',
-		pg_max_conns       INT DEFAULT 50,
-		redis_pool_size    INT DEFAULT 30,
-		auto_clean_unauthorized BOOLEAN DEFAULT FALSE,
-		auto_clean_rate_limited BOOLEAN DEFAULT FALSE
-	);
+		CREATE TABLE IF NOT EXISTS system_settings (
+			id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			max_concurrency    INT DEFAULT 2,
+			global_rpm         INT DEFAULT 0,
+			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
+			test_concurrency   INT DEFAULT 50,
+			proxy_url          VARCHAR(500) DEFAULT '',
+			pg_max_conns       INT DEFAULT 50,
+			redis_pool_size    INT DEFAULT 30,
+			auto_clean_unauthorized BOOLEAN DEFAULT FALSE,
+			auto_clean_rate_limited BOOLEAN DEFAULT FALSE,
+			background_refresh_interval_minutes INT DEFAULT 2,
+			usage_probe_max_age_minutes INT DEFAULT 10,
+			recovery_probe_interval_minutes INT DEFAULT 30
+		);
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_unauthorized BOOLEAN DEFAULT FALSE;
@@ -275,13 +278,16 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS fast_scheduler_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS max_retries INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS allow_remote_migration BOOLEAN DEFAULT FALSE;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_error BOOLEAN DEFAULT FALSE;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS model_mapping TEXT DEFAULT '{}';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_error BOOLEAN DEFAULT FALSE;
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS model_mapping TEXT DEFAULT '{}';
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_refresh_interval_minutes INT DEFAULT 2;
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_probe_max_age_minutes INT DEFAULT 10;
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS recovery_probe_interval_minutes INT DEFAULT 30;
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
+		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
 
-	CREATE TABLE IF NOT EXISTS proxies (
+		CREATE TABLE IF NOT EXISTS proxies (
 		id         SERIAL PRIMARY KEY,
 		url        VARCHAR(500) NOT NULL UNIQUE,
 		label      VARCHAR(255) DEFAULT '',
@@ -382,26 +388,29 @@ func (db *DB) InsertAPIKey(ctx context.Context, name, key string) (int64, error)
 
 // SystemSettings 运行时设置项
 type SystemSettings struct {
-	MaxConcurrency        int
-	GlobalRPM             int
-	TestModel             string
-	TestConcurrency       int
-	ProxyURL              string
-	PgMaxConns            int
-	RedisPoolSize         int
-	AutoCleanUnauthorized bool
-	AutoCleanRateLimited  bool
-	AdminSecret           string
-	AutoCleanFullUsage    bool
-	AutoCleanError        bool
-	AutoCleanExpired      bool
-	ProxyPoolEnabled      bool
-	FastSchedulerEnabled  bool
-	MaxRetries            int
-	AllowRemoteMigration  bool
-	ModelMapping          string // JSON: {"anthropic_model": "codex_model", ...}
-	ResinURL              string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
-	ResinPlatformName     string // Resin 平台标识，例如 codex2api
+	MaxConcurrency                   int
+	GlobalRPM                        int
+	TestModel                        string
+	TestConcurrency                  int
+	ProxyURL                         string
+	PgMaxConns                       int
+	RedisPoolSize                    int
+	AutoCleanUnauthorized            bool
+	AutoCleanRateLimited             bool
+	AdminSecret                      string
+	AutoCleanFullUsage               bool
+	AutoCleanError                   bool
+	AutoCleanExpired                 bool
+	ProxyPoolEnabled                 bool
+	FastSchedulerEnabled             bool
+	MaxRetries                       int
+	AllowRemoteMigration             bool
+	ModelMapping                     string // JSON: {"anthropic_model": "codex_model", ...}
+	BackgroundRefreshIntervalMinutes int
+	UsageProbeMaxAgeMinutes          int
+	RecoveryProbeIntervalMinutes     int
+	ResinURL                         string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
+	ResinPlatformName                string // Resin 平台标识，例如 codex2api
 }
 
 // GetSystemSettings 加载全局设置
@@ -417,6 +426,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(auto_clean_error, false),
 		       COALESCE(auto_clean_expired, false),
 		       COALESCE(model_mapping, '{}'),
+		       COALESCE(background_refresh_interval_minutes, 2),
+		       COALESCE(usage_probe_max_age_minutes, 10),
+		       COALESCE(recovery_probe_interval_minutes, 30),
 		       COALESCE(resin_url, ''),
 		       COALESCE(resin_platform_name, '')
 		FROM system_settings WHERE id = 1
@@ -425,6 +437,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.ModelMapping,
+		&s.BackgroundRefreshIntervalMinutes, &s.UsageProbeMaxAgeMinutes, &s.RecoveryProbeIntervalMinutes,
 		&s.ResinURL, &s.ResinPlatformName,
 	)
 	if err == sql.ErrNoRows {
@@ -436,37 +449,42 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 // UpdateSystemSettings 更新全局设置（upsert：无行时自动插入）
 func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error {
 	_, err := db.conn.ExecContext(ctx, `
-		INSERT INTO system_settings (
-			id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
-			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
-			fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping,
-			resin_url, resin_platform_name
-		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-		ON CONFLICT (id) DO UPDATE SET
-			max_concurrency         = EXCLUDED.max_concurrency,
-			global_rpm              = EXCLUDED.global_rpm,
-			test_model              = EXCLUDED.test_model,
-			test_concurrency        = EXCLUDED.test_concurrency,
-			proxy_url               = EXCLUDED.proxy_url,
+			INSERT INTO system_settings (
+				id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
+				auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
+				fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping,
+				background_refresh_interval_minutes, usage_probe_max_age_minutes, recovery_probe_interval_minutes,
+				resin_url, resin_platform_name
+			)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+			ON CONFLICT (id) DO UPDATE SET
+				max_concurrency         = EXCLUDED.max_concurrency,
+				global_rpm              = EXCLUDED.global_rpm,
+				test_model              = EXCLUDED.test_model,
+				test_concurrency        = EXCLUDED.test_concurrency,
+				proxy_url               = EXCLUDED.proxy_url,
 			pg_max_conns            = EXCLUDED.pg_max_conns,
 			redis_pool_size         = EXCLUDED.redis_pool_size,
 			auto_clean_unauthorized = EXCLUDED.auto_clean_unauthorized,
 			auto_clean_rate_limited = EXCLUDED.auto_clean_rate_limited,
-			admin_secret            = EXCLUDED.admin_secret,
-			auto_clean_full_usage   = EXCLUDED.auto_clean_full_usage,
-			proxy_pool_enabled      = EXCLUDED.proxy_pool_enabled,
-			fast_scheduler_enabled  = EXCLUDED.fast_scheduler_enabled,
-			max_retries             = EXCLUDED.max_retries,
-			allow_remote_migration  = EXCLUDED.allow_remote_migration,
-			auto_clean_error        = EXCLUDED.auto_clean_error,
-			auto_clean_expired      = EXCLUDED.auto_clean_expired,
-			model_mapping           = EXCLUDED.model_mapping,
-			resin_url               = EXCLUDED.resin_url,
-			resin_platform_name     = EXCLUDED.resin_platform_name
-	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
+				admin_secret            = EXCLUDED.admin_secret,
+				auto_clean_full_usage   = EXCLUDED.auto_clean_full_usage,
+				proxy_pool_enabled      = EXCLUDED.proxy_pool_enabled,
+				fast_scheduler_enabled  = EXCLUDED.fast_scheduler_enabled,
+				max_retries             = EXCLUDED.max_retries,
+				allow_remote_migration  = EXCLUDED.allow_remote_migration,
+				auto_clean_error        = EXCLUDED.auto_clean_error,
+				auto_clean_expired      = EXCLUDED.auto_clean_expired,
+				model_mapping           = EXCLUDED.model_mapping,
+				background_refresh_interval_minutes = EXCLUDED.background_refresh_interval_minutes,
+				usage_probe_max_age_minutes = EXCLUDED.usage_probe_max_age_minutes,
+				recovery_probe_interval_minutes = EXCLUDED.recovery_probe_interval_minutes,
+				resin_url               = EXCLUDED.resin_url,
+				resin_platform_name     = EXCLUDED.resin_platform_name
+		`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
 		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping,
+		s.BackgroundRefreshIntervalMinutes, s.UsageProbeMaxAgeMinutes, s.RecoveryProbeIntervalMinutes,
 		s.ResinURL, s.ResinPlatformName)
 	return err
 }
