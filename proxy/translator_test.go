@@ -68,6 +68,63 @@ func TestTranslateRequest_PreservesSupportedServiceTier(t *testing.T) {
 	}
 }
 
+func TestTranslateRequest_FillsMissingArrayItemsInToolSchema(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":"test"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"godot-mcp_node_signal",
+					"parameters":{
+						"type":"object",
+						"properties":{
+							"args":{"type":"array"}
+						}
+					}
+				}
+			}
+		]
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+
+	items := gjson.GetBytes(got, "tools.0.parameters.properties.args.items")
+	if !items.Exists() || items.Type != gjson.JSON {
+		t.Fatalf("expected array schema items object to be injected, got %s", items.Raw)
+	}
+}
+
+func TestPrepareResponsesBody_FillsMissingArrayItemsInToolSchema(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"test",
+		"tools":[
+			{
+				"type":"function",
+				"name":"godot-mcp_node_signal",
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"args":{"type":"array"}
+					}
+				}
+			}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	items := gjson.GetBytes(got, "tools.0.parameters.properties.args.items")
+	if !items.Exists() || items.Type != gjson.JSON {
+		t.Fatalf("expected array schema items object to be injected, got %s", items.Raw)
+	}
+}
+
 // ==================== Function Calling 测试 ====================
 
 func TestConvertMessagesToInput_ToolRole(t *testing.T) {
