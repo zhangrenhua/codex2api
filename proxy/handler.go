@@ -812,7 +812,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	rawBody, _ = sjson.SetBytes(rawBody, "stream", false)
 
 	// 准备上游请求体
-	codexBody, _ := PrepareResponsesBody(rawBody)
+	codexBody, _ := PrepareCompactResponsesBody(rawBody)
 
 	// 带重试的上游请求
 	maxRetries := h.getMaxRetries()

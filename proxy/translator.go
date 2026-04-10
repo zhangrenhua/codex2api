@@ -25,10 +25,10 @@ type openAIRequest struct {
 
 // openAIMessage 表示一条 OpenAI 消息
 type openAIMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"` // string 或 []contentPart
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content"` // string 或 []contentPart
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // openAIToolCall 表示 assistant 消息中的工具调用
@@ -387,6 +387,16 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		return rawBody, expandedInputRaw
 	}
 	return result, expandedInputRaw
+}
+
+// PrepareCompactResponsesBody 将 /responses/compact 请求转换为上游可接受的格式。
+// 它复用通用 Responses 预处理，但会移除 compact 端点不接受的自动注入字段。
+func PrepareCompactResponsesBody(rawBody []byte) ([]byte, string) {
+	body, expandedInputRaw := PrepareResponsesBody(rawBody)
+	body, _ = sjson.DeleteBytes(body, "include")
+	body, _ = sjson.DeleteBytes(body, "store")
+	body, _ = sjson.DeleteBytes(body, "stream")
+	return body, expandedInputRaw
 }
 
 // normalizeReasoningEffort 将 reasoning_effort 钳位到上游支持的值
