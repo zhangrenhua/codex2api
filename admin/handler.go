@@ -679,6 +679,16 @@ type sub2apiAccountCredentials struct {
 	Email        string `json:"email"`
 }
 
+// sharedHTTPClient 复用连接池的 HTTP 客户端，用于管理端远程请求
+var sharedHTTPClient = &http.Client{
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
 
 func trimUTF8BOM(data []byte) []byte {
@@ -2187,7 +2197,7 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 	}
 	httpReq.Header.Set("X-Admin-Key", req.AdminKey)
 
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(httpReq)
+	resp, err := sharedHTTPClient.Do(httpReq)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, "连接远程实例失败: "+err.Error())
 		return

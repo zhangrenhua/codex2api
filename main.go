@@ -222,8 +222,12 @@ func main() {
 	log.Println("==========================================")
 
 	// 优雅关闭
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
 	go func() {
-		if err := r.Run(addr); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
 	}()
@@ -233,6 +237,14 @@ func main() {
 	<-quit
 
 	log.Println("正在关闭...")
+
+	// 给 HTTP 连接 10 秒时间完成处理中的请求
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP 服务关闭异常: %v", err)
+	}
+
 	store.Stop()
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()
