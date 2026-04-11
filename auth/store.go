@@ -1163,7 +1163,11 @@ func (s *Store) StartBackgroundRefresh() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		refreshTicker := time.NewTicker(2 * time.Minute)
+		// refreshTimer 使用 10~20 分钟随机间隔，避免多实例同时刷新造成雷群效应
+		randomRefreshInterval := func() time.Duration {
+			return time.Duration(10+rand.Intn(11)) * time.Minute // 10~20 分钟
+		}
+		refreshTimer := time.NewTimer(randomRefreshInterval())
 		autoCleanupTicker := time.NewTicker(30 * time.Second)
 		fullUsageCleanupTicker := time.NewTicker(5 * time.Minute)
 		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
@@ -1172,7 +1176,7 @@ func (s *Store) StartBackgroundRefresh() {
 		// session 绑定清理 + account_events 历史清理
 		sessionCleanupTicker := time.NewTicker(10 * time.Minute)
 		eventsPruneTicker := time.NewTicker(24 * time.Hour)
-		defer refreshTicker.Stop()
+		defer refreshTimer.Stop()
 		defer autoCleanupTicker.Stop()
 		defer fullUsageCleanupTicker.Stop()
 		defer expiredCleanupTicker.Stop()
@@ -1185,10 +1189,11 @@ func (s *Store) StartBackgroundRefresh() {
 
 		for {
 			select {
-			case <-refreshTicker.C:
+			case <-refreshTimer.C:
 				s.parallelRefreshAll(context.Background())
 				s.TriggerUsageProbeAsync()
 				s.TriggerRecoveryProbeAsync()
+				refreshTimer.Reset(randomRefreshInterval())
 			case <-autoCleanupTicker.C:
 				s.TriggerAutoCleanupAsync()
 			case <-fullUsageCleanupTicker.C:
