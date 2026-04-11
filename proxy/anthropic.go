@@ -203,8 +203,9 @@ func TranslateAnthropicToCodex(rawJSON []byte, modelMappingJSON string) ([]byte,
 	originalModel := req.Model
 	codexModel := resolveAnthropicModel(req.Model, modelMappingJSON)
 
-	// 构建 input 数组
+	// 构建 input 数组，并修复 call_id 不匹配问题
 	input := buildCodexInput(req.System, req.Messages)
+	input = reconcileCallIDs(input)
 
 	// 构建输出 map（对齐 PrepareResponsesBody 的字段处理）
 	out := map[string]any{
@@ -293,7 +294,7 @@ func parseAnthropicSystem(raw json.RawMessage) string {
 	return ""
 }
 
-// parseAnthropicContent 解析 message content（string 或 []block）
+// parseAnthropicContent 解析 message content（string / []block / 单个 block object）
 func parseAnthropicContent(raw json.RawMessage) []anthropicContentBlock {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -307,6 +308,11 @@ func parseAnthropicContent(raw json.RawMessage) []anthropicContentBlock {
 	var blocks []anthropicContentBlock
 	if json.Unmarshal(raw, &blocks) == nil {
 		return blocks
+	}
+	// 兼容：某些客户端发送单个 block object 而非数组
+	var block anthropicContentBlock
+	if json.Unmarshal(raw, &block) == nil && block.Type != "" {
+		return []anthropicContentBlock{block}
 	}
 	return nil
 }
@@ -411,6 +417,67 @@ func extractToolResultText(b anthropicContentBlock) string {
 		return strings.Join(parts, "\n")
 	}
 	return string(b.Content)
+}
+
+// reconcileCallIDs 修复 function_call_output 与 function_call 的 call_id 不匹配问题。
+// 某些第三方客户端的 tool_result.tool_use_id 与 tool_use.id 不一致，
+// 导致 Codex 上游返回 "No tool call found for function call output" 400 错误。
+// 策略：按出现顺序将孤儿 output 重映射到孤儿 call；无法重映射的 output 保留原样（可能来自截断的历史）。
+func reconcileCallIDs(input []any) []any {
+	// Pass 1: 收集所有 function_call 和 function_call_output 的 call_id（保持顺序）
+	type idIndex struct {
+		callID string
+		idx    int
+	}
+	var fcList, fcoList []idIndex
+	fcSet := make(map[string]bool)
+	fcoSet := make(map[string]bool)
+
+	for i, item := range input {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := m["call_id"].(string)
+		if id == "" {
+			continue
+		}
+		switch m["type"] {
+		case "function_call":
+			fcList = append(fcList, idIndex{id, i})
+			fcSet[id] = true
+		case "function_call_output":
+			fcoList = append(fcoList, idIndex{id, i})
+			fcoSet[id] = true
+		}
+	}
+
+	// 找出孤儿 function_call（有 call 无 output）
+	var orphanFCIDs []string
+	for _, fc := range fcList {
+		if !fcoSet[fc.callID] {
+			orphanFCIDs = append(orphanFCIDs, fc.callID)
+		}
+	}
+	if len(orphanFCIDs) == 0 {
+		return input // 没有可供重映射的孤儿 call，保持原样
+	}
+
+	// 按顺序将孤儿 output 重映射到孤儿 call
+	orphanIdx := 0
+	for _, fco := range fcoList {
+		if fcSet[fco.callID] {
+			continue // 有匹配，正常
+		}
+		if orphanIdx >= len(orphanFCIDs) {
+			break // 孤儿 call 用完，剩余的 output 保留原样
+		}
+		m := input[fco.idx].(map[string]any)
+		m["call_id"] = orphanFCIDs[orphanIdx]
+		orphanIdx++
+	}
+
+	return input
 }
 
 // resolveReasoningEffort 从 thinking 配置推断 reasoning effort

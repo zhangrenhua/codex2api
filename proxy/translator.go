@@ -252,8 +252,8 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		"include": []string{"reasoning.encrypted_content"},
 	}
 
-	// 1. messages → input
-	out["input"] = convertMessagesToInputSlice(req.Messages)
+	// 1. messages → input（含 call_id 修复）
+	out["input"] = reconcileCallIDs(convertMessagesToInputSlice(req.Messages))
 
 	// 2. reasoning effort
 	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
@@ -409,6 +409,11 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 			currentInput, _ := body["input"].([]any)
 			body["input"] = append(cachedItems, currentInput...)
 		}
+	}
+
+	// 6.1 修复 function_call_output 与 function_call 的 call_id 不匹配
+	if inputSlice, ok := body["input"].([]any); ok {
+		body["input"] = reconcileCallIDs(inputSlice)
 	}
 
 	// 保存展开后的 input 原始 JSON（用于响应缓存链路）
@@ -570,6 +575,21 @@ func buildContentPartsSlice(role string, raw json.RawMessage) []any {
 				if item.ImageURL != nil && item.ImageURL.URL != "" {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": item.ImageURL.URL})
 				}
+			}
+		}
+		return parts
+	case '{':
+		// 兼容：某些客户端发送单个 content object 而非数组
+		var item openAIContentPart
+		if json.Unmarshal(raw, &item) != nil || item.Type == "" {
+			return parts
+		}
+		switch item.Type {
+		case "text":
+			return append(parts, map[string]any{"type": contentType, "text": item.Text})
+		case "image_url":
+			if item.ImageURL != nil && item.ImageURL.URL != "" {
+				return append(parts, map[string]any{"type": "input_image", "image_url": item.ImageURL.URL})
 			}
 		}
 		return parts
