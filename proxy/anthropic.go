@@ -437,9 +437,13 @@ func resolveReasoningEffort(thinking *anthropicThinking) string {
 func convertAnthropicTools(tools []anthropicTool) []any {
 	result := make([]any, 0, len(tools))
 	for _, t := range tools {
+		safeName, ok := sanitizeToolName(t.Name)
+		if !ok {
+			continue // 跳过空名称工具
+		}
 		item := map[string]any{
 			"type": "function",
-			"name": t.Name,
+			"name": safeName,
 		}
 		if t.Description != "" {
 			item["description"] = t.Description

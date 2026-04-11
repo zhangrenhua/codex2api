@@ -4,12 +4,32 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// toolNamePattern 校验工具名是否符合上游要求：仅允许 [a-zA-Z0-9_-]
+var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// sanitizeToolName 将不合法字符替换为下划线，空名称返回 false
+func sanitizeToolName(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	if toolNamePattern.MatchString(name) {
+		return name, true
+	}
+	// 替换不允许的字符为下划线
+	sanitized := regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(name, "_")
+	if sanitized == "" || sanitized == strings.Repeat("_", len(sanitized)) {
+		return "", false
+	}
+	return sanitized, true
+}
 
 // ==================== 输入结构体（OpenAI Chat Completions 格式） ====================
 
@@ -323,6 +343,29 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		toolDescDefaults := map[string]string{
 			"tool_search": "Search through available tools to find the most relevant one for the task.",
 		}
+		// 过滤无效工具名并清理不合法字符
+		validTools := make([]any, 0, len(tools))
+		for _, t := range tools {
+			toolMap, ok := t.(map[string]any)
+			if !ok {
+				validTools = append(validTools, t)
+				continue
+			}
+			// 校验 / 清理工具名
+			if name, _ := toolMap["name"].(string); name != "" {
+				safeName, ok := sanitizeToolName(name)
+				if !ok {
+					continue // 跳过无效名称
+				}
+				toolMap["name"] = safeName
+			} else if toolType, _ := toolMap["type"].(string); toolType == "function" {
+				continue // function 类型缺少名称，跳过
+			}
+			validTools = append(validTools, toolMap)
+		}
+		tools = validTools
+		body["tools"] = tools
+
 		for _, t := range tools {
 			toolMap, ok := t.(map[string]any)
 			if !ok {
@@ -582,9 +625,13 @@ func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
 		}
 
 		// function 类型 → 提升 function 内字段到顶层
+		safeName, ok := sanitizeToolName(parsed.Function.Name)
+		if !ok {
+			continue // 跳过空名称工具
+		}
 		item := map[string]any{
 			"type": "function",
-			"name": parsed.Function.Name,
+			"name": safeName,
 		}
 		if parsed.Function.Description != "" {
 			item["description"] = parsed.Function.Description
@@ -671,10 +718,24 @@ var unsupportedSchemaKeys = map[string]bool{
 	"maxProperties":    true,
 }
 
+// sanitizeRef 修复 $ref 值中不合法的 URI 字符（如 [] 等）
+func sanitizeRef(ref string) string {
+	// 将 [] 等非法 URI 字符替换为合法编码
+	ref = strings.ReplaceAll(ref, "[", "%5B")
+	ref = strings.ReplaceAll(ref, "]", "%5D")
+	ref = strings.ReplaceAll(ref, " ", "%20")
+	return ref
+}
+
 // stripUnsupportedSchemaKeys 递归删除 schema 中上游不支持的关键字，并修复常见合规性问题
 func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	for key := range unsupportedSchemaKeys {
 		delete(schema, key)
+	}
+
+	// 修复 $ref 中不合法的 URI 字符
+	if ref, ok := schema["$ref"].(string); ok {
+		schema["$ref"] = sanitizeRef(ref)
 	}
 
 	// 修复 required: null → 删除（上游要求 required 必须是 array）
