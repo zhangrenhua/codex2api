@@ -1425,6 +1425,24 @@ func parseRetryAfter(body []byte) time.Duration {
 	return 2 * time.Minute
 }
 
+func isMissingScopeUnauthorized(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	if code != "missing_scope" {
+		return false
+	}
+
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	if strings.Contains(msg, "api.responses.write") {
+		return true
+	}
+
+	return strings.Contains(msg, "scope")
+}
+
 // applyCooldown 根据上游状态码设置智能冷却
 func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []byte, resp *http.Response) {
 	switch statusCode {
@@ -1435,6 +1453,12 @@ func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []by
 	case http.StatusUnauthorized:
 		// 原子标志瞬间置位，阻止其他并发请求再选到该账号
 		atomic.StoreInt32(&account.Disabled, 1)
+
+		if isMissingScopeUnauthorized(body) {
+			log.Printf("账号 %d 收到 missing_scope 401，保留在号池", account.ID())
+			atomic.StoreInt32(&account.Disabled, 0)
+			return
+		}
 
 		if h.store.GetAutoCleanUnauthorized() {
 			// 开启自动清理时，401 立即从号池删除
