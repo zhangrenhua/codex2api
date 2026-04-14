@@ -104,7 +104,7 @@ export default function SchedulerBoard() {
       .sort((left, right) => {
         switch (sortBy) {
           case 'score_asc':
-            return (left.scheduler_score ?? 0) - (right.scheduler_score ?? 0)
+            return getDispatchScore(left) - getDispatchScore(right)
           case 'usage_desc':
             return (right.usage_percent_7d ?? -1) - (left.usage_percent_7d ?? -1)
           case 'latency_penalty':
@@ -115,7 +115,7 @@ export default function SchedulerBoard() {
           default: {
             const priorityDiff = priority(right) - priority(left)
             if (priorityDiff !== 0) return priorityDiff
-            return (left.scheduler_score ?? 0) - (right.scheduler_score ?? 0)
+            return getDispatchScore(left) - getDispatchScore(right)
           }
         }
       })
@@ -260,7 +260,7 @@ export default function SchedulerBoard() {
                               {account.email || `ID ${account.id}`}
                             </div>
                             <div className="mt-1 text-[12px] text-muted-foreground">
-                              {t('scheduler.score')} {Math.round(account.scheduler_score ?? 0)} · {t('scheduler.concurrency')} {account.dynamic_concurrency_limit ?? '-'} · {t('scheduler.plan')} {account.plan_type || '-'}
+                              {t('scheduler.score')} {Math.round(getDispatchScore(account))} · {t('scheduler.concurrency')} {account.dynamic_concurrency_limit ?? '-'} · {t('scheduler.plan')} {account.plan_type || '-'}
                             </div>
                           </div>
                           <StatusBadge status={account.status} />
@@ -437,6 +437,10 @@ function buildScoreReasonTags(account: AccountRow, t: any) {
   }
 
   return tags
+}
+
+function getDispatchScore(account: AccountRow): number {
+  return account.dispatch_score ?? account.scheduler_score ?? 0
 }
 
 function formatNumber(value: number): string {
