@@ -8,12 +8,14 @@ import (
 
 func newFastSchedulerTestAccount(id int64, tier AccountHealthTier, score float64, limit int64) *Account {
 	return &Account{
-		DBID:                    id,
-		AccessToken:             "token",
-		Status:                  StatusReady,
-		HealthTier:              tier,
-		SchedulerScore:          score,
-		DynamicConcurrencyLimit: limit,
+		DBID:                     id,
+		AccessToken:              "token",
+		Status:                   StatusReady,
+		HealthTier:               tier,
+		SchedulerScore:           score,
+		DispatchScore:            score,
+		BaseConcurrencyEffective: limit,
+		DynamicConcurrencyLimit:  limit,
 	}
 }
 
@@ -147,6 +149,27 @@ func TestBuildFastSchedulerFromStore(t *testing.T) {
 	}
 }
 
+func TestFastSchedulerProvenPhaseUsesTotalRequestsOnly(t *testing.T) {
+	premium := newFastSchedulerTestAccount(1, HealthTierHealthy, 150, 1)
+	atomic.StoreInt64(&premium.TotalRequests, 0)
+
+	proven := newFastSchedulerTestAccount(2, HealthTierHealthy, 100, 1)
+	atomic.StoreInt64(&proven.TotalRequests, 11)
+
+	scheduler := NewFastScheduler(1)
+	scheduler.Rebuild([]*Account{premium, proven})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != proven.DBID {
+		t.Fatalf("Acquire() picked dbID=%d, want proven account %d", got.DBID, proven.DBID)
+	}
+}
+
 func TestStoreFastSchedulerToggle(t *testing.T) {
 	cooling := newFastSchedulerTestAccount(1, HealthTierWarm, 80, 1)
 	cooling.Status = StatusCooldown
@@ -215,6 +238,59 @@ func TestStoreFastSchedulerTracksCooldownTransition(t *testing.T) {
 		t.Fatal("Next() returned nil after ClearCooldown()")
 	}
 	store.Release(got)
+}
+
+func TestFastSchedulerPremium5hRateLimitUsesSingleConcurrencyAndRecoversAfterReset(t *testing.T) {
+	acc := &Account{
+		DBID:                1,
+		AccessToken:         "token",
+		PlanType:            "plus",
+		Status:              StatusReady,
+		HealthTier:          HealthTierHealthy,
+		UsagePercent5h:      100,
+		UsagePercent5hValid: true,
+		Reset5hAt:           time.Now().Add(30 * time.Minute),
+	}
+
+	scheduler := NewFastScheduler(4)
+	scheduler.Rebuild([]*Account{acc})
+
+	sizes := scheduler.BucketSizes()
+	if sizes[HealthTierRisky] != 1 {
+		t.Fatalf("risky bucket size = %d, want 1", sizes[HealthTierRisky])
+	}
+
+	first := scheduler.Acquire()
+	if first == nil {
+		t.Fatal("first Acquire() returned nil")
+	}
+
+	second := scheduler.Acquire()
+	if second != nil {
+		t.Fatal("second Acquire() should be nil while premium 5h rate limit is active")
+	}
+
+	acc.mu.Lock()
+	acc.Reset5hAt = time.Now().Add(-time.Minute)
+	acc.mu.Unlock()
+	scheduler.Release(first)
+
+	third := scheduler.Acquire()
+	if third == nil {
+		t.Fatal("third Acquire() returned nil after premium 5h reset expired")
+	}
+	fourth := scheduler.Acquire()
+	if fourth == nil {
+		t.Fatal("fourth Acquire() returned nil, want recovered concurrency after reset")
+	}
+
+	sizes = scheduler.BucketSizes()
+	if sizes[HealthTierHealthy] != 1 || sizes[HealthTierRisky] != 0 {
+		t.Fatalf("unexpected bucket sizes after reset recovery: %#v", sizes)
+	}
+
+	scheduler.Release(third)
+	scheduler.Release(fourth)
 }
 
 func TestFastSchedulerEnabledFromEnv(t *testing.T) {

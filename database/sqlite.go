@@ -34,6 +34,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			status TEXT DEFAULT 'active',
 			cooldown_reason TEXT DEFAULT '',
 			cooldown_until TIMESTAMP NULL,
+			score_bias_override INTEGER NULL,
+			base_concurrency_override INTEGER NULL,
 			error_message TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -70,21 +72,24 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS system_settings (
-			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			max_concurrency INTEGER DEFAULT 0,
-			global_rpm INTEGER DEFAULT 0,
-			test_model TEXT DEFAULT 'gpt-5.4',
-			test_concurrency INTEGER DEFAULT 50,
-			proxy_url TEXT DEFAULT '',
-			pg_max_conns INTEGER DEFAULT 50,
-			redis_pool_size INTEGER DEFAULT 30,
-			auto_clean_unauthorized INTEGER DEFAULT 0,
-			auto_clean_rate_limited INTEGER DEFAULT 0,
-			admin_secret TEXT DEFAULT '',
-			auto_clean_full_usage INTEGER DEFAULT 0,
-			auto_clean_error INTEGER DEFAULT 0,
-			auto_clean_expired INTEGER DEFAULT 0,
-			proxy_pool_enabled INTEGER DEFAULT 0,
+				id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+				max_concurrency INTEGER DEFAULT 2,
+				global_rpm INTEGER DEFAULT 0,
+				test_model TEXT DEFAULT 'gpt-5.4',
+				test_concurrency INTEGER DEFAULT 50,
+				proxy_url TEXT DEFAULT '',
+				pg_max_conns INTEGER DEFAULT 50,
+				redis_pool_size INTEGER DEFAULT 30,
+				auto_clean_unauthorized INTEGER DEFAULT 0,
+				auto_clean_rate_limited INTEGER DEFAULT 0,
+				background_refresh_interval_minutes INTEGER DEFAULT 2,
+				usage_probe_max_age_minutes INTEGER DEFAULT 10,
+				recovery_probe_interval_minutes INTEGER DEFAULT 30,
+				admin_secret TEXT DEFAULT '',
+				auto_clean_full_usage INTEGER DEFAULT 0,
+				auto_clean_error INTEGER DEFAULT 0,
+				auto_clean_expired INTEGER DEFAULT 0,
+				proxy_pool_enabled INTEGER DEFAULT 0,
 			fast_scheduler_enabled INTEGER DEFAULT 0,
 			max_retries INTEGER DEFAULT 2,
 			allow_remote_migration INTEGER DEFAULT 0
@@ -120,6 +125,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 	}{
 		{"accounts", "cooldown_reason", "TEXT DEFAULT ''"},
 		{"accounts", "cooldown_until", "TIMESTAMP NULL"},
+		{"accounts", "score_bias_override", "INTEGER NULL"},
+		{"accounts", "base_concurrency_override", "INTEGER NULL"},
 		{"usage_logs", "input_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "output_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "reasoning_tokens", "INTEGER DEFAULT 0"},
@@ -137,6 +144,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "redis_pool_size", "INTEGER DEFAULT 30"},
 		{"system_settings", "auto_clean_unauthorized", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_rate_limited", "INTEGER DEFAULT 0"},
+		{"system_settings", "background_refresh_interval_minutes", "INTEGER DEFAULT 2"},
+		{"system_settings", "usage_probe_max_age_minutes", "INTEGER DEFAULT 10"},
+		{"system_settings", "recovery_probe_interval_minutes", "INTEGER DEFAULT 30"},
 		{"system_settings", "admin_secret", "TEXT DEFAULT ''"},
 		{"system_settings", "auto_clean_full_usage", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_error", "INTEGER DEFAULT 0"},
@@ -146,6 +156,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
 		{"system_settings", "model_mapping", "TEXT DEFAULT '{}'"},
+		{"system_settings", "resin_url", "TEXT DEFAULT ''"},
+		{"system_settings", "resin_platform_name", "TEXT DEFAULT ''"},
 		{"system_settings", "account_cooldown", "INTEGER DEFAULT 60"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
@@ -473,4 +485,84 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 		result = append(result, AccountEventPoint{Bucket: k, Added: agg.added, Deleted: agg.deleted})
 	}
 	return result, nil
+}
+
+// getUsageStatsSQLite SQLite 版使用统计（内存聚合，避免 PG 特有语法）
+func (db *DB) getUsageStatsSQLite(ctx context.Context) (*UsageStats, error) {
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	minuteAgo := now.Add(-1 * time.Minute)
+
+	rows, err := db.conn.QueryContext(ctx, `
+		SELECT created_at, total_tokens, prompt_tokens, completion_tokens,
+		       cached_tokens, duration_ms, status_code
+		FROM usage_logs
+		WHERE created_at >= $1 AND status_code <> 499
+	`, todayStart)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := &UsageStats{}
+	var todayErrors int64
+	var totalDuration float64
+
+	for rows.Next() {
+		var createdRaw interface{}
+		var totalTokens, promptTokens, completionTokens, cachedTokens int64
+		var durationMs int
+		var statusCode int
+		if err := rows.Scan(&createdRaw, &totalTokens, &promptTokens, &completionTokens,
+			&cachedTokens, &durationMs, &statusCode); err != nil {
+			return nil, err
+		}
+		createdAt, err := parseDBTimeValue(createdRaw)
+		if err != nil || createdAt.IsZero() {
+			continue
+		}
+
+		stats.TodayRequests++
+		stats.TodayTokens += totalTokens
+		stats.TotalPrompt += promptTokens
+		stats.TotalCompletion += completionTokens
+		stats.TotalCachedTokens += cachedTokens
+		totalDuration += float64(durationMs)
+
+		if statusCode >= 400 {
+			todayErrors++
+		}
+		// 最近 1 分钟窗口：RPM / TPM
+		if !createdAt.Before(minuteAgo) {
+			stats.RPM++
+			stats.TPM += float64(totalTokens)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if stats.TodayRequests > 0 {
+		stats.AvgDurationMs = totalDuration / float64(stats.TodayRequests)
+		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
+	}
+
+	// 可见请求总数（排除 499）
+	var visibleTotal int64
+	_ = db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_logs WHERE status_code <> 499`).Scan(&visibleTotal)
+
+	// 基线值
+	var bReq, bTok, bPrompt, bComp, bCached int64
+	_ = db.conn.QueryRowContext(ctx, `
+		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens
+		FROM usage_stats_baseline WHERE id = 1
+	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached)
+
+	stats.TotalRequests = visibleTotal + bReq
+	stats.TotalTokens = stats.TodayTokens + bTok
+	stats.TotalPrompt += bPrompt
+	stats.TotalCompletion += bComp
+	stats.TotalCachedTokens += bCached
+
+	return stats, nil
 }

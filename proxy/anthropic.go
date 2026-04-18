@@ -518,7 +518,7 @@ func convertAnthropicTools(tools []anthropicTool) []any {
 		if len(t.InputSchema) > 0 && string(t.InputSchema) != "null" {
 			var params map[string]any
 			if json.Unmarshal(t.InputSchema, &params) == nil {
-				stripUnsupportedSchemaKeys(params)
+				sanitizeSchemaForUpstream(params)
 				item["parameters"] = params
 			}
 		}

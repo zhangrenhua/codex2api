@@ -53,6 +53,32 @@ type usageLimitDetails struct {
 	resetsInSeconds int64
 }
 
+type CodexUsageSyncResult struct {
+	UsagePct7d           float64
+	HasUsage7d           bool
+	UsagePct5h           float64
+	Reset5hAt            time.Time
+	HasUsage5h           bool
+	Used5hHeaders        bool
+	Persisted5hOnly      bool
+	Premium5hRateLimited bool
+}
+
+type codexRateLimitWindow string
+
+const (
+	codexRateLimitWindowUnknown codexRateLimitWindow = ""
+	codexRateLimitWindowShort   codexRateLimitWindow = "short"
+	codexRateLimitWindow5h      codexRateLimitWindow = "5h"
+	codexRateLimitWindow7d      codexRateLimitWindow = "7d"
+)
+
+type codex429Decision struct {
+	Premium5h bool
+	ResetAt   time.Time
+	Cooldown  time.Duration
+}
+
 const (
 	contextAPIKeyID     = "apiKeyID"
 	contextAPIKeyName   = "apiKeyName"
@@ -298,12 +324,14 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.Use(auth)
 	v1.POST("/chat/completions", h.ChatCompletions)
 	v1.POST("/responses", h.Responses)
+	v1.POST("/responses/compact", h.ResponsesCompact)
 	v1.POST("/messages", h.Messages)
 	v1.GET("/models", h.ListModels)
 
 	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
 	r.POST("/chat/completions", auth, h.ChatCompletions)
 	r.POST("/responses", auth, h.Responses)
+	r.POST("/responses/compact", auth, h.ResponsesCompact)
 	r.POST("/messages", auth, h.Messages)
 	r.GET("/models", auth, h.ListModels)
 }
@@ -514,9 +542,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-			}
+			SyncCodexUsageState(h.store, account, resp)
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -749,9 +775,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-			}
+			SyncCodexUsageState(h.store, account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -833,6 +857,202 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
+		return
+	}
+
+	// 所有重试都失败
+	if lastErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
+		})
+	} else if lastStatusCode != 0 {
+		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
+	}
+}
+
+// ResponsesCompact 处理 /v1/responses/compact 请求（非流式压缩接口，透传到上游 /responses/compact）
+func (h *Handler) ResponsesCompact(c *gin.Context) {
+	// 1. 读取请求体
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+
+	// Validate request
+	validator := api.NewValidator(rawBody)
+	rules := api.ResponsesAPIValidationRules()
+	rules["model"] = append(rules["model"], api.ModelValidator(SupportedModels))
+	result := validator.ValidateRequest(rules)
+	if !result.Valid {
+		api.SendError(c, validator.ToAPIError())
+		return
+	}
+
+	if len(rawBody) > security.MaxRequestBodySize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": gin.H{"message": "请求体过大", "type": "invalid_request_error"},
+		})
+		return
+	}
+
+	model := gjson.GetBytes(rawBody, "model").String()
+	if err := security.ValidateModelName(model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"message": "model 参数无效", "type": "invalid_request_error"},
+		})
+		return
+	}
+	if model == "" {
+		api.SendMissingFieldError(c, "model")
+		return
+	}
+
+	rawBody = normalizeServiceTierField(rawBody)
+	sessionID := ResolveSessionID(c.Request.Header, rawBody)
+	reasoningEffort := extractReasoningEffort(rawBody)
+	serviceTier := extractServiceTier(rawBody)
+	if serviceTier != "" {
+		c.Set("x-service-tier", serviceTier)
+	}
+
+	// compact 强制非流式
+	rawBody, _ = sjson.SetBytes(rawBody, "stream", false)
+
+	// 准备上游请求体
+	codexBody, _ := PrepareCompactResponsesBody(rawBody)
+
+	// 带重试的上游请求
+	maxRetries := h.getMaxRetries()
+	var lastErr error
+	var lastStatusCode int
+	var lastBody []byte
+	excludeAccounts := make(map[int64]bool)
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
+		if account == nil {
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
+			if account == nil {
+				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
+					return
+				}
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+				})
+				return
+			}
+		}
+
+		start := time.Now()
+		proxyURL := stickyProxyURL
+		if proxyURL == "" {
+			proxyURL = h.store.NextProxy()
+		}
+
+		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		apiKey = strings.TrimSpace(apiKey)
+		deviceCfg := h.deviceCfg
+		if deviceCfg == nil {
+			deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
+		}
+		downstreamHeaders := c.Request.Header.Clone()
+
+		resp, reqErr := ExecuteCompactRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+		durationMs := int(time.Since(start).Milliseconds())
+
+		if reqErr != nil {
+			if kind := classifyTransportFailure(reqErr); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
+			excludeAccounts[account.ID()] = true
+
+			if !IsRetryableError(reqErr) && classifyTransportFailure(reqErr) == "" {
+				ErrorToGinResponse(c, reqErr)
+				return
+			}
+
+			log.Printf("compact 上游请求失败 (attempt %d): %v", attempt+1, reqErr)
+			lastErr = reqErr
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
+			SyncCodexUsageState(h.store, account, resp)
+			errBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
+			excludeAccounts[account.ID()] = true
+
+			logUpstreamError("/v1/responses/compact", resp.StatusCode, model, account.ID(), errBody)
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID:        account.ID(),
+				Endpoint:         "/v1/responses/compact",
+				Model:            model,
+				StatusCode:       resp.StatusCode,
+				DurationMs:       durationMs,
+				ReasoningEffort:  reasoningEffort,
+				InboundEndpoint:  "/v1/responses/compact",
+				UpstreamEndpoint: "/v1/responses/compact",
+				ServiceTier:      serviceTier,
+			})
+			h.applyCooldown(account, resp.StatusCode, errBody, resp)
+
+			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
+				lastStatusCode = resp.StatusCode
+				lastBody = errBody
+				continue
+			}
+
+			h.sendFinalUpstreamError(c, resp.StatusCode, errBody)
+			return
+		}
+
+		// 成功：直接透传响应体
+		SyncCodexUsageState(h.store, account, resp)
+
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// 提取 usage 用于日志
+		promptTokens := int(gjson.GetBytes(respBody, "usage.input_tokens").Int())
+		completionTokens := int(gjson.GetBytes(respBody, "usage.output_tokens").Int())
+		totalTokens := int(gjson.GetBytes(respBody, "usage.total_tokens").Int())
+		reasoningTokens := int(gjson.GetBytes(respBody, "usage.output_tokens_details.reasoning_tokens").Int())
+		cachedTokens := int(gjson.GetBytes(respBody, "usage.input_tokens_details.cached_tokens").Int())
+
+		actualServiceTier := gjson.GetBytes(respBody, "service_tier").String()
+		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
+
+		totalDuration := int(time.Since(start).Milliseconds())
+		h.logUsageForRequest(c, &database.UsageLogInput{
+			AccountID:        account.ID(),
+			Endpoint:         "/v1/responses/compact",
+			Model:            model,
+			StatusCode:       http.StatusOK,
+			DurationMs:       totalDuration,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
+			InputTokens:      promptTokens,
+			OutputTokens:     completionTokens,
+			ReasoningTokens:  reasoningTokens,
+			CachedTokens:     cachedTokens,
+			ReasoningEffort:  reasoningEffort,
+			InboundEndpoint:  "/v1/responses/compact",
+			UpstreamEndpoint: "/v1/responses/compact",
+			ServiceTier:      resolvedServiceTier,
+		})
+
+		h.store.Release(account)
+		c.Data(http.StatusOK, "application/json", respBody)
 		return
 	}
 
@@ -969,9 +1189,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-			}
+			SyncCodexUsageState(h.store, account, resp)
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -1202,9 +1420,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-			}
+			SyncCodexUsageState(h.store, account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -1414,16 +1630,211 @@ func parseRetryAfter(body []byte) time.Duration {
 	return 2 * time.Minute
 }
 
+func isMissingScopeUnauthorized(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	if code != "missing_scope" {
+		return false
+	}
+
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	if strings.Contains(msg, "api.responses.write") {
+		return true
+	}
+
+	return strings.Contains(msg, "scope")
+}
+
+func parseRetryAfterResetAt(body []byte, now time.Time) (time.Time, bool) {
+	if len(body) == 0 {
+		return time.Time{}, false
+	}
+
+	if resetsAt := gjson.GetBytes(body, "error.resets_at").Int(); resetsAt > 0 {
+		resetTime := time.Unix(resetsAt, 0)
+		if resetTime.After(now) {
+			return resetTime, true
+		}
+	}
+
+	if secs := gjson.GetBytes(body, "error.resets_in_seconds").Int(); secs > 0 {
+		return now.Add(time.Duration(secs) * time.Second), true
+	}
+
+	return time.Time{}, false
+}
+
+func codexWindowType(windowMinutes float64) codexRateLimitWindow {
+	switch {
+	case windowMinutes >= 1440:
+		return codexRateLimitWindow7d
+	case windowMinutes >= 60:
+		return codexRateLimitWindow5h
+	case windowMinutes > 0:
+		return codexRateLimitWindowShort
+	default:
+		return codexRateLimitWindowUnknown
+	}
+}
+
+type codexWindowUsage struct {
+	usedPct   float64
+	resetSec  float64
+	windowMin float64
+	valid     bool
+}
+
+func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage {
+	if usedStr == "" {
+		return codexWindowUsage{}
+	}
+	return codexWindowUsage{
+		usedPct:   parseFloat(usedStr),
+		windowMin: parseFloat(windowStr),
+		resetSec:  parseFloat(resetStr),
+		valid:     true,
+	}
+}
+
+func classifyCodex429Window(resp *http.Response, now time.Time) (codexRateLimitWindow, time.Time, bool) {
+	if resp == nil {
+		return codexRateLimitWindowUnknown, time.Time{}, false
+	}
+
+	primary := parseCodexWindowUsage(
+		resp.Header.Get("x-codex-primary-used-percent"),
+		resp.Header.Get("x-codex-primary-window-minutes"),
+		resp.Header.Get("x-codex-primary-reset-after-seconds"),
+	)
+	secondary := parseCodexWindowUsage(
+		resp.Header.Get("x-codex-secondary-used-percent"),
+		resp.Header.Get("x-codex-secondary-window-minutes"),
+		resp.Header.Get("x-codex-secondary-reset-after-seconds"),
+	)
+
+	var exhausted []codexWindowUsage
+	if primary.valid && primary.usedPct >= 100 {
+		exhausted = append(exhausted, primary)
+	}
+	if secondary.valid && secondary.usedPct >= 100 {
+		exhausted = append(exhausted, secondary)
+	}
+	if len(exhausted) == 0 {
+		return codexRateLimitWindowUnknown, time.Time{}, false
+	}
+
+	chosen := exhausted[0]
+	for _, candidate := range exhausted[1:] {
+		if candidate.windowMin > chosen.windowMin {
+			chosen = candidate
+		}
+	}
+
+	var resetAt time.Time
+	if chosen.resetSec > 0 {
+		resetAt = now.Add(time.Duration(chosen.resetSec) * time.Second)
+	}
+	return codexWindowType(chosen.windowMin), resetAt, !resetAt.IsZero()
+}
+
+func responseHasCodex5hHeaders(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+
+	primary := parseCodexWindowUsage(
+		resp.Header.Get("x-codex-primary-used-percent"),
+		resp.Header.Get("x-codex-primary-window-minutes"),
+		resp.Header.Get("x-codex-primary-reset-after-seconds"),
+	)
+	if primary.valid && codexWindowType(primary.windowMin) == codexRateLimitWindow5h {
+		return true
+	}
+
+	secondary := parseCodexWindowUsage(
+		resp.Header.Get("x-codex-secondary-used-percent"),
+		resp.Header.Get("x-codex-secondary-window-minutes"),
+		resp.Header.Get("x-codex-secondary-reset-after-seconds"),
+	)
+	return secondary.valid && codexWindowType(secondary.windowMin) == codexRateLimitWindow5h
+}
+
+func classify429RateLimit(account *auth.Account, body []byte, resp *http.Response, now time.Time) codex429Decision {
+	if account != nil && account.IsPremium5hPlan() {
+		windowType, resetAt, hasWindowReset := classifyCodex429Window(resp, now)
+		exactResetAt, hasExactReset := parseRetryAfterResetAt(body, now)
+
+		switch windowType {
+		case codexRateLimitWindow5h:
+			if hasExactReset {
+				resetAt = exactResetAt
+			} else if !hasWindowReset {
+				resetAt = now.Add(5 * time.Hour)
+			}
+			return codex429Decision{
+				Premium5h: true,
+				ResetAt:   resetAt,
+				Cooldown:  time.Until(resetAt),
+			}
+		case codexRateLimitWindow7d, codexRateLimitWindowShort:
+			// 明确不是 5h 窗口时，保持原有 cooldown 语义。
+		default:
+			if hasExactReset {
+				return codex429Decision{
+					Premium5h: true,
+					ResetAt:   exactResetAt,
+					Cooldown:  time.Until(exactResetAt),
+				}
+			}
+			resetAt = now.Add(5 * time.Hour)
+			return codex429Decision{
+				Premium5h: true,
+				ResetAt:   resetAt,
+				Cooldown:  5 * time.Hour,
+			}
+		}
+	}
+
+	cooldown := compute429Cooldown(account, body, resp)
+	return codex429Decision{Cooldown: cooldown}
+}
+
+// Apply429Cooldown 统一处理 429 对账号状态的影响，premium 5h 场景优先写入显式限流态。
+func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response) codex429Decision {
+	decision := classify429RateLimit(account, body, resp, time.Now())
+	if store == nil || account == nil {
+		return decision
+	}
+	if decision.Premium5h {
+		store.MarkPremium5hRateLimited(account, decision.ResetAt)
+		return decision
+	}
+	store.MarkCooldown(account, decision.Cooldown, "rate_limited")
+	return decision
+}
+
 // applyCooldown 根据上游状态码设置智能冷却
 func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []byte, resp *http.Response) {
 	switch statusCode {
 	case http.StatusTooManyRequests:
-		cooldown := h.compute429Cooldown(account, body, resp)
-		log.Printf("账号 %d 被限速 (plan=%s)，冷却 %v", account.ID(), account.GetPlanType(), cooldown)
-		h.store.MarkCooldown(account, cooldown, "rate_limited")
+		decision := Apply429Cooldown(h.store, account, body, resp)
+		if decision.Premium5h {
+			log.Printf("账号 %d 触发 premium 5h 限流 (plan=%s)，重置时间 %s", account.ID(), account.GetPlanType(), decision.ResetAt.Format(time.RFC3339))
+			return
+		}
+		log.Printf("账号 %d 被限速 (plan=%s)，冷却 %v", account.ID(), account.GetPlanType(), decision.Cooldown)
 	case http.StatusUnauthorized:
 		// 原子标志瞬间置位，阻止其他并发请求再选到该账号
 		atomic.StoreInt32(&account.Disabled, 1)
+
+		if isMissingScopeUnauthorized(body) {
+			log.Printf("账号 %d 收到 missing_scope 401，保留在号池", account.ID())
+			atomic.StoreInt32(&account.Disabled, 0)
+			return
+		}
 
 		if h.store.GetAutoCleanUnauthorized() {
 			// 开启自动清理时，401 立即从号池删除
@@ -1470,6 +1881,10 @@ func (h *Handler) applyStreamFailedCooldown(account *auth.Account, failedData []
 
 // compute429Cooldown 根据计划类型和 Codex 响应精确计算 429 冷却时间
 func (h *Handler) compute429Cooldown(account *auth.Account, body []byte, resp *http.Response) time.Duration {
+	return compute429Cooldown(account, body, resp)
+}
+
+func compute429Cooldown(account *auth.Account, body []byte, resp *http.Response) time.Duration {
 	// 1. 优先使用 Codex 响应体中的精确重置时间
 	if resetDuration := parseRetryAfter(body); resetDuration > 2*time.Minute {
 		// parseRetryAfter 默认返回 2min（无数据），超过 2min 说明解析到了真实的 resets_at/resets_in_seconds
@@ -1487,9 +1902,9 @@ func (h *Handler) compute429Cooldown(account *auth.Account, body []byte, resp *h
 		// Free 只有 7d 窗口，429 = 额度耗尽，冷却 7 天
 		return 7 * 24 * time.Hour
 
-	case "team", "pro", "enterprise":
-		// Team/Pro 有 5h + 7d 双窗口，需要判断是哪个窗口触发了限制
-		return h.detectTeamCooldownWindow(resp)
+	case "team", "teamplus", "pro", "plus", "enterprise":
+		// Team/Pro/Plus 有 5h + 7d 双窗口，需要判断是哪个窗口触发了限制
+		return detectTeamCooldownWindow(resp)
 
 	default:
 		// 未知套餐，保守默认 5 小时
@@ -1497,8 +1912,12 @@ func (h *Handler) compute429Cooldown(account *auth.Account, body []byte, resp *h
 	}
 }
 
-// detectTeamCooldownWindow 通过响应头判断 Team/Pro 账号是哪个窗口触发的限制
+// detectTeamCooldownWindow 通过响应头判断 Team/Pro/Plus 账号是哪个窗口触发的限制
 func (h *Handler) detectTeamCooldownWindow(resp *http.Response) time.Duration {
+	return detectTeamCooldownWindow(resp)
+}
+
+func detectTeamCooldownWindow(resp *http.Response) time.Duration {
 	if resp == nil {
 		return 5 * time.Hour // 保守默认
 	}
@@ -1543,6 +1962,35 @@ func windowMinutesToCooldown(windowMinutes float64) time.Duration {
 	}
 }
 
+// SyncCodexUsageState 解析 Codex 响应头并完成 7d / 5h 快照持久化与 premium 5h 提前限流。
+func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Response) CodexUsageSyncResult {
+	result := CodexUsageSyncResult{}
+	if account == nil || resp == nil {
+		return result
+	}
+
+	result.Used5hHeaders = responseHasCodex5hHeaders(resp)
+	result.UsagePct7d, result.HasUsage7d = parseCodexUsageHeaders(resp, account)
+	if store != nil {
+		if result.HasUsage7d {
+			store.PersistUsageSnapshot(account, result.UsagePct7d)
+		} else if result.Used5hHeaders {
+			store.PersistUsageSnapshot5hOnly(account)
+			result.Persisted5hOnly = true
+		}
+	}
+
+	result.UsagePct5h, result.Reset5hAt, result.HasUsage5h = account.GetUsageSnapshot5h()
+	if result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 {
+		if store != nil {
+			store.MarkPremium5hRateLimited(account, result.Reset5hAt)
+		}
+		result.Premium5hRateLimited = true
+	}
+
+	return result
+}
+
 // parseCodexUsageHeaders 从 Codex 响应头解析 5h/7d 用量百分比
 func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64, bool) {
 	if resp == nil {
@@ -1557,30 +2005,11 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64
 	secondaryWindowStr := resp.Header.Get("x-codex-secondary-window-minutes")
 	secondaryResetStr := resp.Header.Get("x-codex-secondary-reset-after-seconds")
 
-	type windowData struct {
-		usedPct   float64
-		resetSec  float64
-		windowMin float64
-		valid     bool
-	}
-
-	parseWindow := func(usedStr, windowStr, resetStr string) windowData {
-		if usedStr == "" {
-			return windowData{}
-		}
-		return windowData{
-			usedPct:   parseFloat(usedStr),
-			windowMin: parseFloat(windowStr),
-			resetSec:  parseFloat(resetStr),
-			valid:     true,
-		}
-	}
-
-	primary := parseWindow(primaryUsedStr, primaryWindowStr, primaryResetStr)
-	secondary := parseWindow(secondaryUsedStr, secondaryWindowStr, secondaryResetStr)
+	primary := parseCodexWindowUsage(primaryUsedStr, primaryWindowStr, primaryResetStr)
+	secondary := parseCodexWindowUsage(secondaryUsedStr, secondaryWindowStr, secondaryResetStr)
 
 	// 归一化：小窗口 (≤360min) → 5h，大窗口 (>360min) → 7d
-	var w5h, w7d windowData
+	var w5h, w7d codexWindowUsage
 	now := time.Now()
 
 	if primary.valid && secondary.valid {
