@@ -240,7 +240,7 @@ func TestStoreFastSchedulerTracksCooldownTransition(t *testing.T) {
 	store.Release(got)
 }
 
-func TestFastSchedulerPremium5hRateLimitUsesSingleConcurrencyAndRecoversAfterReset(t *testing.T) {
+func TestFastSchedulerPremium5hRateLimitBlocksSchedulingAndRecoversAfterReset(t *testing.T) {
 	acc := &Account{
 		DBID:                1,
 		AccessToken:         "token",
@@ -255,42 +255,33 @@ func TestFastSchedulerPremium5hRateLimitUsesSingleConcurrencyAndRecoversAfterRes
 	scheduler := NewFastScheduler(4)
 	scheduler.Rebuild([]*Account{acc})
 
-	sizes := scheduler.BucketSizes()
-	if sizes[HealthTierRisky] != 1 {
-		t.Fatalf("risky bucket size = %d, want 1", sizes[HealthTierRisky])
-	}
-
-	first := scheduler.Acquire()
-	if first == nil {
-		t.Fatal("first Acquire() returned nil")
-	}
-
-	second := scheduler.Acquire()
-	if second != nil {
-		t.Fatal("second Acquire() should be nil while premium 5h rate limit is active")
+	if got := scheduler.Acquire(); got != nil {
+		t.Fatal("Acquire() returned account during active 5h rate limit, want nil")
 	}
 
 	acc.mu.Lock()
-	acc.Reset5hAt = time.Now().Add(-time.Minute)
+	// guard buffer 最大 89s，用 -3min 保证已过 guard；同时模拟 probe 已刷新用量
+	acc.Reset5hAt = time.Now().Add(-3 * time.Minute)
+	acc.UsageUpdatedAt = time.Now()
 	acc.mu.Unlock()
-	scheduler.Release(first)
+	scheduler.Rebuild([]*Account{acc})
 
-	third := scheduler.Acquire()
-	if third == nil {
-		t.Fatal("third Acquire() returned nil after premium 5h reset expired")
+	first := scheduler.Acquire()
+	if first == nil {
+		t.Fatal("Acquire() returned nil after premium 5h reset expired and probe confirmed")
 	}
-	fourth := scheduler.Acquire()
-	if fourth == nil {
-		t.Fatal("fourth Acquire() returned nil, want recovered concurrency after reset")
+	second := scheduler.Acquire()
+	if second == nil {
+		t.Fatal("second Acquire() returned nil, want recovered concurrency after reset")
 	}
 
-	sizes = scheduler.BucketSizes()
+	sizes := scheduler.BucketSizes()
 	if sizes[HealthTierHealthy] != 1 || sizes[HealthTierRisky] != 0 {
 		t.Fatalf("unexpected bucket sizes after reset recovery: %#v", sizes)
 	}
 
-	scheduler.Release(third)
-	scheduler.Release(fourth)
+	scheduler.Release(first)
+	scheduler.Release(second)
 }
 
 func TestFastSchedulerEnabledFromEnv(t *testing.T) {

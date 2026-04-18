@@ -400,8 +400,12 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 			available = false
 		}
 	}
-	// Free 账号 7d 用量耗尽，不参与调度
+	// Free 账号 7d 用量耗尽，不参与调度（Reset7dAt 到期后 usageExhaustedLocked 自动返回 false）
 	if a.usageExhaustedLocked() {
+		available = false
+	}
+	// Premium 5h 限流期间不参与调度；窗口过期后还需 usage probe 确认用量才放开调度
+	if a.premium5hBlocksSchedulingLocked(now) {
 		available = false
 	}
 

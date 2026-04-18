@@ -148,10 +148,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		ctx = context.Background()
 	}
 
-	// 上游请求超时保护：如果调用方未设置 deadline，包装一个超时 context。
-	// 超时涵盖整个请求生命周期（含 SSE 流读取），设为 10 分钟以容纳长推理响应。
-	// cancel 不能 defer（resp.Body 在返回后仍需读取），也不丢弃：
-	// 仅在出错时立即 cancel 释放资源，成功时由 10 分钟 timer 自然到期。
+	// 上游请求超时保护：如果调用方未设置 deadline，包装一个 10 分钟超时 context
+	// 以覆盖整个请求生命周期（含 SSE 流读取）。
+	// cancel 不能 defer（resp.Body 返回后仍需读取），出错时立即释放；
+	// 成功路径通过把 resp.Body 包装为 cancelOnCloseBody，在 Close() 时释放 ctx 资源。
 	var timeoutCancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		ctx, timeoutCancel = context.WithTimeout(ctx, 10*time.Minute)
@@ -234,7 +234,28 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		return nil, ErrUpstream(0, "请求上游失败", err)
 	}
 
+	if timeoutCancel != nil {
+		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: timeoutCancel}
+	}
 	return resp, nil
+}
+
+// cancelOnCloseBody 在 resp.Body.Close() 时同步释放关联的 context.CancelFunc，
+// 使 ExecuteRequest 的 10 分钟超时 context 能在响应读取结束后立即回收，而不必等 timer 触发。
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnCloseBody) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+	})
+	return err
 }
 
 // ExecuteCompactRequest 向 Codex 上游发送 /responses/compact 请求（非流式压缩接口）

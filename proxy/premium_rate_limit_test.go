@@ -44,11 +44,8 @@ func TestApply429CooldownPremium5hWindowMarksRateLimited(t *testing.T) {
 	if got := acc.RuntimeStatus(); got != "rate_limited" {
 		t.Fatalf("RuntimeStatus() = %q, want %q", got, "rate_limited")
 	}
-	if !acc.IsAvailable() {
-		t.Fatal("IsAvailable() = false, want true while premium 5h limit is active")
-	}
-	if got := acc.GetDynamicConcurrencyLimit(); got != 1 {
-		t.Fatalf("GetDynamicConcurrencyLimit() = %d, want 1", got)
+	if acc.IsAvailable() {
+		t.Fatal("IsAvailable() = true, want false while premium 5h limit is active")
 	}
 }
 

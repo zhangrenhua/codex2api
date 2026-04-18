@@ -536,12 +536,13 @@ func (a *Account) IsAvailable() bool {
 	if a.healthTierLocked() == HealthTierBanned {
 		return false
 	}
-	// Free 账号 7d 用量 >= 100%，视为不可用
+	// Free 账号 7d 用量 >= 100%，视为不可用（Reset7dAt 到期后自动解封）
 	if a.usageExhaustedLocked() {
 		return false
 	}
-	if a.premium5hRateLimitedLocked(time.Now()) {
-		return a.AccessToken != ""
+	// Premium 5h 限流期间不可调度；窗口过期后还需 usage probe 确认用量才放开调度
+	if a.premium5hBlocksSchedulingLocked(time.Now()) {
+		return false
 	}
 	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
 		return false
@@ -554,8 +555,24 @@ func (a *Account) IsAvailable() bool {
 }
 
 // usageExhaustedLocked 判断 Free 账号 7d 用量是否已耗尽（需持有 mu 读锁）
+// 解封条件：1) Reset7dAt + guard buffer 已过；2) usage probe 在此之后已刷新过用量
+// （UsageUpdatedAt > Reset7dAt），避免尚未确认新周期时就恢复调度导致 429 雷群。
+// guard buffer 包含基础 30s（抵抗时钟漂移）+ 基于 DBID 的 0~59s jitter。
+// 注：NeedsUsageProbe 未依赖此方法，post-window 状态下后台探针仍可正常运行。
 func (a *Account) usageExhaustedLocked() bool {
-	return a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") && a.UsagePercent7d >= 100
+	if !a.UsagePercent7dValid || !strings.EqualFold(a.PlanType, "free") {
+		return false
+	}
+	if a.UsagePercent7d < 100 {
+		return false
+	}
+	if a.Reset7dAt.IsZero() {
+		return true
+	}
+	if a.Reset7dAt.Add(rateLimitResetGuard(a.DBID)).After(time.Now()) {
+		return true
+	}
+	return !a.UsageUpdatedAt.After(a.Reset7dAt)
 }
 
 // NeedsRefresh 检查 AT 是否需要刷新（过期前 5 分钟刷新）
