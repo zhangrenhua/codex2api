@@ -1642,6 +1642,42 @@ func (db *DB) SetError(ctx context.Context, id int64, errorMsg string) error {
 	return err
 }
 
+// PurgeDeletedAccounts 物理删除 status='deleted' 的账号
+// cascade=true 时一并删除 usage_logs / account_events 中的关联记录
+// 返回各表受影响行数
+func (db *DB) PurgeDeletedAccounts(ctx context.Context, cascade bool) (accounts int64, logs int64, events int64, err error) {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+
+	if cascade {
+		res, err := tx.ExecContext(ctx, `DELETE FROM usage_logs WHERE account_id IN (SELECT id FROM accounts WHERE status = 'deleted')`)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("删除 usage_logs 失败: %w", err)
+		}
+		logs, _ = res.RowsAffected()
+
+		res, err = tx.ExecContext(ctx, `DELETE FROM account_events WHERE account_id IN (SELECT id FROM accounts WHERE status = 'deleted')`)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("删除 account_events 失败: %w", err)
+		}
+		events, _ = res.RowsAffected()
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE status = 'deleted'`)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("删除 accounts 失败: %w", err)
+	}
+	accounts, _ = res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+	return accounts, logs, events, nil
+}
+
 // BatchSetError 批量标记账号错误状态，分批执行避免 SQL 参数过多
 func (db *DB) BatchSetError(ctx context.Context, ids []int64, errorMsg string) error {
 	status := "error"

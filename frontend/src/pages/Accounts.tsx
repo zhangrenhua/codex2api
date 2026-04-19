@@ -51,6 +51,7 @@ export default function Accounts() {
   const [cleaningBanned, setCleaningBanned] = useState(false)
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [cleaningError, setCleaningError] = useState(false)
+  const [purging, setPurging] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null)
@@ -788,6 +789,27 @@ export default function Accounts() {
     }
   }
 
+  const handlePurgeDeleted = async () => {
+    const confirmed = await confirm({
+      title: t('accounts.purgeDeletedTitle'),
+      description: t('accounts.purgeDeletedDesc'),
+      confirmText: t('accounts.purgeDeletedConfirm'),
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!confirmed) return
+    setPurging(true)
+    try {
+      const res = await api.purgeDeleted(true)
+      showToast(t('accounts.purgeDeletedSuccess', { accounts: res.accounts, logs: res.logs, events: res.events }))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.purgeDeletedFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setPurging(false)
+    }
+  }
+
   const openSchedulerEditor = (account: AccountRow) => {
     setEditingAccount(account)
     setScoreMode(account.score_bias_override === null || account.score_bias_override === undefined ? 'default' : 'custom')
@@ -887,39 +909,47 @@ export default function Accounts() {
           description={t('accounts.description')}
           onRefresh={() => void reload()}
           actions={(
-            <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" disabled={batchTesting} onClick={() => void handleBatchTest()}>
-                <FlaskConical className="size-3" />
-                {batchTesting ? t('accounts.batchTesting') : t('accounts.batchTest')}
-              </Button>
-              <Button variant="outline" size="sm" disabled={cleaningBanned} onClick={() => void handleCleanBanned()}>
-                <Ban className="size-3" />
-                {cleaningBanned ? t('accounts.cleaning') : t('accounts.cleanBanned')}
-              </Button>
-              <Button variant="outline" size="sm" disabled={cleaningRateLimited} onClick={() => void handleCleanRateLimited()}>
-                <Timer className="size-3" />
-                {cleaningRateLimited ? t('accounts.cleaning') : t('accounts.cleanRateLimited')}
-              </Button>
-              <Button variant="outline" size="sm" disabled={cleaningError} onClick={() => void handleCleanError()}>
-                <AlertTriangle className="size-3" />
-                {cleaningError ? t('accounts.cleaning') : t('accounts.cleanError')}
-              </Button>
-              <Button onClick={() => setShowAdd(true)}>
-                <Plus className="size-3.5" />
-                {t('accounts.addAccount')}
-              </Button>
-              <Button variant="outline" disabled={importing} onClick={() => setShowImportPicker(true)}>
-                <Upload className="size-3.5" />
-                {importing ? t('accounts.importing') : t('accounts.importFile')}
-              </Button>
-              <Button variant="outline" disabled={exporting} onClick={() => setShowExportPicker(true)}>
-                <Download className="size-3.5" />
-                {exporting ? t('accounts.exporting') : t('accounts.export')}
-              </Button>
-              <Button variant="outline" disabled={migrating} onClick={() => setShowMigrate(true)}>
-                <ArrowDownToLine className="size-3.5" />
-                {migrating ? t('accounts.migrating') : t('accounts.migrateImport')}
-              </Button>
+            <div className="flex flex-col items-end gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <Button variant="outline" size="sm" disabled={batchTesting} onClick={() => void handleBatchTest()}>
+                  <FlaskConical className="size-3" />
+                  {batchTesting ? t('accounts.batchTesting') : t('accounts.batchTest')}
+                </Button>
+                <Button variant="outline" size="sm" disabled={cleaningBanned} onClick={() => void handleCleanBanned()}>
+                  <Ban className="size-3" />
+                  {cleaningBanned ? t('accounts.cleaning') : t('accounts.cleanBanned')}
+                </Button>
+                <Button variant="outline" size="sm" disabled={cleaningRateLimited} onClick={() => void handleCleanRateLimited()}>
+                  <Timer className="size-3" />
+                  {cleaningRateLimited ? t('accounts.cleaning') : t('accounts.cleanRateLimited')}
+                </Button>
+                <Button variant="outline" size="sm" disabled={cleaningError} onClick={() => void handleCleanError()}>
+                  <AlertTriangle className="size-3" />
+                  {cleaningError ? t('accounts.cleaning') : t('accounts.cleanError')}
+                </Button>
+                <Button variant="destructive" size="sm" disabled={purging} onClick={() => void handlePurgeDeleted()}>
+                  <Trash2 className="size-3" />
+                  {purging ? t('accounts.purgingDeleted') : t('accounts.purgeDeleted')}
+                </Button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Button onClick={() => setShowAdd(true)}>
+                  <Plus className="size-3.5" />
+                  {t('accounts.addAccount')}
+                </Button>
+                <Button variant="outline" disabled={importing} onClick={() => setShowImportPicker(true)}>
+                  <Upload className="size-3.5" />
+                  {importing ? t('accounts.importing') : t('accounts.importFile')}
+                </Button>
+                <Button variant="outline" disabled={exporting} onClick={() => setShowExportPicker(true)}>
+                  <Download className="size-3.5" />
+                  {exporting ? t('accounts.exporting') : t('accounts.export')}
+                </Button>
+                <Button variant="outline" disabled={migrating} onClick={() => setShowMigrate(true)}>
+                  <ArrowDownToLine className="size-3.5" />
+                  {migrating ? t('accounts.migrating') : t('accounts.migrateImport')}
+                </Button>
+              </div>
               <input
                 ref={fileInputRef}
                 type="file"

@@ -108,6 +108,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/clean-banned", h.CleanBanned)
 	api.POST("/accounts/clean-rate-limited", h.CleanRateLimited)
 	api.POST("/accounts/clean-error", h.CleanError)
+	api.POST("/accounts/purge-deleted", h.PurgeDeleted)
 	api.GET("/accounts/export", h.ExportAccounts)
 	api.POST("/accounts/migrate", h.MigrateAccounts)
 	api.GET("/accounts/event-trend", h.GetAccountEventTrend)
@@ -2569,6 +2570,28 @@ func (h *Handler) cleanByStatus(c *gin.Context, targetStatus string) {
 	cleaned := h.store.CleanByRuntimeStatus(ctx, targetStatus)
 
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已清理 %d 个账号", cleaned), "cleaned": cleaned})
+}
+
+// PurgeDeleted 物理删除 status='deleted' 的账号,可选是否连同 usage_logs / account_events 一起清理
+func (h *Handler) PurgeDeleted(c *gin.Context) {
+	cascade := c.DefaultQuery("cascade", "true") != "false"
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	accounts, logs, events, err := h.db.PurgeDeletedAccounts(ctx, cascade)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  fmt.Sprintf("已物理删除 %d 个账号", accounts),
+		"accounts": accounts,
+		"logs":     logs,
+		"events":   events,
+		"cascade":  cascade,
+	})
 }
 
 // ==================== Proxies ====================
