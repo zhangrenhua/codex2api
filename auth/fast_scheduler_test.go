@@ -108,6 +108,30 @@ func TestStoreNextExcludingRespectsAPIKeyWhitelist(t *testing.T) {
 	}
 }
 
+func TestStoreNextExcludingWithFilterRespectsPlanFilter(t *testing.T) {
+	plus := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	plus.PlanType = "plus"
+	pro := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 1)
+	pro.PlanType = "pro"
+
+	store := &Store{
+		accounts:       []*Account{plus, pro},
+		maxConcurrency: 1,
+	}
+
+	got := store.NextExcludingWithFilter(0, nil, func(acc *Account) bool {
+		return acc.GetPlanType() == "pro"
+	})
+	if got == nil {
+		t.Fatal("NextExcludingWithFilter() returned nil")
+	}
+	defer store.Release(got)
+
+	if got.DBID != 2 {
+		t.Fatalf("NextExcludingWithFilter() picked dbID=%d, want 2", got.DBID)
+	}
+}
+
 func TestFastSchedulerAcquireExcludingRespectsAPIKeyWhitelist(t *testing.T) {
 	restricted := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
 	restricted.SetAllowedAPIKeyIDs([]int64{2})
@@ -124,6 +148,28 @@ func TestFastSchedulerAcquireExcludingRespectsAPIKeyWhitelist(t *testing.T) {
 
 	if got.DBID != 2 {
 		t.Fatalf("AcquireExcluding() picked dbID=%d, want 2", got.DBID)
+	}
+}
+
+func TestFastSchedulerAcquireExcludingWithFilterRespectsPlanFilter(t *testing.T) {
+	plus := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	plus.PlanType = "plus"
+	pro := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 1)
+	pro.PlanType = "pro"
+
+	scheduler := NewFastScheduler(1)
+	scheduler.Rebuild([]*Account{plus, pro})
+
+	got := scheduler.AcquireExcludingWithFilter(0, nil, func(acc *Account) bool {
+		return acc.GetPlanType() == "pro"
+	})
+	if got == nil {
+		t.Fatal("AcquireExcludingWithFilter() returned nil")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != 2 {
+		t.Fatalf("AcquireExcludingWithFilter() picked dbID=%d, want 2", got.DBID)
 	}
 }
 

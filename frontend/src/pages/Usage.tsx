@@ -40,7 +40,7 @@ const CLAUDE_MODEL_MAP: Record<string, string> = {
   'claude-haiku-4-5-20251001': 'gpt-5.4-mini',
   'claude-haiku-4-5': 'gpt-5.4-mini',
   'claude-sonnet-4-6': 'gpt-5.3-codex',
-  'claude-sonnet-4-5-20250929': 'gpt-5.2-codex',
+  'claude-sonnet-4-5-20250929': 'gpt-5.2',
   'claude-opus-4-5-20251101': 'gpt-5.3-codex',
   'claude-sonnet-4-5-20250514': 'gpt-5.4',
   'claude-sonnet-4-5': 'gpt-5.4',
@@ -404,7 +404,7 @@ export default function Usage() {
                 placeholder={t('usage.allModels')}
                 options={[
                   { label: t('usage.allModels'), value: '' },
-                  ...['gpt-5.4', 'gpt-5.4-mini', 'gpt-5', 'gpt-5-codex', 'gpt-5-codex-mini', 'gpt-5.1', 'gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5.1-codex-max', 'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.3-codex'].map((m) => ({ label: m, value: m })),
+                  ...['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2', 'gpt-image-2'].map((m) => ({ label: m, value: m })),
                 ]}
               />
 
@@ -419,6 +419,8 @@ export default function Usage() {
                   { label: t('usage.allEndpoints'), value: '' },
                   { label: '/v1/chat/completions', value: '/v1/chat/completions' },
                   { label: '/v1/responses', value: '/v1/responses' },
+                  { label: '/v1/images/generations', value: '/v1/images/generations' },
+                  { label: '/v1/images/edits', value: '/v1/images/edits' },
                   { label: '/v1/messages', value: '/v1/messages' },
                 ]}
               />

@@ -50,6 +50,30 @@ func TestNextForSessionFallsBackWhenBoundAccountExcluded(t *testing.T) {
 	}
 }
 
+func TestNextForSessionWithFilterFallsBackWhenBoundAccountRejected(t *testing.T) {
+	store := &Store{
+		accounts: []*Account{
+			{DBID: 1, AccessToken: "tok-1", PlanType: "pro"},
+			{DBID: 2, AccessToken: "tok-2", PlanType: "plus"},
+		},
+		maxConcurrency: 2,
+	}
+	store.bindSessionAffinity("session-1", store.accounts[1], "http://proxy-2")
+
+	acc, proxyURL := store.NextForSessionWithFilter("session-1", 0, nil, func(acc *Account) bool {
+		return acc.GetPlanType() == "pro"
+	})
+	if acc == nil {
+		t.Fatal("expected fallback account")
+	}
+	if acc.DBID != 1 {
+		t.Fatalf("account DBID = %d, want %d", acc.DBID, 1)
+	}
+	if proxyURL != "" {
+		t.Fatalf("proxyURL = %q, want empty fallback proxy", proxyURL)
+	}
+}
+
 func TestWaitForSessionAvailableReturnsBoundAccount(t *testing.T) {
 	store := &Store{
 		accounts: []*Account{

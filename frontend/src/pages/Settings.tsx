@@ -35,7 +35,7 @@ const DEFAULT_MODEL_MAPPING: Record<string, string> = {
   'claude-haiku-4-5-20251001': 'gpt-5.4-mini',
   'claude-haiku-4-5': 'gpt-5.4-mini',
   'claude-sonnet-4-6': 'gpt-5.3-codex',
-  'claude-sonnet-4-5-20250929': 'gpt-5.2-codex',
+  'claude-sonnet-4-5-20250929': 'gpt-5.2',
   'claude-opus-4-5-20251101': 'gpt-5.3-codex',
 }
 

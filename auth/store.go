@@ -103,6 +103,9 @@ type Account struct {
 	allowedAPIKeySet        map[int64]struct{}
 }
 
+// AccountFilter 用于请求级调度约束，例如按模型限制账号套餐。
+type AccountFilter func(*Account) bool
+
 const (
 	defaultBackgroundRefreshInterval = 2 * time.Minute
 	defaultUsageProbeMaxAge          = 10 * time.Minute
@@ -1617,8 +1620,13 @@ func (s *Store) Next() *Account {
 // NextExcluding 获取下一个可用账号，排除指定的账号 ID 集合
 // 用于重试时避免再次选到已失败（如 401）的账号
 func (s *Store) NextExcluding(apiKeyID int64, exclude map[int64]bool) *Account {
+	return s.NextExcludingWithFilter(apiKeyID, exclude, nil)
+}
+
+// NextExcludingWithFilter 获取下一个可用账号，并应用请求级账号过滤器。
+func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
 	if scheduler := s.getFastScheduler(); scheduler != nil {
-		return scheduler.AcquireExcluding(apiKeyID, exclude)
+		return scheduler.AcquireExcludingWithFilter(apiKeyID, exclude, filter)
 	}
 
 	s.mu.RLock()
@@ -1638,6 +1646,9 @@ func (s *Store) NextExcluding(apiKeyID int64, exclude map[int64]bool) *Account {
 			continue
 		}
 		if !acc.AllowsAPIKey(apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
 			continue
 		}
 
@@ -1712,12 +1723,17 @@ func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
 
 // NextForSession 优先复用已绑定的账号和代理，失败时回退到普通选号。
 func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]bool) (*Account, string) {
+	return s.NextForSessionWithFilter(key, apiKeyID, exclude, nil)
+}
+
+// NextForSessionWithFilter 优先复用已绑定的账号和代理，并应用请求级账号过滤器。
+func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	if s == nil {
 		return nil, ""
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return s.NextExcluding(apiKeyID, exclude), ""
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 	}
 
 	now := time.Now()
@@ -1732,15 +1748,15 @@ func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]boo
 				delete(s.sessionBindings, key)
 			}
 			s.sessionMu.Unlock()
-		} else if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude); acc != nil {
+		} else if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter); acc != nil {
 			return acc, binding.proxyURL
 		}
 	}
 
-	return s.NextExcluding(apiKeyID, exclude), ""
+	return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 }
 
-func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bool) *Account {
+func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
 	if s == nil || id == 0 {
 		return nil
 	}
@@ -1761,6 +1777,9 @@ func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bo
 		return nil
 	}
 	if !target.AllowsAPIKey(apiKeyID) {
+		return nil
+	}
+	if filter != nil && !filter(target) {
 		return nil
 	}
 
@@ -1784,6 +1803,11 @@ func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration, api
 
 // WaitForSessionAvailable waits for a session-preferred account and proxy pair.
 func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool) (*Account, string) {
+	return s.WaitForSessionAvailableWithFilter(ctx, key, timeout, apiKeyID, exclude, nil)
+}
+
+// WaitForSessionAvailableWithFilter waits for an account that satisfies the request-level filter.
+func (s *Store) WaitForSessionAvailableWithFilter(ctx context.Context, key string, timeout time.Duration, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, string) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -1798,7 +1822,7 @@ func (s *Store) WaitForSessionAvailable(ctx context.Context, key string, timeout
 		case <-deadline.C:
 			return nil, ""
 		default:
-			acc, proxyURL := s.NextForSession(key, apiKeyID, exclude)
+			acc, proxyURL := s.NextForSessionWithFilter(key, apiKeyID, exclude, filter)
 			if acc != nil {
 				return acc, proxyURL
 			}

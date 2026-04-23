@@ -38,10 +38,14 @@ type Handler struct {
 }
 
 func (h *Handler) nextAccountForSession(sessionID string, apiKeyID int64, exclude map[int64]bool) (*auth.Account, string) {
+	return h.nextAccountForSessionWithFilter(sessionID, apiKeyID, exclude, nil)
+}
+
+func (h *Handler) nextAccountForSessionWithFilter(sessionID string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter) (*auth.Account, string) {
 	if h == nil || h.store == nil {
 		return nil, ""
 	}
-	return h.store.NextForSession(sessionID, apiKeyID, exclude)
+	return h.store.NextForSessionWithFilter(sessionID, apiKeyID, exclude, filter)
 }
 
 type usageLimitDetails struct {
@@ -104,6 +108,46 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 		return sessionID
 	}
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
+}
+
+const proOnlySparkModel = "gpt-5.3-codex-spark"
+
+func isProOnlyModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), proOnlySparkModel)
+}
+
+func accountFilterForModel(model string) auth.AccountFilter {
+	if !isProOnlyModel(model) {
+		return nil
+	}
+	return func(account *auth.Account) bool {
+		if account == nil {
+			return false
+		}
+		return strings.EqualFold(strings.TrimSpace(account.GetPlanType()), "pro")
+	}
+}
+
+func effectiveRequestModel(body []byte, fallback string) string {
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if model != "" {
+		return model
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func noAvailableAccountMessage(model string) string {
+	if isProOnlyModel(model) {
+		return "无可用 Pro 账号，gpt-5.3-codex-spark 仅支持 Pro 订阅账号"
+	}
+	return "无可用账号，请稍后重试"
+}
+
+func noAvailableAnthropicAccountMessage(model string) string {
+	if isProOnlyModel(model) {
+		return "No available Pro account for gpt-5.3-codex-spark"
+	}
+	return "No available accounts, please retry later"
 }
 
 // NewHandler 创建处理器
@@ -346,6 +390,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.POST("/chat/completions", h.ChatCompletions)
 	v1.POST("/responses", h.Responses)
 	v1.POST("/responses/compact", h.ResponsesCompact)
+	v1.POST("/images/generations", h.ImagesGenerations)
+	v1.POST("/images/edits", h.ImagesEdits)
 	v1.POST("/messages", h.Messages)
 	v1.GET("/models", h.ListModels)
 
@@ -353,6 +399,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/chat/completions", auth, h.ChatCompletions)
 	r.POST("/responses", auth, h.Responses)
 	r.POST("/responses/compact", auth, h.ResponsesCompact)
+	r.POST("/images/generations", auth, h.ImagesGenerations)
+	r.POST("/images/edits", auth, h.ImagesEdits)
 	r.POST("/messages", auth, h.Messages)
 	r.GET("/models", auth, h.ListModels)
 }
@@ -482,6 +530,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	if isImageOnlyModel(model) {
+		sendImageOnlyModelError(c, model)
+		return
+	}
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
@@ -496,6 +548,8 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
+	effectiveModel := effectiveRequestModel(codexBody, model)
+	accountFilter := accountFilterForModel(effectiveModel)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -505,17 +559,17 @@ func (h *Handler) Responses(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession(affinityKey, apiKeyID, excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+					"error": gin.H{"message": noAvailableAccountMessage(effectiveModel), "type": "server_error"},
 				})
 				return
 			}
@@ -844,6 +898,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	if isImageOnlyModel(model) {
+		sendImageOnlyModelError(c, model)
+		return
+	}
 
 	rawBody = normalizeServiceTierField(rawBody)
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
@@ -860,6 +918,8 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	// 准备上游请求体
 	codexBody, _ := PrepareCompactResponsesBody(rawBody)
+	effectiveModel := effectiveRequestModel(codexBody, model)
+	accountFilter := accountFilterForModel(effectiveModel)
 
 	// 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -869,16 +929,16 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession(affinityKey, apiKeyID, excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+					"error": gin.H{"message": noAvailableAccountMessage(effectiveModel), "type": "server_error"},
 				})
 				return
 			}
@@ -1035,6 +1095,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	if model == "" {
 		model = "gpt-5.4"
 	}
+	if isImageOnlyModel(model) {
+		sendImageOnlyModelError(c, model)
+		return
+	}
 
 	// 验证 model 参数
 	if err := security.ValidateModelName(model); err != nil {
@@ -1057,6 +1121,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request translation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
 		return
 	}
+	effectiveModel := effectiveRequestModel(codexBody, model)
+	accountFilter := accountFilterForModel(effectiveModel)
 
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
@@ -1070,17 +1136,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession(affinityKey, apiKeyID, excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+					"error": gin.H{"message": noAvailableAccountMessage(effectiveModel), "type": "server_error"},
 				})
 				return
 			}
@@ -1924,9 +1990,9 @@ func (h *Handler) handleUpstreamError(c *gin.Context, account *auth.Account, sta
 
 // SupportedModels 支持的模型列表（全局共享）
 var SupportedModels = []string{
-	"gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-codex", "gpt-5-codex-mini",
-	"gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-codex-max",
-	"gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex",
+	"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+	"gpt-5.3-codex-spark", "gpt-5.2",
+	"gpt-image-2",
 }
 
 // ListModels 列出可用模型

@@ -205,6 +205,8 @@ Vite 会自动代理 `/api` 和 `/health` 到后端，开发时访问 `http://lo
 | --- | --- |
 | `POST /v1/chat/completions` | Chat Completions 风格入口 |
 | `POST /v1/responses` | Responses 风格入口 |
+| `POST /v1/images/generations` | OpenAI Images 生成入口 |
+| `POST /v1/images/edits` | OpenAI Images 编辑入口 |
 | `GET /v1/models` | 返回可用模型列表 |
 | `GET /health` | 健康检查 |
 

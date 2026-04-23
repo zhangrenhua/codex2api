@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,97 @@ import (
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
+
+func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2"} {
+		if !slices.Contains(SupportedModels, model) {
+			t.Fatalf("SupportedModels missing %q", model)
+		}
+	}
+}
+
+func TestSupportedModelsExcludeBelowGPT52(t *testing.T) {
+	for _, model := range []string{
+		"gpt-5", "gpt-5-codex", "gpt-5-codex-mini",
+		"gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-codex-max",
+		"gpt-5.2-codex",
+	} {
+		if slices.Contains(SupportedModels, model) {
+			t.Fatalf("SupportedModels should not include %q", model)
+		}
+	}
+}
+
+func TestListModelsIncludesLatestRequestedModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	handler := &Handler{}
+
+	handler.ListModels(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	ids := make([]string, 0, len(payload.Data))
+	for _, model := range payload.Data {
+		ids = append(ids, model.ID)
+	}
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2"} {
+		if !slices.Contains(ids, model) {
+			t.Fatalf("/v1/models missing %q in %v", model, ids)
+		}
+	}
+
+	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2-codex"} {
+		if slices.Contains(ids, model) {
+			t.Fatalf("/v1/models should not include %q in %v", model, ids)
+		}
+	}
+}
+
+func TestImageModelIsImageEndpointOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	sendImageOnlyModelError(ctx, "gpt-image-2")
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(recorder.Body.String(), "/v1/images/generations") {
+		t.Fatalf("error body should point to images endpoints: %s", recorder.Body.String())
+	}
+}
+
+func TestAccountFilterForSparkRequiresPro(t *testing.T) {
+	filter := accountFilterForModel("gpt-5.3-codex-spark")
+	if filter == nil {
+		t.Fatal("expected filter for spark model")
+	}
+	if !filter(&auth.Account{PlanType: "pro"}) {
+		t.Fatal("spark filter should allow pro accounts")
+	}
+	if filter(&auth.Account{PlanType: "plus"}) {
+		t.Fatal("spark filter should reject non-pro accounts")
+	}
+	if accountFilterForModel("gpt-5.3-codex") != nil {
+		t.Fatal("non-spark model should not add account filter")
+	}
+}
 
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
