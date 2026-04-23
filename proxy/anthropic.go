@@ -128,7 +128,7 @@ var defaultAnthropicModelMap = map[string]string{
 
 // resolveAnthropicModel 将 Anthropic 模型名解析为 Codex 模型名
 // 优先使用数据库中的动态映射，回退到默认映射
-func resolveAnthropicModel(model string, dynamicMappingJSON string) string {
+func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedModels []string) string {
 	// 1. 尝试动态映射（从系统设置）
 	if dynamicMappingJSON != "" && dynamicMappingJSON != "{}" {
 		var dynamicMap map[string]string
@@ -145,7 +145,7 @@ func resolveAnthropicModel(model string, dynamicMappingJSON string) string {
 	}
 
 	// 3. 允许直接传入 Codex 模型名
-	for _, supported := range SupportedModels {
+	for _, supported := range supportedModels {
 		if model == supported {
 			return model
 		}
@@ -161,8 +161,8 @@ func resolveAnthropicModel(model string, dynamicMappingJSON string) string {
 	}
 
 	// 5. 默认
-	if len(SupportedModels) > 0 {
-		return SupportedModels[0]
+	if len(supportedModels) > 0 {
+		return supportedModels[0]
 	}
 	return "gpt-5.4"
 }
@@ -192,13 +192,19 @@ func fromCodexCallID(codexID string) string {
 // TranslateAnthropicToCodex 将 Anthropic Messages 请求转换为 Codex Responses 格式
 // 返回: (codex 请求体, 原始 Anthropic model 名, error)
 func TranslateAnthropicToCodex(rawJSON []byte, modelMappingJSON string) ([]byte, string, error) {
+	return TranslateAnthropicToCodexWithModels(rawJSON, modelMappingJSON, SupportedModels)
+}
+
+// TranslateAnthropicToCodexWithModels 将 Anthropic Messages 请求转换为 Codex Responses 格式
+// 返回: (codex 请求体, 原始 Anthropic model 名, error)
+func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string, supportedModels []string) ([]byte, string, error) {
 	var req anthropicRequest
 	if err := json.Unmarshal(rawJSON, &req); err != nil {
 		return nil, "", fmt.Errorf("parse anthropic request: %w", err)
 	}
 
 	originalModel := req.Model
-	codexModel := resolveAnthropicModel(req.Model, modelMappingJSON)
+	codexModel := resolveAnthropicModel(req.Model, modelMappingJSON, supportedModels)
 
 	// 构建 input 数组
 	input := buildCodexInput(req.System, req.Messages)

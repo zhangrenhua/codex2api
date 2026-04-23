@@ -501,7 +501,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRules()
-	rules["model"] = append(rules["model"], api.ModelValidator(SupportedModels))
+	rules["model"] = append(rules["model"], api.ModelValidator(h.supportedModelIDs(c.Request.Context())))
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
@@ -873,7 +873,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRules()
-	rules["model"] = append(rules["model"], api.ModelValidator(SupportedModels))
+	rules["model"] = append(rules["model"], api.ModelValidator(h.supportedModelIDs(c.Request.Context())))
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
@@ -1076,7 +1076,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ChatCompletionValidationRules()
-	rules["model"] = append(rules["model"], api.ModelValidator(SupportedModels))
+	rules["model"] = append(rules["model"], api.ModelValidator(h.supportedModelIDs(c.Request.Context())))
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
@@ -1988,18 +1988,16 @@ func (h *Handler) handleUpstreamError(c *gin.Context, account *auth.Account, sta
 	h.sendUpstreamError(c, statusCode, body)
 }
 
-// SupportedModels 支持的模型列表（全局共享）
-var SupportedModels = []string{
-	"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
-	"gpt-5.3-codex-spark", "gpt-5.2",
-	"gpt-image-2",
-}
-
 // ListModels 列出可用模型
 func (h *Handler) ListModels(c *gin.Context) {
-	models := make([]api.Model, 0, len(SupportedModels))
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	modelIDs := h.supportedModelIDs(ctx)
+	models := make([]api.Model, 0, len(modelIDs))
 	now := time.Now().Unix()
-	for _, id := range SupportedModels {
+	for _, id := range modelIDs {
 		models = append(models, api.Model{
 			ID:      id,
 			Object:  "model",
@@ -2008,4 +2006,8 @@ func (h *Handler) ListModels(c *gin.Context) {
 		})
 	}
 	api.SendList(c, "list", models)
+}
+
+func (h *Handler) supportedModelIDs(ctx context.Context) []string {
+	return SupportedModelIDs(ctx, h.db)
 }

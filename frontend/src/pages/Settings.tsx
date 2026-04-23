@@ -1,14 +1,14 @@
 import type { ChangeEvent, ReactNode } from 'react'
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState, setAdminKey } from '../api'
-import { getTimezone, setTimezone } from '../utils/time'
+import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { HealthResponse, SystemSettings } from '../types'
+import type { HealthResponse, ModelInfo, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -25,7 +25,7 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 
-import { Save, Trash2 } from 'lucide-react'
+import { ExternalLink, RefreshCw, Save, Trash2 } from 'lucide-react'
 
 // 默认模型映射
 const DEFAULT_MODEL_MAPPING: Record<string, string> = {
@@ -217,6 +217,10 @@ export default function Settings() {
   const [savingSettings, setSavingSettings] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
   const [modelList, setModelList] = useState<string[]>([])
+  const [modelItems, setModelItems] = useState<ModelInfo[]>([])
+  const [modelsLastSyncedAt, setModelsLastSyncedAt] = useState<string | undefined>()
+  const [modelsSourceURL, setModelsSourceURL] = useState('')
+  const [syncingModels, setSyncingModels] = useState(false)
   const { toast, showToast } = useToast()
 
   const loadSettingsData = useCallback(async () => {
@@ -224,6 +228,9 @@ export default function Settings() {
     setSettingsForm(settings)
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
+    setModelItems(modelsResp.items ?? [])
+    setModelsLastSyncedAt(modelsResp.last_synced_at)
+    setModelsSourceURL(modelsResp.source_url ?? '')
     return {
       health,
     }
@@ -264,12 +271,51 @@ export default function Settings() {
     }
   }
 
+  const handleSyncModels = async () => {
+    setSyncingModels(true)
+    try {
+      const result = await api.syncModels()
+      setModelList(result.models ?? [])
+      setModelItems(result.items ?? [])
+      setModelsLastSyncedAt(result.last_synced_at)
+      setModelsSourceURL(result.source_url ?? '')
+      showToast(t('settings.modelsSyncSuccess', {
+        added: result.added,
+        updated: result.updated,
+        skipped: result.skipped?.length ?? 0,
+      }))
+    } catch (error) {
+      showToast(`${t('settings.modelsSyncFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setSyncingModels(false)
+    }
+  }
+
   const { health } = data
   const isExternalDatabase = settingsForm.database_driver === 'postgres'
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
+  const visibleModelItems = useMemo(() => {
+    if (modelItems.length > 0) {
+      return modelItems
+    }
+    return modelList.map((id) => ({
+      id,
+      enabled: true,
+      category: id.includes('image') ? 'image' : 'codex',
+      source: 'builtin',
+      pro_only: id === 'gpt-5.3-codex-spark',
+      api_key_auth_available: id !== 'gpt-5.5',
+    }))
+  }, [modelItems, modelList])
+  const textModelOptions = visibleModelItems
+    .filter((model) => model.enabled && model.category !== 'image' && !model.id.includes('image'))
+    .map((model) => ({ label: model.id, value: model.id }))
+  const enabledModelCount = visibleModelItems.filter((model) => model.enabled).length
+  const modelsLastSyncedLabel = modelsLastSyncedAt ? formatBeijingTime(modelsLastSyncedAt) : t('settings.modelsNeverSynced')
+  const modelsSourceLabel = modelsSourceURL || 'https://developers.openai.com/codex/models'
   const renderSaveButton = (className?: string) => (
     <Button className={className} onClick={() => void handleSaveSettings()} disabled={savingSettings}>
       <Save className="size-4" />
@@ -356,11 +402,11 @@ export default function Settings() {
             <SettingsCard title={t('settings.scheduler')}>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4">
                 <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
-                  <Select
-                    value={settingsForm.test_model}
-                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, test_model: value }))}
-                    options={modelList.map((model) => ({ label: model, value: model }))}
-                  />
+	                  <Select
+	                    value={settingsForm.test_model}
+	                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, test_model: value }))}
+	                    options={textModelOptions}
+	                  />
                 </SettingField>
                 <SettingField label={t('settings.testConcurrency')} description={t('settings.testConcurrencyRange')}>
                   <Input
@@ -578,17 +624,59 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.8fr)]">
-            <SettingsCard title={t('settings2.modelMapping')} description={t('settings2.modelMappingDesc')}>
-              <ModelMappingEditor
-                value={settingsForm.model_mapping}
-                onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
-              />
-            </SettingsCard>
+	          <div className="grid gap-4 xl:grid-cols-2">
+	            <SettingsCard title={t('settings.modelRegistry')} description={t('settings.modelRegistryDesc')}>
+	              <div className="space-y-4">
+	                <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+	                  <StatusTile label={t('settings.modelsEnabled')}>
+	                    {enabledModelCount}
+	                  </StatusTile>
+	                  <StatusTile label={t('settings.modelsLastSynced')}>
+	                    <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
+	                  </StatusTile>
+	                </div>
+	                <div className="flex flex-wrap items-center justify-between gap-2">
+	                  <a
+	                    href={modelsSourceLabel}
+	                    target="_blank"
+	                    rel="noreferrer"
+	                    className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+	                  >
+	                    <ExternalLink className="size-3.5 shrink-0" />
+	                    <span className="truncate">{modelsSourceLabel}</span>
+	                  </a>
+	                  <Button size="sm" variant="outline" onClick={() => void handleSyncModels()} disabled={syncingModels}>
+	                    <RefreshCw className={cn('size-4', syncingModels && 'animate-spin')} />
+	                    {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
+	                  </Button>
+	                </div>
+	                <div className="flex max-h-[170px] flex-wrap gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-3">
+	                  {visibleModelItems.map((model) => (
+	                    <div key={model.id} className="flex flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
+	                      <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
+	                      <Badge variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'} className="text-[11px]">
+	                        {model.source === 'official_codex_docs' ? t('settings.modelSourceOfficial') : t('settings.modelSourceBuiltin')}
+	                      </Badge>
+	                      {model.pro_only ? <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge> : null}
+	                      {model.category === 'image' ? <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge> : null}
+	                    </div>
+	                  ))}
+	                </div>
+	              </div>
+	            </SettingsCard>
 
-            <SettingsCard title={t('settings.apiEndpoints')}>
-              <div className="data-table-shell">
-                <Table>
+	            <SettingsCard title={t('settings2.modelMapping')} description={t('settings2.modelMappingDesc')}>
+	              <ModelMappingEditor
+	                value={settingsForm.model_mapping}
+	                onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
+	              />
+	            </SettingsCard>
+	          </div>
+
+	          <div className="grid gap-4">
+	            <SettingsCard title={t('settings.apiEndpoints')}>
+	              <div className="data-table-shell">
+	                <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>

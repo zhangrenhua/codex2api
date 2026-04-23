@@ -126,6 +126,7 @@ export default function Usage() {
   const [filterFast, setFilterFast] = useState('')
   const [filterStream, setFilterStream] = useState<'' | 'true' | 'false'>('')
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([])
+  const [modelOptions, setModelOptions] = useState<string[]>([])
   const [apiKeyLoadFailed, setAPIKeyLoadFailed] = useState(false)
   const showFastFilter = false
   const pageSizeOptions = [10, 20, 50, 100]
@@ -196,6 +197,26 @@ export default function Usage() {
   useEffect(() => {
     void loadAPIKeys()
   }, [loadAPIKeys])
+
+  useEffect(() => {
+    let active = true
+    const loadModels = async () => {
+      try {
+        const response = await api.getModels()
+        if (!active) return
+        const models = response.items && response.items.length > 0
+          ? response.items.filter((item) => item.enabled).map((item) => item.id)
+          : response.models ?? []
+        setModelOptions(models)
+      } catch {
+        if (active) setModelOptions([])
+      }
+    }
+    void loadModels()
+    return () => {
+      active = false
+    }
+  }, [])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -411,12 +432,12 @@ export default function Usage() {
                 compact
                 value={filterModel}
                 onValueChange={(v) => { setFilterModel(v); setPage(1) }}
-                placeholder={t('usage.allModels')}
-                options={[
-                  { label: t('usage.allModels'), value: '' },
-                  ...['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2', 'gpt-image-2'].map((m) => ({ label: m, value: m })),
-                ]}
-              />
+	                placeholder={t('usage.allModels')}
+	                options={[
+	                  { label: t('usage.allModels'), value: '' },
+	                  ...modelOptions.map((m) => ({ label: m, value: m })),
+	                ]}
+	              />
 
               {/* 端点下拉 */}
               <Select

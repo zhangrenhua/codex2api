@@ -2309,11 +2309,20 @@ function formatTestOutput(text: string) {
   }
 }
 
-const FALLBACK_TEST_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.3-codex', 'gpt-5.3-codex-spark', 'gpt-5.2']
+const DEFAULT_TEST_MODEL = 'gpt-5.4'
 
 function isConnectionTestModel(model: string) {
   const value = model.trim().toLowerCase()
   return value !== '' && !value.includes('image')
+}
+
+function extractTextModels(modelsResp: Awaited<ReturnType<typeof api.getModels>>) {
+  if (modelsResp.items && modelsResp.items.length > 0) {
+    return modelsResp.items
+      .filter((item) => item.enabled && item.category !== 'image' && !item.id.includes('image'))
+      .map((item) => item.id)
+  }
+  return (modelsResp.models ?? []).filter(isConnectionTestModel)
 }
 
 function uniqueTestModels(models: string[], preferredModel?: string) {
@@ -2322,7 +2331,7 @@ function uniqueTestModels(models: string[], preferredModel?: string) {
   const candidates = [
     preferredModel ?? '',
     ...models,
-    ...FALLBACK_TEST_MODELS,
+    DEFAULT_TEST_MODEL,
   ]
 
   for (const model of candidates) {
@@ -2376,15 +2385,16 @@ function TestConnectionModal({
         const [modelsResp, settings] = await Promise.all([api.getModels(), api.getSettings()])
         if (!active) return
 
-        const preferredModel = isConnectionTestModel(settings.test_model) ? settings.test_model : FALLBACK_TEST_MODELS[0]
-        const nextModels = uniqueTestModels(modelsResp.models ?? [], preferredModel)
-        setModelOptions(nextModels)
-        setSelectedModel((current) => current || nextModels[0] || FALLBACK_TEST_MODELS[0])
-      } catch {
-        if (!active) return
-        const fallbackModels = uniqueTestModels(FALLBACK_TEST_MODELS, FALLBACK_TEST_MODELS[0])
-        setModelOptions(fallbackModels)
-        setSelectedModel((current) => current || fallbackModels[0])
+	        const upstreamModels = extractTextModels(modelsResp)
+	        const preferredModel = isConnectionTestModel(settings.test_model) ? settings.test_model : DEFAULT_TEST_MODEL
+	        const nextModels = uniqueTestModels(upstreamModels, preferredModel)
+	        setModelOptions(nextModels)
+	        setSelectedModel((current) => current || nextModels[0] || DEFAULT_TEST_MODEL)
+	      } catch {
+	        if (!active) return
+	        const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL)
+	        setModelOptions(fallbackModels)
+	        setSelectedModel((current) => current || fallbackModels[0])
       } finally {
         if (active) {
           setModelOptionsReady(true)

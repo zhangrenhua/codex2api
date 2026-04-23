@@ -101,7 +101,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	// 2. 翻译请求: Anthropic → Codex
 	modelMappingJSON := h.store.GetModelMapping()
-	codexBody, originalModel, err := TranslateAnthropicToCodex(rawBody, modelMappingJSON)
+	codexBody, originalModel, err := TranslateAnthropicToCodexWithModels(rawBody, modelMappingJSON, h.supportedModelIDs(c.Request.Context()))
 	if err != nil {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request translation failed: "+err.Error())
 		return

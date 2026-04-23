@@ -73,8 +73,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS system_settings (
-				id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-				max_concurrency INTEGER DEFAULT 2,
+					id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+					max_concurrency INTEGER DEFAULT 2,
 				global_rpm INTEGER DEFAULT 0,
 				test_model TEXT DEFAULT 'gpt-5.4',
 				test_concurrency INTEGER DEFAULT 50,
@@ -92,8 +92,23 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				auto_clean_expired INTEGER DEFAULT 0,
 				proxy_pool_enabled INTEGER DEFAULT 0,
 			fast_scheduler_enabled INTEGER DEFAULT 0,
-			max_retries INTEGER DEFAULT 2,
-			allow_remote_migration INTEGER DEFAULT 0
+				max_retries INTEGER DEFAULT 2,
+				allow_remote_migration INTEGER DEFAULT 0
+			);`,
+		`CREATE TABLE IF NOT EXISTS model_registry (
+			id TEXT PRIMARY KEY,
+			enabled INTEGER DEFAULT 1,
+			category TEXT DEFAULT 'codex',
+			source TEXT DEFAULT 'manual',
+			pro_only INTEGER DEFAULT 0,
+			api_key_auth_available INTEGER DEFAULT 1,
+			last_seen_at TIMESTAMP NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS model_registry_sync (
+			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			source_url TEXT DEFAULT '',
+			last_synced_at TIMESTAMP NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS proxies (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

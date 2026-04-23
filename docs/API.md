@@ -1148,7 +1148,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 #### GET /api/admin/models
 
-获取支持的模型列表。
+获取当前启用的模型列表，并返回模型注册表元数据。
 
 **响应:**
 ```json
@@ -1161,7 +1161,44 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
     "gpt-5.3-codex-spark",
     "gpt-5.2",
     "gpt-image-2"
-  ]
+  ],
+  "items": [
+    {
+      "id": "gpt-5.3-codex-spark",
+      "enabled": true,
+      "category": "codex",
+      "source": "official_codex_docs",
+      "pro_only": true,
+      "api_key_auth_available": true
+    }
+  ],
+  "last_synced_at": "2026-04-24T00:00:00Z",
+  "source_url": "https://developers.openai.com/codex/models"
+}
+```
+
+#### POST /api/admin/models/sync
+
+从 OpenAI 官方 Codex 模型页同步模型注册表。同步只新增或更新模型元数据，不会自动删除本地模型；`gpt-image-2` 始终作为内置图像模型保留。
+
+**响应:**
+```json
+{
+  "added": 0,
+  "updated": 2,
+  "unchanged": 5,
+  "skipped": ["gpt-5.2-codex"],
+  "models": [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2",
+    "gpt-image-2"
+  ],
+  "last_synced_at": "2026-04-24T00:00:00Z",
+  "source_url": "https://developers.openai.com/codex/models"
 }
 ```
 

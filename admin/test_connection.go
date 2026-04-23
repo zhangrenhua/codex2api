@@ -58,8 +58,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 
 	testModel := strings.TrimSpace(c.Query("model"))
 	if testModel == "" {
-		testModel = h.store.GetTestModel()
-	} else if !isSupportedConnectionTestModel(testModel) {
+		testModel = h.connectionTestModel(c.Request.Context())
+	} else if !proxy.IsTextTestModelID(c.Request.Context(), h.db, testModel) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的测试模型: " + testModel})
 		return
 	}
@@ -366,6 +366,18 @@ func isSupportedConnectionTestModel(model string) bool {
 	return false
 }
 
+func (h *Handler) connectionTestModel(ctx context.Context) string {
+	model := strings.TrimSpace(h.store.GetTestModel())
+	if proxy.IsTextTestModelID(ctx, h.db, model) {
+		return model
+	}
+	models := proxy.TextTestModelIDs(ctx, h.db)
+	if len(models) > 0 {
+		return models[0]
+	}
+	return "gpt-5.4"
+}
+
 // BatchTest 批量测试所有账号连接
 // POST /api/admin/accounts/batch-test
 func (h *Handler) BatchTest(c *gin.Context) {
@@ -375,7 +387,7 @@ func (h *Handler) BatchTest(c *gin.Context) {
 		return
 	}
 
-	testModel := h.store.GetTestModel()
+	testModel := h.connectionTestModel(c.Request.Context())
 	payload := buildTestPayload(testModel)
 	concurrency := h.store.GetTestConcurrency()
 

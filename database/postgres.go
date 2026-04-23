@@ -284,9 +284,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
 
-		CREATE TABLE IF NOT EXISTS system_settings (
-			id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			max_concurrency    INT DEFAULT 2,
+			CREATE TABLE IF NOT EXISTS system_settings (
+				id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
 			test_concurrency   INT DEFAULT 50,
@@ -315,12 +315,29 @@ func (db *DB) migrate(ctx context.Context) error {
 		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_refresh_interval_minutes INT DEFAULT 2;
 		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_probe_max_age_minutes INT DEFAULT 10;
 		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS recovery_probe_interval_minutes INT DEFAULT 30;
-		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
-		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
 
-		CREATE TABLE IF NOT EXISTS proxies (
-		id         SERIAL PRIMARY KEY,
-		url        VARCHAR(500) NOT NULL UNIQUE,
+			CREATE TABLE IF NOT EXISTS model_registry (
+				id                     VARCHAR(100) PRIMARY KEY,
+				enabled                BOOLEAN DEFAULT TRUE,
+				category               VARCHAR(50) DEFAULT 'codex',
+				source                 VARCHAR(50) DEFAULT 'manual',
+				pro_only               BOOLEAN DEFAULT FALSE,
+				api_key_auth_available BOOLEAN DEFAULT TRUE,
+				last_seen_at           TIMESTAMPTZ NULL,
+				updated_at             TIMESTAMPTZ DEFAULT NOW()
+			);
+
+			CREATE TABLE IF NOT EXISTS model_registry_sync (
+				id             INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+				source_url     TEXT DEFAULT '',
+				last_synced_at TIMESTAMPTZ NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS proxies (
+			id         SERIAL PRIMARY KEY,
+			url        VARCHAR(500) NOT NULL UNIQUE,
 		label      VARCHAR(255) DEFAULT '',
 		enabled    BOOLEAN DEFAULT TRUE,
 		created_at TIMESTAMPTZ DEFAULT NOW()

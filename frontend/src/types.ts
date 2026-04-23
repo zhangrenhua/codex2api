@@ -210,6 +210,36 @@ export interface SystemSettings {
   resin_platform_name: string
 }
 
+export interface ModelInfo {
+  id: string
+  enabled: boolean
+  category: string
+  source: string
+  pro_only: boolean
+  api_key_auth_available: boolean
+  last_seen_at?: string
+  updated_at?: string
+}
+
+export interface ModelsResponse {
+  models: string[]
+  items?: ModelInfo[]
+  last_synced_at?: string
+  source_url: string
+  warning?: string
+}
+
+export interface ModelSyncResponse {
+  added: number
+  updated: number
+  unchanged: number
+  skipped: string[]
+  models: string[]
+  items: ModelInfo[]
+  last_synced_at: string
+  source_url: string
+}
+
 export interface CPAExportEntry {
   type: string
   email: string
