@@ -9,6 +9,7 @@ import SchedulerBoard from './pages/SchedulerBoard'
 import Settings from './pages/Settings'
 import Guide from './pages/Guide'
 import ApiReference from './pages/ApiReference'
+import APIKeys from './pages/APIKeys'
 import Usage from './pages/Usage'
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/api-keys" element={<APIKeys />} />
           <Route path="/proxies" element={<Proxies />} />
           <Route path="/ops" element={<Operations />} />
           <Route path="/ops/scheduler" element={<SchedulerBoard />} />

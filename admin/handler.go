@@ -104,6 +104,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/reset-status", h.ResetAccountStatus)
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
+	api.GET("/accounts/:id/auth-json", h.GetAccountAuthJSON)
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/batch-reset-status", h.BatchResetStatus)
 	api.POST("/accounts/clean-banned", h.CleanBanned)
@@ -2429,6 +2430,82 @@ type cpaExportEntry struct {
 	AccessToken  string `json:"access_token"`
 	LastRefresh  string `json:"last_refresh"`
 	RefreshToken string `json:"refresh_token"`
+}
+
+type accountAuthJSONTokens struct {
+	IDToken      string `json:"id_token"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	AccountID    string `json:"account_id"`
+}
+
+type accountAuthJSON struct {
+	AuthMode     string                `json:"auth_mode"`
+	OpenAIAPIKey *string               `json:"OPENAI_API_KEY"`
+	Tokens       accountAuthJSONTokens `json:"tokens"`
+	LastRefresh  string                `json:"last_refresh"`
+}
+
+// GetAccountAuthJSON 生成单账号可用于 Codex CLI 的 auth.json。
+func (h *Handler) GetAccountAuthJSON(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	row, err := h.db.GetAccountByID(ctx, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(c, http.StatusNotFound, "账号不存在")
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
+		return
+	}
+
+	refreshToken := row.GetCredential("refresh_token")
+	accessToken := row.GetCredential("access_token")
+	idToken := row.GetCredential("id_token")
+	accountID := row.GetCredential("account_id")
+	if refreshToken == "" {
+		writeError(c, http.StatusBadRequest, "该账号没有 refresh_token，无法生成 auth.json")
+		return
+	}
+	if accessToken == "" || idToken == "" {
+		writeError(c, http.StatusBadRequest, "账号缺少 access_token 或 id_token，请先刷新账号后再生成 auth.json")
+		return
+	}
+	if accountID == "" {
+		if info := auth.ParseIDToken(idToken); info != nil {
+			accountID = info.ChatGPTAccountID
+		}
+	}
+	if accountID == "" {
+		if info := auth.ParseAccessToken(accessToken); info != nil {
+			accountID = info.ChatGPTAccountID
+		}
+	}
+	if accountID == "" {
+		writeError(c, http.StatusBadRequest, "账号缺少 account_id，请先刷新账号后再生成 auth.json")
+		return
+	}
+
+	c.Header("Content-Disposition", `attachment; filename="auth.json"`)
+	c.JSON(http.StatusOK, accountAuthJSON{
+		AuthMode:     "chatgpt",
+		OpenAIAPIKey: nil,
+		Tokens: accountAuthJSONTokens{
+			IDToken:      idToken,
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+			AccountID:    accountID,
+		},
+		LastRefresh: row.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // ExportAccounts 导出账号（CPA JSON 格式）

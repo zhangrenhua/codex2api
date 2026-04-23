@@ -46,7 +46,7 @@ func TestBuildImagesResponsesRequestIncludesEditImages(t *testing.T) {
 }
 
 func TestCollectImagesResponseBuildsOpenAIImagePayload(t *testing.T) {
-	upstream := `data: {"type":"response.completed","response":{"created_at":1710000000,"usage":{"input_tokens":5,"output_tokens":9},"tool_usage":{"image_gen":{"images":1}},"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","quality":"high","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"aGVsbG8=","revised_prompt":"draw a cat","output_format":"png"}]}}` + "\n\n"
+	upstream := `data: {"type":"response.completed","response":{"created_at":1710000000,"usage":{"input_tokens":5,"output_tokens":9},"tool_usage":{"image_gen":{"images":1,"input_tokens":34,"output_tokens":1756}},"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","quality":"high","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"aGVsbG8=","revised_prompt":"draw a cat","output_format":"png"}]}}` + "\n\n"
 
 	out, usage, imageCount, err := collectImagesResponse(strings.NewReader(upstream), "b64_json", "gpt-image-2")
 	if err != nil {
@@ -55,8 +55,8 @@ func TestCollectImagesResponseBuildsOpenAIImagePayload(t *testing.T) {
 	if imageCount != 1 {
 		t.Fatalf("imageCount = %d, want 1", imageCount)
 	}
-	if usage == nil || usage.InputTokens != 5 || usage.OutputTokens != 9 {
-		t.Fatalf("usage = %#v, want input=5 output=9", usage)
+	if usage == nil || usage.InputTokens != 34 || usage.OutputTokens != 1756 {
+		t.Fatalf("usage = %#v, want image usage input=34 output=1756", usage)
 	}
 	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "aGVsbG8=" {
 		t.Fatalf("b64_json = %q, want aGVsbG8=", got)

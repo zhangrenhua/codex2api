@@ -145,3 +145,50 @@ func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 		}
 	}
 }
+
+func TestSQLiteUsageLogsTimeRangeUsesUTCStorage(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	createdUTC := time.Date(2026, 4, 23, 20, 6, 0, 0, time.UTC)
+	if _, err := db.conn.ExecContext(ctx, `
+		INSERT INTO usage_logs (
+			account_id, endpoint, inbound_endpoint, upstream_endpoint, model,
+			status_code, total_tokens, input_tokens, output_tokens, created_at
+		)
+		VALUES (1, '/v1/images/generations', '/v1/images/generations', '/v1/responses', 'gpt-image-2',
+			200, 1790, 34, 1756, $1)
+	`, sqliteTimeParam(createdUTC)); err != nil {
+		t.Fatalf("insert usage log 返回错误: %v", err)
+	}
+
+	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
+	localCreated := createdUTC.In(shanghai)
+	page, err := db.ListUsageLogsByTimeRangePaged(ctx, UsageLogFilter{
+		Start:    localCreated.Add(-1 * time.Hour),
+		End:      localCreated.Add(1 * time.Hour),
+		Page:     1,
+		PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListUsageLogsByTimeRangePaged 返回错误: %v", err)
+	}
+	if page.Total != 1 {
+		t.Fatalf("page.Total = %d, want %d", page.Total, 1)
+	}
+	if len(page.Logs) != 1 {
+		t.Fatalf("len(page.Logs) = %d, want %d", len(page.Logs), 1)
+	}
+	if got := page.Logs[0].InboundEndpoint; got != "/v1/images/generations" {
+		t.Fatalf("InboundEndpoint = %q, want /v1/images/generations", got)
+	}
+	if got := page.Logs[0].Model; got != "gpt-image-2" {
+		t.Fatalf("Model = %q, want gpt-image-2", got)
+	}
+}

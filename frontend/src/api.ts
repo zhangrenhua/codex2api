@@ -93,6 +93,30 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await res.json()) as T
 }
 
+async function requestBlob(path: string, options: RequestInit = {}): Promise<Blob> {
+  const headers = new Headers(options.headers)
+
+  const adminKey = getAdminKey()
+  if (adminKey) {
+    headers.set('X-Admin-Key', adminKey)
+  }
+
+  const res = await fetch(BASE + path, {
+    ...options,
+    headers,
+  })
+
+  if (!res.ok) {
+    const body = await res.text()
+    if (res.status === 401) {
+      resetAdminAuthState()
+    }
+    throw new Error(extractAdminErrorMessage(body, res.status))
+  }
+
+  return res.blob()
+}
+
 export const api = {
   getStats: () => request<StatsResponse>('/stats'),
   getAccounts: () => request<AccountsResponse>('/accounts'),
@@ -182,6 +206,8 @@ export const api = {
     if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))
     return request<CPAExportEntry[]>(`/accounts/export?${sp.toString()}`)
   },
+  downloadAccountAuthJSON: (id: number) =>
+    requestBlob(`/accounts/${id}/auth-json`),
   migrateAccounts: (data: { url: string; admin_key: string }) =>
     request<{ message: string; total: number; imported: number; duplicate: number; failed: number }>(
       '/accounts/migrate', { method: 'POST', body: JSON.stringify(data) }),

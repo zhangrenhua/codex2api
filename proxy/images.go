@@ -747,7 +747,17 @@ func extractImagesFromResponsesCompleted(payload []byte, fallbackModel string) (
 	if usage := gjson.GetBytes(payload, "response.tool_usage.image_gen"); usage.Exists() && usage.IsObject() {
 		usageRaw = []byte(usage.Raw)
 	}
-	return results, createdAt, usageRaw, firstMeta, extractUsageFromResult(gjson.GetBytes(payload, "response.usage")), nil
+	usage := extractUsageFromResult(gjson.GetBytes(payload, "response.usage"))
+	if len(usageRaw) > 0 {
+		if imageUsage := extractUsageFromResult(gjson.ParseBytes(usageRaw)); hasTokenUsage(imageUsage) {
+			usage = imageUsage
+		}
+	}
+	return results, createdAt, usageRaw, firstMeta, usage, nil
+}
+
+func hasTokenUsage(usage *UsageInfo) bool {
+	return usage != nil && (usage.InputTokens > 0 || usage.OutputTokens > 0 || usage.TotalTokens > 0)
 }
 
 func extractImageFromOutputItemDone(payload []byte, fallbackModel string) (imageCallResult, bool) {

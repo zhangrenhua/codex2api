@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,14 +56,20 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		return
 	}
 
+	testModel := strings.TrimSpace(c.Query("model"))
+	if testModel == "" {
+		testModel = h.store.GetTestModel()
+	} else if !isSupportedConnectionTestModel(testModel) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的测试模型: " + testModel})
+		return
+	}
+
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 	c.Writer.Flush()
-
-	testModel := h.store.GetTestModel()
 
 	// 发送 test_start
 	sendTestEvent(c, testEvent{Type: "test_start", Model: testModel})
@@ -96,7 +103,11 @@ func (h *Handler) TestConnection(c *gin.Context) {
 
 	// 解析 SSE 流
 	hasContent := false
-	_ = proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
+	gotTerminal := false
+	sentTerminal := false
+	var lastUpstreamEvent []byte
+	readErr := proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
+		lastUpstreamEvent = append(lastUpstreamEvent[:0], data...)
 		eventType := gjson.GetBytes(data, "type").String()
 
 		switch eventType {
@@ -106,7 +117,49 @@ func (h *Handler) TestConnection(c *gin.Context) {
 				hasContent = true
 				sendTestEvent(c, testEvent{Type: "content", Text: delta})
 			}
+		case "response.output_text.done":
+			if !hasContent {
+				text := gjson.GetBytes(data, "text").String()
+				if text != "" {
+					hasContent = true
+					sendTestEvent(c, testEvent{Type: "content", Text: text})
+				}
+			}
+		case "response.content_part.done":
+			if !hasContent {
+				text := gjson.GetBytes(data, "part.text").String()
+				if text != "" {
+					hasContent = true
+					sendTestEvent(c, testEvent{Type: "content", Text: text})
+				}
+			}
+		case "response.output_item.done":
+			if !hasContent {
+				text := extractOutputItemText(gjson.GetBytes(data, "item"))
+				if text != "" {
+					hasContent = true
+					sendTestEvent(c, testEvent{Type: "content", Text: text})
+				}
+			}
 		case "response.completed":
+			gotTerminal = true
+			if status := gjson.GetBytes(data, "response.status").String(); status == "failed" || status == "incomplete" {
+				sentTerminal = true
+				sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 "+status)})
+				return false
+			}
+			if !hasContent {
+				text := extractCompletedOutputText(data)
+				if text != "" {
+					hasContent = true
+					sendTestEvent(c, testEvent{Type: "content", Text: text})
+				}
+			}
+			if !hasContent {
+				sentTerminal = true
+				sendTestEvent(c, testEvent{Type: "error", Error: formatNoOutputUpstreamError(data)})
+				return false
+			}
 			// 测试成功即重置冷却状态，用量限制由调度器自行判断
 			if !usageState.Premium5hRateLimited && (!usageState.HasUsage7d || usageState.UsagePct7d < 100) {
 				h.store.ClearCooldown(account)
@@ -121,20 +174,28 @@ func (h *Handler) TestConnection(c *gin.Context) {
 				Text: fmt.Sprintf("\n\n--- 耗时 %dms ---", duration),
 			})
 			sendTestEvent(c, testEvent{Type: "test_complete", Success: true})
+			sentTerminal = true
 			return false
 		case "response.failed":
-			errMsg := gjson.GetBytes(data, "response.status_details.error.message").String()
-			if errMsg == "" {
-				errMsg = "上游返回 response.failed"
-			}
-			sendTestEvent(c, testEvent{Type: "error", Error: errMsg})
+			gotTerminal = true
+			sentTerminal = true
+			sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 response.failed")})
+			return false
+		case "error":
+			gotTerminal = true
+			sentTerminal = true
+			sendTestEvent(c, testEvent{Type: "error", Error: formatUpstreamTestError(data, "上游返回 error 事件")})
 			return false
 		}
 		return true
 	})
 
-	if !hasContent {
-		sendTestEvent(c, testEvent{Type: "error", Error: "未收到模型输出"})
+	if readErr != nil && !sentTerminal {
+		sendTestEvent(c, testEvent{Type: "error", Error: "读取上游流失败: " + readErr.Error()})
+		return
+	}
+	if !gotTerminal && !sentTerminal {
+		sendTestEvent(c, testEvent{Type: "error", Error: formatMissingTerminalUpstreamError(lastUpstreamEvent)})
 	}
 }
 
@@ -179,6 +240,130 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func extractCompletedOutputText(data []byte) string {
+	if text := gjson.GetBytes(data, "response.output_text").String(); text != "" {
+		return text
+	}
+	return extractOutputItemText(gjson.GetBytes(data, "response"))
+}
+
+func extractOutputItemText(item gjson.Result) string {
+	var b strings.Builder
+	writeTextFromOutputItem(&b, item)
+	return b.String()
+}
+
+func writeTextFromOutputItem(b *strings.Builder, item gjson.Result) {
+	if !item.Exists() {
+		return
+	}
+	switch item.Get("type").String() {
+	case "output_text", "text":
+		b.WriteString(item.Get("text").String())
+	case "message", "assistant":
+		writeTextFromContentArray(b, item.Get("content"))
+	default:
+		if output := item.Get("output"); output.IsArray() {
+			output.ForEach(func(_, child gjson.Result) bool {
+				writeTextFromOutputItem(b, child)
+				return true
+			})
+		}
+		writeTextFromContentArray(b, item.Get("content"))
+	}
+}
+
+func writeTextFromContentArray(b *strings.Builder, content gjson.Result) {
+	if !content.IsArray() {
+		return
+	}
+	content.ForEach(func(_, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		if partType == "output_text" || partType == "text" {
+			b.WriteString(part.Get("text").String())
+		}
+		return true
+	})
+}
+
+func formatUpstreamTestError(data []byte, fallback string) string {
+	msg := firstNonEmptyGJSONString(data,
+		"response.status_details.error.message",
+		"response.error.message",
+		"error.message",
+		"message",
+		"response.incomplete_details.reason",
+		"response.status_details.message",
+	)
+	if msg == "" {
+		msg = fallback
+	}
+
+	code := firstNonEmptyGJSONString(data,
+		"response.status_details.error.code",
+		"response.error.code",
+		"error.code",
+	)
+	if code != "" && !strings.Contains(msg, code) {
+		msg += " (code: " + code + ")"
+	}
+
+	return formatUpstreamEventDetail(msg, data)
+}
+
+func formatNoOutputUpstreamError(data []byte) string {
+	msg := "上游已完成但没有返回文本输出"
+	if status := gjson.GetBytes(data, "response.status").String(); status != "" && status != "completed" {
+		msg = "上游响应状态: " + status
+	}
+	if reason := gjson.GetBytes(data, "response.incomplete_details.reason").String(); reason != "" {
+		msg += " (" + reason + ")"
+	}
+	return formatUpstreamEventDetail(msg, data)
+}
+
+func formatMissingTerminalUpstreamError(lastEvent []byte) string {
+	if len(lastEvent) == 0 {
+		return "上游流结束但未收到任何事件"
+	}
+	return formatUpstreamEventDetail("上游流提前结束，未收到 response.completed 或 response.failed", lastEvent)
+}
+
+func firstNonEmptyGJSONString(data []byte, paths ...string) string {
+	for _, path := range paths {
+		if value := strings.TrimSpace(gjson.GetBytes(data, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func formatUpstreamEventDetail(message string, data []byte) string {
+	if len(data) == 0 {
+		return message
+	}
+	detail := string(data)
+	var parsed any
+	if err := json.Unmarshal(data, &parsed); err == nil {
+		if pretty, err := json.MarshalIndent(parsed, "", "  "); err == nil {
+			detail = string(pretty)
+		}
+	}
+	return message + "\n\n上游事件:\n" + truncate(detail, 3000)
+}
+
+func isSupportedConnectionTestModel(model string) bool {
+	if strings.Contains(strings.ToLower(model), "image") {
+		return false
+	}
+	for _, supported := range proxy.SupportedModels {
+		if model == supported {
+			return true
+		}
+	}
+	return false
 }
 
 // BatchTest 批量测试所有账号连接

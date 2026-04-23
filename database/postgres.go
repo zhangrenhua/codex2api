@@ -1269,6 +1269,7 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 
 // ListUsageLogsByTimeRange 按时间范围查询请求日志
 func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time) ([]*UsageLog, error) {
+	startArg, endArg := db.timeRangeArgs(start, end)
 	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
 	            COALESCE(u.input_tokens, 0), COALESCE(u.output_tokens, 0), COALESCE(u.reasoning_tokens, 0),
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
@@ -1280,7 +1281,7 @@ func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time
 	           WHERE u.created_at >= $1 AND u.created_at <= $2
 	             AND u.status_code <> 499
 	           ORDER BY u.created_at ASC`
-	rows, err := db.conn.QueryContext(ctx, query, start, end)
+	rows, err := db.conn.QueryContext(ctx, query, startArg, endArg)
 	if err != nil {
 		return nil, err
 	}
@@ -1337,7 +1338,8 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 
 	// 动态拼接 WHERE 条件
 	where := `u.created_at >= $1 AND u.created_at <= $2 AND u.status_code <> 499`
-	args := []interface{}{f.Start, f.End}
+	startArg, endArg := db.timeRangeArgs(f.Start, f.End)
+	args := []interface{}{startArg, endArg}
 	paramIdx := 3
 
 	if f.Email != "" {
@@ -1473,7 +1475,7 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 	WHERE created_at >= $1
 	GROUP BY account_id
 	`
-	rows, err := db.conn.QueryContext(ctx, query, since)
+	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
 	if err != nil {
 		return nil, err
 	}
@@ -1548,6 +1550,58 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
+}
+
+// GetAccountByID 获取未删除账号的完整数据库行。
+func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error) {
+	query := `
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
+		FROM accounts
+		WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
+		LIMIT 1
+	`
+	a := &AccountRow{}
+	var credRaw interface{}
+	var cooldownUntilRaw interface{}
+	var createdAtRaw interface{}
+	var updatedAtRaw interface{}
+	err := db.conn.QueryRowContext(ctx, query, id).Scan(
+		&a.ID,
+		&a.Name,
+		&a.Platform,
+		&a.Type,
+		&credRaw,
+		&a.ProxyURL,
+		&a.Status,
+		&a.CooldownReason,
+		&cooldownUntilRaw,
+		&a.ErrorMessage,
+		&a.Locked,
+		&a.ScoreBiasOverride,
+		&a.BaseConcurrencyOverride,
+		&createdAtRaw,
+		&updatedAtRaw,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("查询账号失败: %w", err)
+	}
+	a.Credentials = decodeCredentials(credRaw)
+	a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
+	if err != nil {
+		return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
+	}
+	a.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("解析 created_at 失败: %w", err)
+	}
+	a.UpdatedAt, err = parseDBTimeValue(updatedAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("解析 updated_at 失败: %w", err)
+	}
+	return a, nil
 }
 
 // UpdateAccountSchedulerConfig 更新账号调度配置。

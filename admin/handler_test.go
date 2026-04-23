@@ -145,6 +145,99 @@ func TestRefreshAccountReturnsRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestGetAccountAuthJSONRejectsInvalidID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: "bad-id"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/bad-id/auth-json", nil)
+
+	handler.GetAccountAuthJSON(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	assertErrorMessage(t, recorder, "无效的账号 ID")
+}
+
+func TestGetAccountAuthJSONReturnsCodexAuthFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	accountID := insertTestAccount(t, db)
+	if err := db.UpdateCredentials(context.Background(), accountID, map[string]interface{}{
+		"id_token":     "id_test",
+		"access_token": "access_test",
+		"account_id":   "account_test",
+	}); err != nil {
+		t.Fatalf("seed credentials: %v", err)
+	}
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/admin/accounts/%d/auth-json", accountID), nil)
+
+	handler.GetAccountAuthJSON(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Disposition"); got != `attachment; filename="auth.json"` {
+		t.Fatalf("Content-Disposition = %q, want auth.json attachment", got)
+	}
+
+	var payload struct {
+		AuthMode     string  `json:"auth_mode"`
+		OpenAIAPIKey *string `json:"OPENAI_API_KEY"`
+		Tokens       struct {
+			IDToken      string `json:"id_token"`
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			AccountID    string `json:"account_id"`
+		} `json:"tokens"`
+		LastRefresh string `json:"last_refresh"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.AuthMode != "chatgpt" {
+		t.Fatalf("auth_mode = %q, want chatgpt", payload.AuthMode)
+	}
+	if payload.OpenAIAPIKey != nil {
+		t.Fatalf("OPENAI_API_KEY = %q, want null", *payload.OpenAIAPIKey)
+	}
+	if payload.Tokens.IDToken != "id_test" || payload.Tokens.AccessToken != "access_test" || payload.Tokens.RefreshToken != "rt_test" || payload.Tokens.AccountID != "account_test" {
+		t.Fatalf("tokens = %+v, want seeded credentials", payload.Tokens)
+	}
+	if payload.LastRefresh == "" {
+		t.Fatal("last_refresh is empty")
+	}
+}
+
+func TestGetAccountAuthJSONRejectsIncompleteTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	accountID := insertTestAccount(t, db)
+	handler := &Handler{db: db}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/admin/accounts/%d/auth-json", accountID), nil)
+
+	handler.GetAccountAuthJSON(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	assertErrorMessage(t, recorder, "账号缺少 access_token 或 id_token，请先刷新账号后再生成 auth.json")
+}
+
 func TestGetUsageLogsRejectsInvalidAPIKeyID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
