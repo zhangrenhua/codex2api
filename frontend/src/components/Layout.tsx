@@ -1,6 +1,6 @@
 import { type PropsWithChildren, type ReactNode, useState } from 'react'
-import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe, BookOpen, FileCode2, KeyRound } from 'lucide-react'
+import { NavLink, useLocation } from 'react-router-dom'
+import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe, BookOpen, FileCode2, KeyRound, Image as ImageIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
 import { useTheme } from '../hooks/useTheme'
@@ -11,6 +11,7 @@ type NavDef = {
   labelKey: string
   icon: ReactNode
   end?: boolean
+  activePrefix?: string
 }
 
 const navDefs: NavDef[] = [
@@ -18,6 +19,7 @@ const navDefs: NavDef[] = [
   { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" /> },
   { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[18px]" /> },
   { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[18px]" /> },
+  { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[18px]" />, activePrefix: '/images' },
   { to: '/ops', labelKey: 'nav.ops', icon: <Server className="size-[18px]" />, end: true },
   { to: '/ops/scheduler', labelKey: 'nav.scheduler', icon: <Workflow className="size-[18px]" />, end: true },
   { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
@@ -27,6 +29,7 @@ const navDefs: NavDef[] = [
 ]
 
 export default function Layout({ children }: PropsWithChildren) {
+  const location = useLocation()
   const { theme, toggle } = useTheme()
   const { t, i18n } = useTranslation()
   const { hasUpdate, latestVersion } = useVersionCheck()
@@ -42,6 +45,16 @@ export default function Layout({ children }: PropsWithChildren) {
     const next = i18n.language === 'zh' ? 'en' : 'zh'
     i18n.changeLanguage(next)
     localStorage.setItem('lang', next)
+  }
+
+  const isNavActive = (item: NavDef) => {
+    if (item.activePrefix) {
+      return location.pathname === item.activePrefix || location.pathname.startsWith(`${item.activePrefix}/`)
+    }
+    if (item.end) {
+      return location.pathname === item.to
+    }
+    return location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
   }
 
   return (
@@ -76,23 +89,24 @@ export default function Layout({ children }: PropsWithChildren) {
               <span className="mb-1 px-2 text-[11px] font-bold uppercase text-muted-foreground">
                 {t('nav.console')}
               </span>
-              {navDefs.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    `flex items-center gap-2.5 min-h-10 px-3 py-2 border rounded-lg text-[14px] font-semibold transition-colors duration-150 ${
-                      isActive
+              {navDefs.map((item) => {
+                const active = isNavActive(item)
+                return (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    className={`flex items-center gap-2.5 min-h-10 px-3 py-2 border rounded-lg text-[14px] font-semibold transition-colors duration-150 ${
+                      active
                         ? 'bg-primary/10 border-primary/20 text-primary'
                         : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-                    }`
-                  }
-                >
-                  {item.icon}
-                  <span>{t(item.labelKey)}</span>
-                </NavLink>
-              ))}
+                    }`}
+                  >
+                    {item.icon}
+                    <span>{t(item.labelKey)}</span>
+                  </NavLink>
+                )
+              })}
             </nav>
 
             {/* Footer */}
@@ -168,23 +182,24 @@ export default function Layout({ children }: PropsWithChildren) {
 
         {/* Mobile bottom nav */}
         <nav className="fixed left-3 right-3 bottom-3 z-40 hidden max-lg:flex gap-1 overflow-x-auto rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur-[20px] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="Mobile navigation">
-          {navDefs.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                `flex min-w-[74px] flex-col items-center justify-center gap-1 min-h-[54px] px-2 py-1.5 border rounded-lg text-center text-[10px] font-bold transition-colors duration-150 ${
-                  isActive
+          {navDefs.map((item) => {
+            const active = isNavActive(item)
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={`flex min-w-[74px] flex-col items-center justify-center gap-1 min-h-[54px] px-2 py-1.5 border rounded-lg text-center text-[10px] font-bold transition-colors duration-150 ${
+                  active
                     ? 'bg-primary/10 border-primary/20 text-primary'
                     : 'border-transparent text-muted-foreground'
-                }`
-              }
-            >
-              {item.icon}
-              <span>{t(item.labelKey)}</span>
-            </NavLink>
-          ))}
+                }`}
+              >
+                {item.icon}
+                <span>{t(item.labelKey)}</span>
+              </NavLink>
+            )
+          })}
         </nav>
       </div>
     </div>

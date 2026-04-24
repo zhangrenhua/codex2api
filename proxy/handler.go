@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -380,6 +381,114 @@ func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries
 	return true
 }
 
+func imageGenerationOutputKey(item gjson.Result) string {
+	if key := strings.TrimSpace(item.Get("id").String()); key != "" {
+		return key
+	}
+	result := strings.TrimSpace(item.Get("result").String())
+	if result == "" {
+		return ""
+	}
+	return strings.TrimSpace(item.Get("output_format").String()) + "|" + result
+}
+
+func extractResponseImageGenerationOutput(data []byte, seen map[string]struct{}) (json.RawMessage, bool) {
+	if len(data) == 0 || !gjson.ValidBytes(data) {
+		return nil, false
+	}
+	if gjson.GetBytes(data, "type").String() != "response.output_item.done" {
+		return nil, false
+	}
+	item := gjson.GetBytes(data, "item")
+	if !item.Exists() || !item.IsObject() || item.Get("type").String() != "image_generation_call" {
+		return nil, false
+	}
+	if strings.TrimSpace(item.Get("result").String()) == "" {
+		return nil, false
+	}
+	key := imageGenerationOutputKey(item)
+	if key != "" && seen != nil {
+		if _, ok := seen[key]; ok {
+			return nil, false
+		}
+		seen[key] = struct{}{}
+	}
+	raw := []byte(item.Raw)
+	var output map[string]any
+	if err := json.Unmarshal(raw, &output); err == nil && addImageStatsToMap(output) {
+		if annotated, err := json.Marshal(output); err == nil {
+			raw = annotated
+		}
+	}
+	return json.RawMessage(raw), true
+}
+
+func appendMissingResponseImageOutputs(responseJSON []byte, imageOutputs []json.RawMessage) []byte {
+	if len(responseJSON) == 0 {
+		return responseJSON
+	}
+	var response map[string]any
+	if err := json.Unmarshal(responseJSON, &response); err != nil {
+		return responseJSON
+	}
+
+	seen := make(map[string]struct{})
+	changed := false
+	outputs, _ := response["output"].([]any)
+	for _, rawOutput := range outputs {
+		outputMap, ok := rawOutput.(map[string]any)
+		if !ok {
+			continue
+		}
+		if firstNonEmptyAnyString(outputMap["type"]) != "image_generation_call" {
+			continue
+		}
+		outputBytes, err := json.Marshal(outputMap)
+		if err != nil {
+			continue
+		}
+		item := gjson.ParseBytes(outputBytes)
+		if key := imageGenerationOutputKey(item); key != "" {
+			seen[key] = struct{}{}
+		}
+		if addImageStatsToMap(outputMap) {
+			changed = true
+		}
+	}
+
+	for _, rawImage := range imageOutputs {
+		if len(rawImage) == 0 || !gjson.ValidBytes(rawImage) {
+			continue
+		}
+		item := gjson.ParseBytes(rawImage)
+		key := imageGenerationOutputKey(item)
+		if key != "" {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		var decoded any
+		if err := json.Unmarshal(rawImage, &decoded); err != nil {
+			continue
+		}
+		if outputMap, ok := decoded.(map[string]any); ok {
+			addImageStatsToMap(outputMap)
+		}
+		outputs = append(outputs, decoded)
+		changed = true
+	}
+	if !changed {
+		return responseJSON
+	}
+	response["output"] = outputs
+	merged, err := json.Marshal(response)
+	if err != nil {
+		return responseJSON
+	}
+	return merged
+}
+
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	auth := h.authMiddleware()
@@ -403,6 +512,18 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/images/edits", auth, h.ImagesEdits)
 	r.POST("/messages", auth, h.Messages)
 	r.GET("/models", auth, h.ListModels)
+
+	codexDirect := r.Group("/backend-api/codex")
+	codexDirect.Use(auth)
+	codexDirect.POST("/responses", h.Responses)
+	codexDirect.POST("/responses/*subpath", func(c *gin.Context) {
+		subpath := strings.TrimSpace(c.Param("subpath"))
+		if subpath == "/compact" || strings.HasPrefix(subpath, "/compact/") {
+			h.ResponsesCompact(c)
+			return
+		}
+		h.Responses(c)
+	})
 }
 
 // authMiddleware API Key 鉴权中间件（增强版，带安全日志）
@@ -530,10 +651,6 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
-	if isImageOnlyModel(model) {
-		sendImageOnlyModelError(c, model)
-		return
-	}
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
@@ -548,6 +665,10 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
+	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
+		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
+		return
+	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
 	accountFilter := accountFilterForModel(effectiveModel)
 
@@ -673,6 +794,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		var writeErr error
 		wroteAnyBody := false
 		var responseJSON []byte
+		var imageLogInfo imageUsageLogInfo
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -705,6 +827,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				if eventType == "response.output_text.delta" {
 					deltaCharCount += len(parsed.Get("delta").String())
 				}
+				if image, ok := extractImageFromOutputItemDone(data, model); ok {
+					imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
+				}
 
 				// 提取 usage + service_tier
 				if eventType == "response.completed" {
@@ -731,9 +856,14 @@ func (h *Handler) Responses(c *gin.Context) {
 		} else {
 			// 非流式收集
 			var lastResponseData []byte
+			imageOutputs := make([]json.RawMessage, 0, 1)
+			seenImageOutputs := make(map[string]struct{})
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
+				if imageOutput, ok := extractResponseImageGenerationOutput(data, seenImageOutputs); ok {
+					imageOutputs = append(imageOutputs, imageOutput)
+				}
 				if !ttftRecorded && eventType == "response.output_text.delta" {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
@@ -765,6 +895,8 @@ func (h *Handler) Responses(c *gin.Context) {
 				responseObj := gjson.GetBytes(lastResponseData, "response")
 				if responseObj.Exists() {
 					responseJSON = []byte(responseObj.Raw)
+					responseJSON = appendMissingResponseImageOutputs(responseJSON, imageOutputs)
+					imageLogInfo = imageUsageLogInfoFromResponseJSON(responseJSON)
 				}
 			}
 		}
@@ -837,6 +969,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
 		}
+		applyImageUsageLogInfo(logInput, imageLogInfo)
 		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
@@ -918,6 +1051,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	// 准备上游请求体
 	codexBody, _ := PrepareCompactResponsesBody(rawBody)
+	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
+		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
+		return
+	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
 	accountFilter := accountFilterForModel(effectiveModel)
 

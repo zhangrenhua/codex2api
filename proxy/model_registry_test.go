@@ -52,8 +52,10 @@ func TestApplyOfficialCodexModelSyncMergesWithBuiltinImageModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyOfficialCodexModelSync error: %v", err)
 	}
-	if !slices.Contains(result.Models, "gpt-image-2") {
-		t.Fatalf("sync should keep builtin image model, got %v", result.Models)
+	for _, model := range []string{"gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
+		if !slices.Contains(result.Models, model) {
+			t.Fatalf("sync should keep builtin image model %q, got %v", model, result.Models)
+		}
 	}
 	if !slices.Contains(result.Skipped, "gpt-5.2-codex") {
 		t.Fatalf("sync should skip gpt-5.2-codex, got %v", result.Skipped)

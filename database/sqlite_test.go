@@ -36,10 +36,52 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked"} {
+	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_logs 缺少列 %q", name)
 		}
+	}
+}
+
+func TestUsageLogsPersistImageMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:        1,
+		Endpoint:         "/v1/images/generations",
+		InboundEndpoint:  "/v1/images/generations",
+		UpstreamEndpoint: "/v1/responses",
+		Model:            "gpt-image-2-4k",
+		StatusCode:       200,
+		DurationMs:       1200,
+		ImageCount:       1,
+		ImageWidth:       3840,
+		ImageHeight:      2160,
+		ImageBytes:       2457600,
+		ImageFormat:      "png",
+		ImageSize:        "3840x2160",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len(logs) = %d, want 1", len(logs))
+	}
+	got := logs[0]
+	if got.ImageCount != 1 || got.ImageWidth != 3840 || got.ImageHeight != 2160 || got.ImageBytes != 2457600 || got.ImageFormat != "png" || got.ImageSize != "3840x2160" {
+		t.Fatalf("image metadata = %#v", got)
 	}
 }
 

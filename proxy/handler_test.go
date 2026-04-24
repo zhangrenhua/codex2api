@@ -17,7 +17,7 @@ import (
 )
 
 func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
 		if !slices.Contains(SupportedModels, model) {
 			t.Fatalf("SupportedModels missing %q", model)
 		}
@@ -67,6 +67,11 @@ func TestListModelsIncludesLatestRequestedModels(t *testing.T) {
 			t.Fatalf("/v1/models missing %q in %v", model, ids)
 		}
 	}
+	for _, model := range []string{"gpt-image-2-2k", "gpt-image-2-4k"} {
+		if !slices.Contains(ids, model) {
+			t.Fatalf("/v1/models missing image alias %q in %v", model, ids)
+		}
+	}
 
 	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2-codex"} {
 		if slices.Contains(ids, model) {
@@ -88,6 +93,108 @@ func TestImageModelIsImageEndpointOnly(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "/v1/images/generations") {
 		t.Fatalf("error body should point to images endpoints: %s", recorder.Body.String())
+	}
+}
+
+func TestRegisterRoutesIncludesCodexDirectResponses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	handler := &Handler{}
+
+	handler.RegisterRoutes(router)
+
+	routes := make(map[string]bool)
+	for _, route := range router.Routes() {
+		if route.Method == http.MethodPost {
+			routes[route.Path] = true
+		}
+	}
+
+	for _, path := range []string{
+		"/backend-api/codex/responses",
+		"/backend-api/codex/responses/*subpath",
+	} {
+		if !routes[path] {
+			t.Fatalf("expected POST route %s to be registered; routes=%v", path, routes)
+		}
+	}
+}
+
+func TestExtractResponseImageGenerationOutputDedupes(t *testing.T) {
+	event := []byte(`{"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}}`)
+	seen := make(map[string]struct{})
+
+	raw, ok := extractResponseImageGenerationOutput(event, seen)
+	if !ok {
+		t.Fatal("expected image_generation_call output to be extracted")
+	}
+
+	var item map[string]any
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatalf("decode extracted image item: %v", err)
+	}
+	if item["result"] != tinyPNGBase64 {
+		t.Fatalf("result = %v, want tiny PNG", item["result"])
+	}
+	if item["bytes"] != float64(tinyPNGByteSize(t)) || item["width"] != float64(1) || item["height"] != float64(1) {
+		t.Fatalf("image stats = bytes:%v width:%v height:%v", item["bytes"], item["width"], item["height"])
+	}
+
+	if _, ok := extractResponseImageGenerationOutput(event, seen); ok {
+		t.Fatal("expected duplicate image_generation_call output to be ignored")
+	}
+}
+
+func TestAppendMissingResponseImageOutputsAddsOutputItemDone(t *testing.T) {
+	response := []byte(`{"id":"resp_1"}`)
+	imageOutputs := []json.RawMessage{
+		json.RawMessage(`{"id":"ig_1","type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}`),
+	}
+
+	got := appendMissingResponseImageOutputs(response, imageOutputs)
+
+	var payload struct {
+		Output []map[string]any `json:"output"`
+	}
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("decode merged response: %v", err)
+	}
+	if len(payload.Output) != 1 {
+		t.Fatalf("output count = %d, want 1; body=%s", len(payload.Output), got)
+	}
+	if payload.Output[0]["type"] != "image_generation_call" || payload.Output[0]["result"] != tinyPNGBase64 {
+		t.Fatalf("unexpected output item: %#v", payload.Output[0])
+	}
+	if payload.Output[0]["bytes"] != float64(tinyPNGByteSize(t)) || payload.Output[0]["width"] != float64(1) || payload.Output[0]["height"] != float64(1) {
+		t.Fatalf("image stats = bytes:%v width:%v height:%v", payload.Output[0]["bytes"], payload.Output[0]["width"], payload.Output[0]["height"])
+	}
+
+	gotAgain := appendMissingResponseImageOutputs(got, imageOutputs)
+	if err := json.Unmarshal(gotAgain, &payload); err != nil {
+		t.Fatalf("decode merged response again: %v", err)
+	}
+	if len(payload.Output) != 1 {
+		t.Fatalf("duplicate output count = %d, want 1; body=%s", len(payload.Output), gotAgain)
+	}
+}
+
+func TestAppendMissingResponseImageOutputsAnnotatesExistingOutput(t *testing.T) {
+	response := []byte(`{"id":"resp_1","output":[{"id":"ig_1","type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}]}`)
+
+	got := appendMissingResponseImageOutputs(response, nil)
+
+	var payload struct {
+		Output []map[string]any `json:"output"`
+	}
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("decode annotated response: %v", err)
+	}
+	if len(payload.Output) != 1 {
+		t.Fatalf("output count = %d, want 1; body=%s", len(payload.Output), got)
+	}
+	if payload.Output[0]["bytes"] != float64(tinyPNGByteSize(t)) || payload.Output[0]["width"] != float64(1) || payload.Output[0]["height"] != float64(1) {
+		t.Fatalf("image stats = bytes:%v width:%v height:%v", payload.Output[0]["bytes"], payload.Output[0]["width"], payload.Output[0]["height"])
 	}
 }
 

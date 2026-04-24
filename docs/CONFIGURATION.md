@@ -60,6 +60,12 @@ Codex2API 采用三层配置架构：
 | `DATABASE_NAME` | 是 | - | PostgreSQL 数据库名 |
 | `DATABASE_SSLMODE` | 否 | disable | SSL 模式: disable/require/verify-full |
 
+### 生图工作台
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `IMAGE_ASSET_DIR` | 否 | `/data/images` | 管理台生图工作台保存图片文件的服务器目录；Docker 部署建议持久化 `/data` |
+
 #### SQLite 模式
 
 | 变量 | 必填 | 默认值 | 说明 |
@@ -191,6 +197,7 @@ TZ=Asia/Shanghai
 # 数据库配置 (SQLite)
 DATABASE_DRIVER=sqlite
 DATABASE_PATH=/data/codex2api.db
+IMAGE_ASSET_DIR=/data/images
 
 # 缓存配置 (内存)
 CACHE_DRIVER=memory

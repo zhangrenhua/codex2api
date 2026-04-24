@@ -16,6 +16,7 @@ import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Table,
   TableBody,
@@ -99,7 +100,63 @@ function formatUsageAPIKeyLabel(name?: string, maskedKey?: string): string {
 
 function isImageUsageLog(log: UsageLog): boolean {
   const endpoint = log.inbound_endpoint || log.endpoint || ''
-  return endpoint.includes('/images/') || log.model?.startsWith('gpt-image-')
+  return endpoint.includes('/images/') || log.model?.startsWith('gpt-image-') || (log.image_count ?? 0) > 0
+}
+
+function formatImageBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`
+}
+
+function imageResolution(log: UsageLog): string {
+  if (log.image_width > 0 && log.image_height > 0) {
+    return `${log.image_width}×${log.image_height}`
+  }
+  return log.image_size || ''
+}
+
+function ImageUsageBadge({ log }: { log: UsageLog }) {
+  const { t } = useTranslation()
+  const rows = [
+    { label: t('usage.imageTooltipCount'), value: log.image_count > 0 ? String(log.image_count) : '' },
+    { label: t('usage.imageTooltipResolution'), value: imageResolution(log) },
+    { label: t('usage.imageTooltipBytes'), value: formatImageBytes(log.image_bytes) },
+    { label: t('usage.imageTooltipFormat'), value: log.image_format?.toUpperCase() || '' },
+    { label: t('usage.imageTooltipRequestSize'), value: log.image_size || '' },
+  ].filter((row) => row.value)
+  const title = rows.length > 0
+    ? rows.map((row) => `${row.label}: ${row.value}`).join('\n')
+    : t('usage.imageTooltipNoDetails')
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-label={title}
+          tabIndex={0}
+          className="inline-flex w-fit shrink-0 cursor-help items-center justify-center gap-0.5 rounded-full border border-transparent bg-cyan-500/12 px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap text-cyan-700 transition-colors dark:bg-cyan-500/20 dark:text-cyan-300 [&>svg]:pointer-events-none [&>svg]:size-3"
+        >
+          <ImageIcon className="size-3" />
+          {t('usage.imageRequest')}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="max-w-64 p-2.5">
+        <div className="space-y-1.5">
+          <div className="font-semibold">{t('usage.imageTooltipTitle')}</div>
+          {rows.length > 0 ? rows.map((row) => (
+            <div key={row.label} className="flex min-w-44 items-center justify-between gap-4">
+              <span className="text-background/70">{row.label}</span>
+              <span className="font-geist-mono tabular-nums">{row.value}</span>
+            </div>
+          )) : (
+            <div className="text-background/70">{t('usage.imageTooltipNoDetails')}</div>
+          )}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
 }
 
 const usageTableHeadClass = 'text-[12px] font-semibold'
@@ -522,6 +579,7 @@ export default function Usage() {
               emptyDescription={hasActiveFilters ? t('usage.emptyFilteredDesc') : t('usage.emptyDesc')}
             >
               <div className="data-table-shell">
+                <TooltipProvider>
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -575,13 +633,7 @@ export default function Usage() {
                               </Badge>
                             )}
                             {isImageUsageLog(log) && (
-                              <Badge
-                                variant="outline"
-                                className="text-[11px] font-semibold gap-0.5 border-transparent bg-cyan-500/12 text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-300"
-                              >
-                                <ImageIcon className="size-3" />
-                                {t('usage.imageRequest')}
-                              </Badge>
+                              <ImageUsageBadge log={log} />
                             )}
                             {log.service_tier === 'fast' && (
                               <Badge
@@ -672,6 +724,7 @@ export default function Usage() {
                     })}
                   </TableBody>
                 </Table>
+                </TooltipProvider>
               </div>
               <Pagination
                 page={currentPage}

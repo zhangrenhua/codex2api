@@ -66,6 +66,8 @@ var builtinModelInfos = []ModelInfo{
 	modelInfoForID("gpt-5.3-codex-spark", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.2", ModelSourceBuiltin),
 	modelInfoForID("gpt-image-2", ModelSourceBuiltin),
+	modelInfoForID("gpt-image-2-2k", ModelSourceBuiltin),
+	modelInfoForID("gpt-image-2-4k", ModelSourceBuiltin),
 }
 
 // SupportedModels is the static built-in fallback list. Runtime handlers use

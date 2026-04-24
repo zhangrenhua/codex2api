@@ -46,6 +46,7 @@ type Handler struct {
 	cacheDriver    string
 	cacheLabel     string
 	adminSecretEnv string
+	imageProxy     *proxy.Handler
 
 	// 图表聚合内存缓存（10秒 TTL）
 	chartCacheMu   sync.RWMutex
@@ -76,9 +77,15 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		cacheDriver:    tc.Driver(),
 		cacheLabel:     tc.Label(),
 		adminSecretEnv: adminSecretEnv,
+		imageProxy:     proxy.NewHandler(store, db, nil, nil),
 		chartCacheData: make(map[string]*chartCacheEntry),
 	}
 	handler.refreshAccount = handler.refreshSingleAccount
+	if db != nil {
+		if err := db.MarkInterruptedImageJobs(context.Background()); err != nil {
+			log.Printf("标记中断生图任务失败: %v", err)
+		}
+	}
 	return handler
 }
 
@@ -126,6 +133,16 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings", h.UpdateSettings)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
+	api.GET("/image-prompts", h.ListImagePromptTemplates)
+	api.POST("/image-prompts", h.CreateImagePromptTemplate)
+	api.PATCH("/image-prompts/:id", h.UpdateImagePromptTemplate)
+	api.DELETE("/image-prompts/:id", h.DeleteImagePromptTemplate)
+	api.POST("/images/jobs", h.CreateImageGenerationJob)
+	api.GET("/images/jobs", h.ListImageGenerationJobs)
+	api.GET("/images/jobs/:id", h.GetImageGenerationJob)
+	api.GET("/images/assets", h.ListImageAssets)
+	api.GET("/images/assets/:id/file", h.GetImageAssetFile)
+	api.DELETE("/images/assets/:id", h.DeleteImageAsset)
 	api.GET("/proxies", h.ListProxies)
 	api.POST("/proxies", h.AddProxies)
 	api.DELETE("/proxies/:id", h.DeleteProxy)

@@ -64,7 +64,13 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			service_tier TEXT DEFAULT '',
 			api_key_id INTEGER DEFAULT 0,
 			api_key_name TEXT DEFAULT '',
-			api_key_masked TEXT DEFAULT ''
+			api_key_masked TEXT DEFAULT '',
+			image_count INTEGER DEFAULT 0,
+			image_width INTEGER DEFAULT 0,
+			image_height INTEGER DEFAULT 0,
+			image_bytes INTEGER DEFAULT 0,
+			image_format TEXT DEFAULT '',
+			image_size TEXT DEFAULT ''
 		);`,
 		`CREATE TABLE IF NOT EXISTS api_keys (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +133,55 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			source TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS image_prompt_templates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			model TEXT DEFAULT '',
+			size TEXT DEFAULT '',
+			quality TEXT DEFAULT '',
+			output_format TEXT DEFAULT '',
+			background TEXT DEFAULT '',
+			style TEXT DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '[]',
+			favorite INTEGER DEFAULT 0,
+			usage_count INTEGER DEFAULT 0,
+			last_used_at TIMESTAMP NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS image_generation_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			status TEXT NOT NULL DEFAULT 'queued',
+			prompt TEXT NOT NULL DEFAULT '',
+			params_json TEXT NOT NULL DEFAULT '{}',
+			api_key_id INTEGER DEFAULT 0,
+			api_key_name TEXT DEFAULT '',
+			api_key_masked TEXT DEFAULT '',
+			error_message TEXT DEFAULT '',
+			duration_ms INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			started_at TIMESTAMP NULL,
+			completed_at TIMESTAMP NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS image_assets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL DEFAULT 0,
+			template_id INTEGER DEFAULT 0,
+			filename TEXT NOT NULL DEFAULT '',
+			storage_path TEXT NOT NULL DEFAULT '',
+			mime_type TEXT NOT NULL DEFAULT '',
+			bytes INTEGER DEFAULT 0,
+			width INTEGER DEFAULT 0,
+			height INTEGER DEFAULT 0,
+			model TEXT DEFAULT '',
+			requested_size TEXT DEFAULT '',
+			actual_size TEXT DEFAULT '',
+			quality TEXT DEFAULT '',
+			output_format TEXT DEFAULT '',
+			revised_prompt TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {
@@ -157,6 +212,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "api_key_id", "INTEGER DEFAULT 0"},
 		{"usage_logs", "api_key_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "api_key_masked", "TEXT DEFAULT ''"},
+		{"usage_logs", "image_count", "INTEGER DEFAULT 0"},
+		{"usage_logs", "image_width", "INTEGER DEFAULT 0"},
+		{"usage_logs", "image_height", "INTEGER DEFAULT 0"},
+		{"usage_logs", "image_bytes", "INTEGER DEFAULT 0"},
+		{"usage_logs", "image_format", "TEXT DEFAULT ''"},
+		{"usage_logs", "image_size", "TEXT DEFAULT ''"},
 		{"system_settings", "pg_max_conns", "INTEGER DEFAULT 50"},
 		{"system_settings", "redis_pool_size", "INTEGER DEFAULT 30"},
 		{"system_settings", "auto_clean_unauthorized", "INTEGER DEFAULT 0"},
@@ -197,6 +258,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_prompt_templates_updated ON image_prompt_templates(updated_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_prompt_templates_favorite ON image_prompt_templates(favorite, updated_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_created ON image_generation_jobs(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_status ON image_generation_jobs(status, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_assets_created ON image_assets(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);`,
 	}
 	for _, stmt := range indexStatements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {

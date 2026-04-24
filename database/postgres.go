@@ -105,6 +105,12 @@ type usageLogEntry struct {
 	APIKeyID         int64
 	APIKeyName       string
 	APIKeyMasked     string
+	ImageCount       int
+	ImageWidth       int
+	ImageHeight      int
+	ImageBytes       int
+	ImageFormat      string
+	ImageSize        string
 }
 
 // New 创建数据库连接并自动建表。
@@ -274,6 +280,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_id INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_name VARCHAR(255) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS api_key_masked VARCHAR(64) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_count INT DEFAULT 0;
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_width INT DEFAULT 0;
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_height INT DEFAULT 0;
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_bytes INT DEFAULT 0;
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_format VARCHAR(20) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_size VARCHAR(32) DEFAULT '';
 
 	CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);
 
@@ -355,6 +367,64 @@ func (db *DB) migrate(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);
 	CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);
+
+	CREATE TABLE IF NOT EXISTS image_prompt_templates (
+		id            SERIAL PRIMARY KEY,
+		name          VARCHAR(255) NOT NULL DEFAULT '',
+		prompt        TEXT NOT NULL DEFAULT '',
+		model         VARCHAR(100) DEFAULT '',
+		size          VARCHAR(32) DEFAULT '',
+		quality       VARCHAR(32) DEFAULT '',
+		output_format VARCHAR(32) DEFAULT '',
+		background    VARCHAR(32) DEFAULT '',
+		style         VARCHAR(64) DEFAULT '',
+		tags          TEXT NOT NULL DEFAULT '[]',
+		favorite      BOOLEAN DEFAULT FALSE,
+		usage_count   INT DEFAULT 0,
+		last_used_at  TIMESTAMPTZ NULL,
+		created_at    TIMESTAMPTZ DEFAULT NOW(),
+		updated_at    TIMESTAMPTZ DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_image_prompt_templates_updated ON image_prompt_templates(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_image_prompt_templates_favorite ON image_prompt_templates(favorite, updated_at);
+
+	CREATE TABLE IF NOT EXISTS image_generation_jobs (
+		id             SERIAL PRIMARY KEY,
+		status         VARCHAR(32) NOT NULL DEFAULT 'queued',
+		prompt         TEXT NOT NULL DEFAULT '',
+		params_json    TEXT NOT NULL DEFAULT '{}',
+		api_key_id     INT DEFAULT 0,
+		api_key_name   VARCHAR(255) DEFAULT '',
+		api_key_masked VARCHAR(64) DEFAULT '',
+		error_message  TEXT DEFAULT '',
+		duration_ms    INT DEFAULT 0,
+		created_at     TIMESTAMPTZ DEFAULT NOW(),
+		started_at     TIMESTAMPTZ NULL,
+		completed_at   TIMESTAMPTZ NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_created ON image_generation_jobs(created_at);
+	CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_status ON image_generation_jobs(status, created_at);
+
+	CREATE TABLE IF NOT EXISTS image_assets (
+		id             SERIAL PRIMARY KEY,
+		job_id         INT NOT NULL DEFAULT 0,
+		template_id    INT DEFAULT 0,
+		filename       VARCHAR(255) NOT NULL DEFAULT '',
+		storage_path   TEXT NOT NULL DEFAULT '',
+		mime_type      VARCHAR(100) NOT NULL DEFAULT '',
+		bytes          INT DEFAULT 0,
+		width          INT DEFAULT 0,
+		height         INT DEFAULT 0,
+		model          VARCHAR(100) DEFAULT '',
+		requested_size VARCHAR(32) DEFAULT '',
+		actual_size    VARCHAR(32) DEFAULT '',
+		quality        VARCHAR(32) DEFAULT '',
+		output_format  VARCHAR(32) DEFAULT '',
+		revised_prompt TEXT DEFAULT '',
+		created_at     TIMESTAMPTZ DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_image_assets_created ON image_assets(created_at);
+	CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);
 	`
 	_, err := db.conn.ExecContext(ctx, query)
 	if err != nil {
@@ -738,6 +808,12 @@ type UsageLog struct {
 	APIKeyID         int64     `json:"api_key_id"`
 	APIKeyName       string    `json:"api_key_name"`
 	APIKeyMasked     string    `json:"api_key_masked"`
+	ImageCount       int       `json:"image_count"`
+	ImageWidth       int       `json:"image_width"`
+	ImageHeight      int       `json:"image_height"`
+	ImageBytes       int       `json:"image_bytes"`
+	ImageFormat      string    `json:"image_format"`
+	ImageSize        string    `json:"image_size"`
 	AccountEmail     string    `json:"account_email"`
 	CreatedAt        time.Time `json:"created_at"`
 }
@@ -767,6 +843,12 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		APIKeyID:         log.APIKeyID,
 		APIKeyName:       log.APIKeyName,
 		APIKeyMasked:     log.APIKeyMasked,
+		ImageCount:       log.ImageCount,
+		ImageWidth:       log.ImageWidth,
+		ImageHeight:      log.ImageHeight,
+		ImageBytes:       log.ImageBytes,
+		ImageFormat:      log.ImageFormat,
+		ImageSize:        log.ImageSize,
 	})
 	bufLen := len(db.logBuf)
 	db.logMu.Unlock()
@@ -801,6 +883,12 @@ type UsageLogInput struct {
 	APIKeyID         int64
 	APIKeyName       string
 	APIKeyMasked     string
+	ImageCount       int
+	ImageWidth       int
+	ImageHeight      int
+	ImageBytes       int
+	ImageFormat      string
+	ImageSize        string
 }
 
 // startLogFlusher 启动后台定时 flush 协程（每 5 秒一次）
@@ -854,8 +942,8 @@ func (db *DB) flushLogs() {
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO usage_logs (account_id, endpoint, model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 		  input_tokens, output_tokens, reasoning_tokens, first_token_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, cached_tokens, service_tier,
-		  api_key_id, api_key_name, api_key_masked)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`)
+		  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`)
 	if err != nil {
 		tx.Rollback()
 		log.Printf("批量写入日志失败（准备语句）: %v", err)
@@ -866,7 +954,7 @@ func (db *DB) flushLogs() {
 	for _, e := range batch {
 		if _, err := stmt.ExecContext(ctx, e.AccountID, e.Endpoint, e.Model, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.CachedTokens, e.ServiceTier,
-			e.APIKeyID, e.APIKeyName, e.APIKeyMasked); err != nil {
+			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize); err != nil {
 			tx.Rollback()
 			log.Printf("批量写入日志失败（执行）: %v", err)
 			return
@@ -884,13 +972,13 @@ func (db *DB) flushLogs() {
 }
 
 // batchInsertLogs 使用 PostgreSQL 的批量插入优化
-// 分批处理以避免 PostgreSQL 65535 参数限制（每行 21 个参数，每批最多 3120 行）
+// 分批处理以避免 PostgreSQL 65535 参数限制（每行 27 个参数，每批最多 2427 行）
 func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	const maxRowsPerBatch = 3000 // 安全阈值，低于 3120 行的理论上限
+	const maxRowsPerBatch = 2400 // 安全阈值，低于 2427 行的理论上限
 
 	// 分批处理
 	for start := 0; start < len(batch); start += maxRowsPerBatch {
@@ -915,22 +1003,23 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, batch []usageLogEntry) e
 
 	// 使用 COPY 或批量 VALUES 优化插入性能
 	valueStrings := make([]string, 0, len(batch))
-	valueArgs := make([]interface{}, 0, len(batch)*21)
+	valueArgs := make([]interface{}, 0, len(batch)*27)
 	argIdx := 1
 
 	for _, e := range batch {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
-			argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14, argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19, argIdx+20))
+			argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14, argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
+			argIdx+20, argIdx+21, argIdx+22, argIdx+23, argIdx+24, argIdx+25, argIdx+26))
 		valueArgs = append(valueArgs, e.AccountID, e.Endpoint, e.Model, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.CachedTokens, e.ServiceTier,
-			e.APIKeyID, e.APIKeyName, e.APIKeyMasked)
-		argIdx += 21
+			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize)
+		argIdx += 27
 	}
 
 	query := fmt.Sprintf(`INSERT INTO usage_logs (account_id, endpoint, model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 		input_tokens, output_tokens, reasoning_tokens, first_token_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, cached_tokens, service_tier,
-		api_key_id, api_key_name, api_key_masked)
+		api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size)
 		VALUES %s`, strings.Join(valueStrings, ","))
 
 	_, err := db.conn.ExecContext(ctx, query, valueArgs...)
@@ -1079,6 +1168,8 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
 	            COALESCE(u.api_key_id, 0), COALESCE(u.api_key_name, ''), COALESCE(u.api_key_masked, ''),
+	            COALESCE(u.image_count, 0), COALESCE(u.image_width, 0), COALESCE(u.image_height, 0), COALESCE(u.image_bytes, 0),
+	            COALESCE(u.image_format, ''), COALESCE(u.image_size, ''),
 	            COALESCE(CAST(a.credentials AS TEXT), '{}'), u.created_at
 	           FROM usage_logs u
 	           LEFT JOIN accounts a ON u.account_id = a.id
@@ -1097,7 +1188,7 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 		var createdAtRaw interface{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens, &l.ServiceTier,
-			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &credentialRaw, &createdAtRaw); err != nil {
+			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize, &credentialRaw, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		l.AccountEmail = accountEmailFromRawCredentials(credentialRaw)
@@ -1303,6 +1394,8 @@ func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
 	            COALESCE(u.api_key_id, 0), COALESCE(u.api_key_name, ''), COALESCE(u.api_key_masked, ''),
+	            COALESCE(u.image_count, 0), COALESCE(u.image_width, 0), COALESCE(u.image_height, 0), COALESCE(u.image_bytes, 0),
+	            COALESCE(u.image_format, ''), COALESCE(u.image_size, ''),
 	            COALESCE(CAST(a.credentials AS TEXT), '{}'), u.created_at
 	           FROM usage_logs u
 	           LEFT JOIN accounts a ON u.account_id = a.id
@@ -1322,7 +1415,7 @@ func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time
 		var createdAtRaw interface{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens, &l.ServiceTier,
-			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &credentialRaw, &createdAtRaw); err != nil {
+			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize, &credentialRaw, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		l.AccountEmail = accountEmailFromRawCredentials(credentialRaw)
@@ -1412,6 +1505,8 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
 	            COALESCE(u.api_key_id, 0), COALESCE(u.api_key_name, ''), COALESCE(u.api_key_masked, ''),
+	            COALESCE(u.image_count, 0), COALESCE(u.image_width, 0), COALESCE(u.image_height, 0), COALESCE(u.image_bytes, 0),
+	            COALESCE(u.image_format, ''), COALESCE(u.image_size, ''),
 	            COALESCE(CAST(a.credentials AS TEXT), '{}'), u.created_at,
 	            COUNT(*) OVER() AS total_count
 	           FROM usage_logs u
@@ -1431,7 +1526,8 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 		var createdAtRaw interface{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens,
-			&l.ServiceTier, &l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &credentialRaw, &createdAtRaw, &result.Total); err != nil {
+			&l.ServiceTier, &l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize,
+			&credentialRaw, &createdAtRaw, &result.Total); err != nil {
 			return nil, err
 		}
 		l.AccountEmail = accountEmailFromRawCredentials(credentialRaw)
