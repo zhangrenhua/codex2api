@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -834,6 +835,21 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	return req
 }
 
+func imagePreferredAccountFilter(account *auth.Account) bool {
+	if account == nil {
+		return false
+	}
+	return auth.IsPlusOrHigherPlan(account.GetPlanType())
+}
+
+func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool) (*auth.Account, string) {
+	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, imagePreferredAccountFilter)
+	if account != nil {
+		return account, stickyProxyURL
+	}
+	return h.nextAccountForSession("", apiKeyID, exclude)
+}
+
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
 	if err := validateResponsesImageGenerationSizes(responsesBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
@@ -848,7 +864,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	excludeAccounts := make(map[int64]bool)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession("", apiKeyID, excludeAccounts)
+		account, stickyProxyURL := h.nextImageAccount(apiKeyID, excludeAccounts)
 		if account == nil {
 			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts)
 			if account == nil {
@@ -1031,8 +1047,11 @@ func collectImagesResponse(body io.Reader, responseFormat, fallbackModel string)
 			out, readErr = buildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, responseFormat)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
 			return false
+		case "error":
+			readErr = imageGenerationFailureError(data)
+			return false
 		case "response.failed":
-			readErr = fmt.Errorf("upstream image generation failed")
+			readErr = imageGenerationFailureError(data)
 			return false
 		}
 		return true
@@ -1147,8 +1166,12 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 				imageCount++
 			}
 			return false
+		case "error":
+			readErr = imageGenerationFailureError(data)
+			writeEvent("error", buildImagesStreamErrorPayload(readErr.Error()))
+			return false
 		case "response.failed":
-			readErr = fmt.Errorf("upstream image generation failed")
+			readErr = imageGenerationFailureError(data)
 			writeEvent("error", buildImagesStreamErrorPayload(readErr.Error()))
 			return false
 		}
@@ -1171,6 +1194,36 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		writeEvent("error", buildImagesStreamErrorPayload(readErr.Error()))
 	}
 	return usage, imageCount, firstTokenMs, imageLogInfo, readErr
+}
+
+func imageGenerationFailureError(payload []byte) error {
+	message := firstNonEmptyImageErrorField(
+		gjson.GetBytes(payload, "error.message").String(),
+		gjson.GetBytes(payload, "response.error.message").String(),
+		gjson.GetBytes(payload, "error").String(),
+	)
+	code := firstNonEmptyImageErrorField(
+		gjson.GetBytes(payload, "error.code").String(),
+		gjson.GetBytes(payload, "response.error.code").String(),
+		gjson.GetBytes(payload, "error.type").String(),
+		gjson.GetBytes(payload, "response.error.type").String(),
+	)
+	if message == "" {
+		message = "upstream image generation failed"
+	}
+	if code != "" && !strings.Contains(strings.ToLower(message), strings.ToLower(code)) {
+		return fmt.Errorf("upstream image generation failed (%s): %s", code, message)
+	}
+	return fmt.Errorf("upstream image generation failed: %s", message)
+}
+
+func firstNonEmptyImageErrorField(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func extractImagesFromResponsesCompleted(payload []byte, fallbackModel string) ([]imageCallResult, int64, []byte, imageCallResult, *UsageInfo, error) {

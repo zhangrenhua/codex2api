@@ -282,6 +282,9 @@ func loggerMiddleware() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		latency := time.Since(start)
+		if shouldSkipAccessLog(c.Request.Method, c.Request.URL.Path, c.Writer.Status()) {
+			return
+		}
 
 		email, _ := c.Get("x-account-email")
 		proxyURL, _ := c.Get("x-account-proxy")
@@ -321,4 +324,17 @@ func loggerMiddleware() gin.HandlerFunc {
 			log.Printf("%s %s %d %v%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency, tagStr)
 		}
 	}
+}
+
+func shouldSkipAccessLog(method string, path string, status int) bool {
+	if status >= http.StatusBadRequest {
+		return false
+	}
+	if method == http.MethodGet && path == "/api/admin/health" {
+		return true
+	}
+	if method == http.MethodGet && (path == "/api/admin/images/jobs" || strings.HasPrefix(path, "/api/admin/images/jobs/")) {
+		return true
+	}
+	return false
 }

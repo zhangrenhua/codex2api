@@ -173,6 +173,39 @@ func TestSQLiteMigratesLegacyDeletedAccounts(t *testing.T) {
 	}
 }
 
+func TestListActiveIncludesErrorAccounts(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	id, err := db.InsertAccount(ctx, "error-account", "rt-error", "")
+	if err != nil {
+		t.Fatalf("InsertAccount 返回错误: %v", err)
+	}
+	if err := db.SetError(ctx, id, "batch test failed"); err != nil {
+		t.Fatalf("SetError 返回错误: %v", err)
+	}
+
+	rows, err := db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive 返回错误: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListActive 返回 %d 条，want 1", len(rows))
+	}
+	if rows[0].Status != "error" {
+		t.Fatalf("status = %q, want error", rows[0].Status)
+	}
+	if rows[0].ErrorMessage != "batch test failed" {
+		t.Fatalf("error_message = %q, want batch test failed", rows[0].ErrorMessage)
+	}
+}
+
 func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

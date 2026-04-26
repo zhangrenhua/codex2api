@@ -111,20 +111,47 @@ export default function Accounts() {
   })
   const accounts = data.accounts
   const apiKeys = data.apiKeys
-  const usageBootstrapReloadedRef = useRef(false)
+  const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map())
 
   useEffect(() => {
-    const hasMissingUsage = accounts.some(
-      (account) => account.plan_type?.toLowerCase() === 'free' && (account.usage_percent_7d === null || account.usage_percent_7d === undefined)
-    )
-    if (!hasMissingUsage || usageBootstrapReloadedRef.current) {
+    const needsUsageReload = (account: AccountRow) => {
+      if (account.status !== 'active' && account.status !== 'ready') {
+        return false
+      }
+
+      const plan = (account.plan_type || '').toLowerCase()
+      const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
+      const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+
+      if (plan === 'free') {
+        return !has7d
+      }
+      if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
+        return !has5h || !has7d
+      }
+      return !has7d
+    }
+
+    const missingUsageIds = accounts.filter(needsUsageReload).map((account) => account.id)
+    const missingUsageIdSet = new Set(missingUsageIds)
+    for (const id of Array.from(usageReloadAttemptsRef.current.keys())) {
+      if (!missingUsageIdSet.has(id)) {
+        usageReloadAttemptsRef.current.delete(id)
+      }
+    }
+
+    const retryIds = missingUsageIds.filter((id) => (usageReloadAttemptsRef.current.get(id) ?? 0) < 6)
+    if (retryIds.length === 0) {
       return
     }
 
-    usageBootstrapReloadedRef.current = true
+    for (const id of retryIds) {
+      usageReloadAttemptsRef.current.set(id, (usageReloadAttemptsRef.current.get(id) ?? 0) + 1)
+    }
+
     const timer = window.setTimeout(() => {
       void reloadSilently()
-    }, 4000)
+    }, 2500)
 
     return () => window.clearTimeout(timer)
   }, [accounts, reloadSilently])
@@ -196,6 +223,18 @@ export default function Accounts() {
       setPage(totalPages)
     }
   }, [page, totalPages])
+
+  useEffect(() => {
+    if (!accounts.some((account) => account.status === 'refreshing')) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void reloadSilently()
+    }, 2000)
+
+    return () => window.clearTimeout(timer)
+  }, [accounts, reloadSilently])
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -440,8 +479,9 @@ export default function Accounts() {
       const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
 
       if (jsonFiles.length > 0) {
-        await importFiles([...jsonFiles, ...txtFiles], 'json')
-      } else if (txtFiles.length > 0) {
+        await importFiles(jsonFiles, 'json')
+      }
+      if (txtFiles.length > 0) {
         await importFiles(txtFiles, 'txt')
       }
       return
@@ -464,21 +504,22 @@ export default function Accounts() {
     }
 
     if (jsonFiles.length > 0) {
-      await importFiles([...jsonFiles, ...txtFiles], 'json')
-    } else if (txtFiles.length > 0) {
+      await importFiles(jsonFiles, 'json')
+    }
+    if (txtFiles.length > 0) {
       await importFiles(txtFiles, 'txt')
     }
   }
 
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    if (!file.name.endsWith('.txt')) {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length === 0) return
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.txt'))) {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
     setShowImportPicker(false)
-    await importFiles([file], 'txt')
+    await importFiles(files, 'txt')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -491,14 +532,14 @@ export default function Accounts() {
   }
 
   const handleAtFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    if (!file.name.endsWith('.txt')) {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length === 0) return
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.txt'))) {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
     setShowImportPicker(false)
-    await importFiles([file], 'at_txt')
+    await importFiles(files, 'at_txt')
     if (atFileInputRef.current) atFileInputRef.current.value = ''
   }
 
@@ -522,8 +563,9 @@ export default function Accounts() {
     const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
 
     if (jsonFiles.length > 0) {
-      await importFiles([...jsonFiles, ...txtFiles], 'json')
-    } else if (txtFiles.length > 0) {
+      await importFiles(jsonFiles, 'json')
+    }
+    if (txtFiles.length > 0) {
       await importFiles(txtFiles, 'txt')
     }
 
@@ -979,6 +1021,7 @@ export default function Accounts() {
                 ref={fileInputRef}
                 type="file"
                 accept=".txt"
+                multiple
                 className="hidden"
                 onChange={(e) => void handleFileImport(e)}
               />
@@ -994,6 +1037,7 @@ export default function Accounts() {
                 ref={atFileInputRef}
                 type="file"
                 accept=".txt"
+                multiple
                 className="hidden"
                 onChange={(e) => void handleAtFileImport(e)}
               />
@@ -1115,7 +1159,7 @@ export default function Accounts() {
                           onChange={toggleSelectAll}
                         />
                       </TableHead>
-                      <TableHead className="text-[13px] font-semibold">ID</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('accounts.sequence')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.email')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.plan')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.status')}</TableHead>
@@ -1142,7 +1186,7 @@ export default function Accounts() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {pagedAccounts.map((account) => (
+                    {pagedAccounts.map((account, index) => (
                       <TableRow key={account.id} className={selected.has(account.id) ? 'bg-primary/5' : ''}>
                         <TableCell>
                           <input
@@ -1152,7 +1196,9 @@ export default function Accounts() {
                             onChange={() => toggleSelect(account.id)}
                           />
                         </TableCell>
-                        <TableCell className="text-[14px] font-mono text-muted-foreground">{account.id}</TableCell>
+                        <TableCell className="text-[14px] font-mono text-muted-foreground" title={`ID ${account.id}`}>
+                          {(currentPage - 1) * pageSize + index + 1}
+                        </TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">
                           {formatCompactEmail(account.email)}
                           {account.at_only && (

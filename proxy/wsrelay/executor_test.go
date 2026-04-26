@@ -49,3 +49,17 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 		t.Fatalf("Conversation_id = %q", got)
 	}
 }
+
+func TestPrepareWebsocketHeadersUsesAccountProfileByDefault(t *testing.T) {
+	exec := NewExecutor()
+	profile := proxy.ProfileForAccount(42)
+
+	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", nil, http.Header{})
+
+	if got := headers.Get("User-Agent"); got != profile.UserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, profile.UserAgent)
+	}
+	if got := headers.Get("Version"); got != profile.Version {
+		t.Fatalf("Version = %q, want %q", got, profile.Version)
+	}
+}

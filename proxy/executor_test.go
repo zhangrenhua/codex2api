@@ -191,6 +191,27 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	}
 }
 
+func TestApplyCodexRequestHeadersUsesLatestProfileByDefault(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID:      42,
+		AccountID: "acct-42",
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "", "api-key-1", nil, http.Header{})
+
+	if got := req.Header.Get("User-Agent"); !strings.Contains(got, latestCodexCLIUserAgentPrefix) {
+		t.Fatalf("User-Agent = %q, want latest Codex CLI %s", got, latestCodexCLIVersion)
+	}
+	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
+		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	}
+}
+
 func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	headers := http.Header{
 		"Session_id":      []string{"session-from-header"},

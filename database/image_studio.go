@@ -328,6 +328,15 @@ func (db *DB) MarkImageJobFailed(ctx context.Context, id int64, message string, 
 	return err
 }
 
+func (db *DB) UpdateImageGenerationJobParamsJSON(ctx context.Context, id int64, paramsJSON string) error {
+	_, err := db.conn.ExecContext(ctx, `
+		UPDATE image_generation_jobs
+		SET params_json=$1
+		WHERE id=$2
+	`, paramsJSON, id)
+	return err
+}
+
 func (db *DB) MarkInterruptedImageJobs(ctx context.Context) error {
 	_, err := db.conn.ExecContext(ctx, `
 		UPDATE image_generation_jobs

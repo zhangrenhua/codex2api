@@ -1618,12 +1618,12 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 
 // ==================== Accounts ====================
 
-// ListActive 获取所有状态为 active 的账号
+// ListActive 获取所有未删除账号。
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
 		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
 		FROM accounts
-		WHERE status = 'active'
+		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		ORDER BY id
 	`
 	rows, err := db.conn.QueryContext(ctx, query)

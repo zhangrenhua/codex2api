@@ -23,6 +23,26 @@ func isPremium5hPlan(plan string) bool {
 	}
 }
 
+// IsPlusOrHigherPlan reports whether a plan should be treated as paid for
+// image-generation routing. Keep this broader than premium 5h rate-limit
+// semantics so variants such as teamplus/enterprise can be preferred too.
+func IsPlusOrHigherPlan(plan string) bool {
+	normalized := normalizePlanType(plan)
+	if normalized == "" || normalized == "free" {
+		return false
+	}
+	switch normalized {
+	case "plus", "pro", "team", "teamplus", "enterprise", "business", "edu", "education":
+		return true
+	default:
+		return strings.Contains(normalized, "plus") ||
+			strings.HasPrefix(normalized, "pro") ||
+			strings.HasPrefix(normalized, "team") ||
+			strings.Contains(normalized, "enterprise") ||
+			strings.Contains(normalized, "business")
+	}
+}
+
 // IsPremium5hPlan 判断当前账号是否属于 premium 5h 限流语义范围。
 func (a *Account) IsPremium5hPlan() bool {
 	a.mu.RLock()

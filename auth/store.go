@@ -677,10 +677,19 @@ func (a *Account) RuntimeStatus() string {
 			}
 			return "cooldown"
 		}
-		return "active" // 冷却过期，已恢复
+		if a.AccessToken != "" {
+			return "active" // 冷却过期，已恢复
+		}
+		if a.RefreshToken != "" {
+			return "refreshing"
+		}
+		return "error"
 	default:
 		if a.AccessToken != "" {
 			return "active"
+		}
+		if a.RefreshToken != "" && a.ErrorMsg == "" {
+			return "refreshing"
 		}
 		return "error"
 	}
@@ -1471,6 +1480,11 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 		if row.Locked {
 			atomic.StoreInt32(&account.Locked, 1)
 		}
+		if row.Status == "error" {
+			account.Status = StatusError
+			account.ErrorMsg = row.ErrorMessage
+			account.HealthTier = HealthTierRisky
+		}
 
 		// 尝试从 credentials 恢复已有的 AT
 		if at != "" {
@@ -1478,7 +1492,9 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			account.AccountID = row.GetCredential("account_id")
 			account.Email = row.GetCredential("email")
 			account.PlanType = row.GetCredential("plan_type")
-			account.HealthTier = HealthTierHealthy
+			if account.Status != StatusError {
+				account.HealthTier = HealthTierHealthy
+			}
 			if expiresAt := row.GetCredential("expires_at"); expiresAt != "" {
 				if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
 					account.ExpiresAt = parsed
@@ -2108,6 +2124,47 @@ func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string
 	}
 }
 
+// MarkError 标记账号为错误状态，并持久化到数据库。
+func (s *Store) MarkError(acc *Account, errorMsg string) {
+	if acc == nil {
+		return
+	}
+
+	errorMsg = strings.TrimSpace(errorMsg)
+	if errorMsg == "" {
+		errorMsg = "账号测试失败"
+	}
+	if len(errorMsg) > 500 {
+		errorMsg = errorMsg[:500]
+	}
+
+	now := time.Now()
+	acc.mu.Lock()
+	acc.Status = StatusError
+	acc.ErrorMsg = errorMsg
+	acc.CooldownUtil = time.Time{}
+	acc.CooldownReason = ""
+	acc.LastFailureAt = now
+	acc.FailureStreak++
+	acc.SuccessStreak = 0
+	if acc.HealthTier != HealthTierBanned {
+		acc.HealthTier = HealthTierRisky
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+
+	if s.db == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.db.SetError(ctx, acc.DBID, errorMsg); err != nil {
+		log.Printf("[账号 %d] 持久化错误状态失败: %v", acc.DBID, err)
+	}
+}
+
 // ClearCooldown 清除账号冷却状态，并同步清理数据库
 func (s *Store) ClearCooldown(acc *Account) {
 	if acc == nil {
@@ -2117,13 +2174,17 @@ func (s *Store) ClearCooldown(acc *Account) {
 	atomic.StoreInt32(&acc.Disabled, 0) // 清除原子禁用标志
 	acc.mu.Lock()
 	wasCooling := acc.Status == StatusCooldown
+	wasError := acc.Status == StatusError
 	premium5hLimited := acc.premium5hRateLimitedLocked(time.Now())
-	if acc.Status == StatusCooldown {
+	if acc.Status == StatusCooldown || acc.Status == StatusError {
 		acc.Status = StatusReady
 	}
+	acc.ErrorMsg = ""
 	acc.CooldownUtil = time.Time{}
 	acc.CooldownReason = ""
 	if wasCooling && !premium5hLimited {
+		acc.HealthTier = HealthTierWarm
+	} else if wasError && acc.HealthTier != HealthTierBanned {
 		acc.HealthTier = HealthTierWarm
 	}
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
@@ -2136,8 +2197,8 @@ func (s *Store) ClearCooldown(acc *Account) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.ClearCooldown(ctx, acc.DBID); err != nil {
-		log.Printf("[账号 %d] 清理冷却状态失败: %v", acc.DBID, err)
+	if err := s.db.ClearError(ctx, acc.DBID); err != nil {
+		log.Printf("[账号 %d] 清理账号状态失败: %v", acc.DBID, err)
 	}
 }
 
@@ -2725,6 +2786,8 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 		s.fastSchedulerUpdate(acc)
 		if expiredCooldown {
 			_ = s.db.ClearCooldown(ctx, dbID)
+		} else if !activeCooldown && s.db != nil {
+			_ = s.db.ClearError(ctx, dbID)
 		}
 		return nil
 	}
@@ -2755,6 +2818,8 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 			s.fastSchedulerUpdate(acc)
 			if expiredCooldown {
 				_ = s.db.ClearCooldown(ctx, dbID)
+			} else if !activeCooldown && s.db != nil {
+				_ = s.db.ClearError(ctx, dbID)
 			}
 			return nil
 		}
@@ -2838,6 +2903,9 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)
+	}
+	if err := s.db.ClearError(ctx, dbID); err != nil {
+		log.Printf("[账号 %d] 清理错误状态失败: %v", dbID, err)
 	}
 
 	// 自动锁定 free 以上的账号（pro/plus/team/teamplus 等）

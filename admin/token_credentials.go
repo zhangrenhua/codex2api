@@ -40,9 +40,6 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 		}
 	}
 
-	if seed.expiresAt.IsZero() && seed.expiresAtRaw != "" {
-		seed.expiresAt = parseCredentialExpiresAt(seed.expiresAtRaw)
-	}
 	if seed.expiresAt.IsZero() && seed.expiresIn > 0 {
 		seed.expiresAt = time.Now().Add(time.Duration(seed.expiresIn) * time.Second)
 	}
@@ -50,6 +47,9 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 		if info := auth.ParseAccessToken(seed.accessToken); info != nil && !info.ExpiresAt.IsZero() {
 			seed.expiresAt = info.ExpiresAt
 		}
+	}
+	if seed.expiresAt.IsZero() && seed.expiresAtRaw != "" {
+		seed.expiresAt = parseCredentialExpiresAt(seed.expiresAtRaw)
 	}
 	if seed.expiresAt.IsZero() && seed.accessToken != "" {
 		seed.expiresAt = time.Now().Add(time.Hour)

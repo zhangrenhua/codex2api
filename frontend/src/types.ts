@@ -6,7 +6,7 @@ export interface ToastState {
   type: ToastType
 }
 
-export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'paused' | string
+export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'refreshing' | 'paused' | string
 
 export interface StatsResponse {
   total: number
