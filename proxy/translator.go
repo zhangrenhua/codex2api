@@ -526,6 +526,77 @@ func normalizeResponsesImageOnlyModel(body map[string]any) bool {
 	return modified
 }
 
+// normalizeResponsesCompactionItems converts {"type":"compaction","summary":"..."}
+// items in body["input"] into developer-role messages so the upstream Codex
+// /responses endpoint accepts them. Items with empty or missing summary text
+// are dropped. Codex CLI compresses prior turns into compaction items expecting
+// them to be forwarded as conversation context; the upstream rejects the type
+// with "Invalid input type 'compaction' at index N", so we translate in place.
+func normalizeResponsesCompactionItems(body map[string]any) bool {
+	if len(body) == 0 {
+		return false
+	}
+	inputItems, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+
+	const summaryPrefix = "[Conversation summary from earlier turns]\n"
+
+	modified := false
+	out := make([]any, 0, len(inputItems))
+	for _, raw := range inputItems {
+		itemMap, ok := raw.(map[string]any)
+		if !ok {
+			out = append(out, raw)
+			continue
+		}
+		if firstNonEmptyAnyString(itemMap["type"]) != "compaction" {
+			out = append(out, raw)
+			continue
+		}
+
+		summaryText := compactionSummaryText(itemMap["summary"])
+		if summaryText == "" {
+			modified = true
+			continue
+		}
+
+		out = append(out, map[string]any{
+			"type": "message",
+			"role": "developer",
+			"content": []any{
+				map[string]any{
+					"type": "input_text",
+					"text": summaryPrefix + summaryText,
+				},
+			},
+		})
+		modified = true
+	}
+
+	if modified {
+		body["input"] = out
+	}
+	return modified
+}
+
+// compactionSummaryText extracts a usable summary string from a compaction
+// item's summary field. Strings pass through trimmed; non-string values are
+// JSON-serialized so the model still receives the original payload as text.
+func compactionSummaryText(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if s, ok := raw.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	if b, err := json.Marshal(raw); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
 func truncateToolsPreservingImageGeneration(tools []any) []any {
 	if len(tools) <= maxTools {
 		return tools
@@ -748,6 +819,9 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 			body["input"] = append(cachedItems, currentInput...)
 		}
 	}
+
+	// 6b. 把 input[] 中的 compaction 项翻译为 developer message（上游不识别 compaction）
+	normalizeResponsesCompactionItems(body)
 
 	// 保存展开后的 input 原始 JSON（用于响应缓存链路）
 	var expandedInputRaw string

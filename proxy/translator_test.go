@@ -744,3 +744,151 @@ func TestExtractToolCallsFromOutput(t *testing.T) {
 		t.Fatalf("second tool call mismatch: %+v", tcs[1])
 	}
 }
+
+func TestNormalizeResponsesCompactionItemsConvertsToDeveloperMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":"hello from earlier"},
+			{"type":"compaction","summary":"用户问候并讨论了 X 主题"},
+			{"type":"message","role":"user","content":"继续上面的话题"}
+		]
+	}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !normalizeResponsesCompactionItems(body) {
+		t.Fatal("expected modification, got false")
+	}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	items := gjson.GetBytes(got, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d: %s", len(items), got)
+	}
+
+	if items[0].Get("type").String() != "message" || items[0].Get("role").String() != "user" {
+		t.Fatalf("item 0 should be untouched user message: %s", items[0].Raw)
+	}
+	if items[2].Get("type").String() != "message" || items[2].Get("role").String() != "user" {
+		t.Fatalf("item 2 should be untouched user message: %s", items[2].Raw)
+	}
+
+	converted := items[1]
+	if converted.Get("type").String() != "message" {
+		t.Fatalf("compaction item should become message, got type=%q", converted.Get("type").String())
+	}
+	if converted.Get("role").String() != "developer" {
+		t.Fatalf("compaction item should use developer role, got %q", converted.Get("role").String())
+	}
+	contentParts := converted.Get("content").Array()
+	if len(contentParts) != 1 {
+		t.Fatalf("expected 1 content part, got %d: %s", len(contentParts), converted.Raw)
+	}
+	if contentParts[0].Get("type").String() != "input_text" {
+		t.Fatalf("content part type should be input_text, got %q", contentParts[0].Get("type").String())
+	}
+	text := contentParts[0].Get("text").String()
+	if !strings.HasPrefix(text, "[Conversation summary from earlier turns]") {
+		t.Fatalf("text should carry summary prefix, got %q", text)
+	}
+	if !strings.Contains(text, "用户问候并讨论了 X 主题") {
+		t.Fatalf("text should contain original summary, got %q", text)
+	}
+}
+
+func TestNormalizeResponsesCompactionItemsDropsEmptySummary(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":"keep me"},
+			{"type":"compaction","summary":""},
+			{"type":"compaction"},
+			{"type":"compaction","summary":"   "},
+			{"type":"message","role":"user","content":"keep me too"}
+		]
+	}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !normalizeResponsesCompactionItems(body) {
+		t.Fatal("expected modification, got false")
+	}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	items := gjson.GetBytes(got, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("empty/missing-summary compaction items should be dropped, got %d items: %s", len(items), got)
+	}
+	for i, item := range items {
+		if item.Get("type").String() != "message" || item.Get("role").String() != "user" {
+			t.Fatalf("remaining item %d should be original user message, got %s", i, item.Raw)
+		}
+	}
+}
+
+func TestPrepareResponsesBodyHandlesMultipleCompactionItems(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"compaction","summary":"first summary"},
+			{"type":"message","role":"user","content":"middle"},
+			{"type":"compaction","summary":"second summary"},
+			{"type":"message","role":"user","content":"latest"}
+		]
+	}`)
+
+	codexBody, _ := PrepareResponsesBody(raw)
+
+	items := gjson.GetBytes(codexBody, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 items after normalization, got %d: %s", len(items), codexBody)
+	}
+
+	expected := []struct {
+		role    string
+		summary string
+	}{
+		{"developer", "first summary"},
+		{"user", ""},
+		{"developer", "second summary"},
+		{"user", ""},
+	}
+	for i, want := range expected {
+		item := items[i]
+		if item.Get("type").String() != "message" {
+			t.Fatalf("item %d should be message, got type=%q", i, item.Get("type").String())
+		}
+		if item.Get("role").String() != want.role {
+			t.Fatalf("item %d role = %q, want %q", i, item.Get("role").String(), want.role)
+		}
+		if want.summary != "" {
+			text := item.Get("content.0.text").String()
+			if !strings.HasPrefix(text, "[Conversation summary from earlier turns]") {
+				t.Fatalf("item %d missing summary prefix, got %q", i, text)
+			}
+			if !strings.Contains(text, want.summary) {
+				t.Fatalf("item %d should contain %q, got %q", i, want.summary, text)
+			}
+		}
+	}
+
+	if gjson.GetBytes(codexBody, "input.0.type").String() == "compaction" ||
+		gjson.GetBytes(codexBody, "input.2.type").String() == "compaction" {
+		t.Fatalf("compaction type should not survive in upstream body: %s", codexBody)
+	}
+}
