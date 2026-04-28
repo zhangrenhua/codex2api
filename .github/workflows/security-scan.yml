@@ -29,6 +29,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Create frontend dist placeholder
+        run: mkdir -p frontend/dist && touch frontend/dist/placeholder
+
       - name: Run govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -43,7 +46,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
