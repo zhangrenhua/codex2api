@@ -744,6 +744,35 @@ func TestStreamTranslator_TextOnly(t *testing.T) {
 	}
 }
 
+func TestStreamTranslator_CachedTokenDetails(t *testing.T) {
+	st := NewStreamTranslator("chatcmpl-test", "gpt-5.4", 0)
+
+	completedEvent := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"usage":{
+				"input_tokens":12,
+				"output_tokens":4,
+				"input_tokens_details":{"cached_tokens":7}
+			}
+		}
+	}`)
+
+	chunk, done := st.Translate(completedEvent)
+	if !done {
+		t.Fatal("should be done")
+	}
+	if got := gjson.GetBytes(chunk, "usage.cached_tokens").Int(); got != 7 {
+		t.Fatalf("usage.cached_tokens = %d, want 7; chunk=%s", got, chunk)
+	}
+	if got := gjson.GetBytes(chunk, "usage.prompt_tokens_details.cached_tokens").Int(); got != 7 {
+		t.Fatalf("usage.prompt_tokens_details.cached_tokens = %d, want 7; chunk=%s", got, chunk)
+	}
+	if got := gjson.GetBytes(chunk, "usage.input_tokens_details.cached_tokens").Int(); got != 7 {
+		t.Fatalf("usage.input_tokens_details.cached_tokens = %d, want 7; chunk=%s", got, chunk)
+	}
+}
+
 func TestStreamTranslator_MultipleFunctionCalls(t *testing.T) {
 	st := NewStreamTranslator("chatcmpl-test", "gpt-5.4", 0)
 
