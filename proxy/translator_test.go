@@ -470,12 +470,12 @@ func TestPrepareCompactResponsesBody_RemovesClientSuppliedInclude(t *testing.T) 
 	}
 }
 
-func TestPrepareResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *testing.T) {
+func TestPrepareResponsesBody_ConvertsPlaintextCompactionToDeveloperMessage(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
 		"input":[
 			{"type":"message","role":"user","content":"hello"},
-			{"type":"compaction","summary":"previous context was compacted"}
+			{"type":"compaction","text":"previous context was compacted"}
 		]
 	}`)
 
@@ -485,10 +485,10 @@ func TestPrepareResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *t
 	if gotType := input.Get("1.type").String(); gotType == "compaction" {
 		t.Fatalf("plaintext compaction item should not be sent upstream, got %s", input.Raw)
 	}
-	if gotRole := input.Get("1.role").String(); gotRole != "assistant" {
-		t.Fatalf("converted compaction role = %q, want assistant; input=%s", gotRole, input.Raw)
+	if gotRole := input.Get("1.role").String(); gotRole != "developer" {
+		t.Fatalf("converted compaction role = %q, want developer; input=%s", gotRole, input.Raw)
 	}
-	if gotText := input.Get("1.content.0.text").String(); gotText != "previous context was compacted" {
+	if gotText := input.Get("1.content.0.text").String(); !strings.Contains(gotText, "previous context was compacted") {
 		t.Fatalf("converted compaction text = %q, want summary; input=%s", gotText, input.Raw)
 	}
 
@@ -496,9 +496,12 @@ func TestPrepareResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *t
 	if gotType := expanded.Get("1.type").String(); gotType == "compaction" {
 		t.Fatalf("expanded input cache should not retain plaintext compaction, got %s", expanded.Raw)
 	}
+	if gotRole := expanded.Get("1.role").String(); gotRole != "developer" {
+		t.Fatalf("expanded compaction role = %q, want developer; input=%s", gotRole, expanded.Raw)
+	}
 }
 
-func TestPrepareCompactResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *testing.T) {
+func TestPrepareCompactResponsesBody_ConvertsPlaintextCompactionToDeveloperMessage(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
 		"input":[
@@ -513,10 +516,10 @@ func TestPrepareCompactResponsesBody_ConvertsPlaintextCompactionToAssistantMessa
 	if gotType := input.Get("1.type").String(); gotType == "compaction" {
 		t.Fatalf("plaintext compaction item should not be sent to compact upstream, got %s", input.Raw)
 	}
-	if gotRole := input.Get("1.role").String(); gotRole != "assistant" {
-		t.Fatalf("converted compaction role = %q, want assistant; input=%s", gotRole, input.Raw)
+	if gotRole := input.Get("1.role").String(); gotRole != "developer" {
+		t.Fatalf("converted compaction role = %q, want developer; input=%s", gotRole, input.Raw)
 	}
-	if gotText := input.Get("1.content.0.text").String(); gotText != "previous context was compacted" {
+	if gotText := input.Get("1.content.0.text").String(); !strings.Contains(gotText, "previous context was compacted") {
 		t.Fatalf("converted compaction text = %q, want summary; input=%s", gotText, input.Raw)
 	}
 }
