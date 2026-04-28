@@ -71,6 +71,23 @@ func TestTranslateRequest_PreservesSupportedServiceTier(t *testing.T) {
 	}
 }
 
+func TestTranslateRequest_NormalizesReasoningEffortAliases(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":"hello"}],
+		"reasoning_effort":"MAX"
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+
+	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "xhigh" {
+		t.Fatalf("reasoning.effort mismatch: got %q want %q", effort, "xhigh")
+	}
+}
+
 func TestTranslateRequest_FillsMissingArrayItemsInToolSchema(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -160,6 +177,20 @@ func TestPrepareResponsesBody_DefaultsIncludeForResponses(t *testing.T) {
 	}
 	if instructions := gjson.GetBytes(got, "instructions").String(); !strings.Contains(instructions, codexImageGenerationBridgeMarker) {
 		t.Fatalf("expected bridge instructions, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_NormalizesNestedReasoningEffortAliases(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"test",
+		"reasoning":{"effort":"MAX"}
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "xhigh" {
+		t.Fatalf("reasoning.effort mismatch: got %q want %q; body=%s", effort, "xhigh", got)
 	}
 }
 

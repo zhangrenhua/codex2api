@@ -13,23 +13,28 @@ import (
 
 // anthropicRequest 表示 Anthropic Messages API 请求
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	MaxTokens   int                `json:"max_tokens"`
-	System      json.RawMessage    `json:"system,omitempty"`
-	Messages    []anthropicMessage `json:"messages"`
-	Tools       []anthropicTool    `json:"tools,omitempty"`
-	Stream      bool               `json:"stream,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
-	StopSeqs    []string           `json:"stop_sequences,omitempty"`
-	Thinking    *anthropicThinking `json:"thinking,omitempty"`
-	ToolChoice  json.RawMessage    `json:"tool_choice,omitempty"`
-	Metadata    json.RawMessage    `json:"metadata,omitempty"`
+	Model        string                 `json:"model"`
+	MaxTokens    int                    `json:"max_tokens"`
+	System       json.RawMessage        `json:"system,omitempty"`
+	Messages     []anthropicMessage     `json:"messages"`
+	Tools        []anthropicTool        `json:"tools,omitempty"`
+	Stream       bool                   `json:"stream,omitempty"`
+	Temperature  *float64               `json:"temperature,omitempty"`
+	TopP         *float64               `json:"top_p,omitempty"`
+	StopSeqs     []string               `json:"stop_sequences,omitempty"`
+	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+	ToolChoice   json.RawMessage        `json:"tool_choice,omitempty"`
+	Metadata     json.RawMessage        `json:"metadata,omitempty"`
 }
 
 type anthropicThinking struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -129,6 +134,8 @@ var defaultAnthropicModelMap = map[string]string{
 // resolveAnthropicModel 将 Anthropic 模型名解析为 Codex 模型名
 // 优先使用数据库中的动态映射，回退到默认映射
 func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedModels []string) string {
+	model = strings.TrimSpace(model)
+
 	// 1. 尝试动态映射（从系统设置）
 	if dynamicMappingJSON != "" && dynamicMappingJSON != "{}" {
 		var dynamicMap map[string]string
@@ -220,10 +227,10 @@ func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string
 
 	// 注意：不设置 max_output_tokens，上游 Codex 不支持该字段
 
-	// reasoning effort（仅设置 effort，不设置 summary）
-	effort := resolveReasoningEffort(req.Thinking)
-	if effort != "" && effort != "high" {
-		out["reasoning"] = map[string]any{"effort": effort}
+	// reasoning effort: align Claude Code /v1/messages with the Responses reasoning shape.
+	out["reasoning"] = map[string]any{
+		"effort":  resolveReasoningEffort(req.OutputConfig),
+		"summary": "auto",
 	}
 
 	// tools
@@ -410,24 +417,14 @@ func extractToolResultText(b anthropicContentBlock) string {
 	return string(b.Content)
 }
 
-// resolveReasoningEffort 从 thinking 配置推断 reasoning effort
-func resolveReasoningEffort(thinking *anthropicThinking) string {
-	if thinking == nil || thinking.Type != "enabled" {
-		return "high" // 默认
+// resolveReasoningEffort maps Claude output_config.effort to Responses reasoning.effort.
+// Claude thinking.type/budget_tokens only indicates that thinking mode exists; it
+// does not control effort on this OpenAI/Codex compatibility path.
+func resolveReasoningEffort(outputConfig *anthropicOutputConfig) string {
+	if outputConfig != nil && strings.TrimSpace(outputConfig.Effort) != "" {
+		return normalizeReasoningEffort(outputConfig.Effort)
 	}
-	budget := thinking.BudgetTokens
-	switch {
-	case budget <= 0:
-		return "high"
-	case budget < 2048:
-		return "low"
-	case budget < 8192:
-		return "medium"
-	case budget < 20000:
-		return "high"
-	default:
-		return "xhigh"
-	}
+	return "high"
 }
 
 // convertAnthropicTools 将 Anthropic 工具格式转为 Codex 格式
