@@ -748,6 +748,7 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 			body["input"] = append(cachedItems, currentInput...)
 		}
 	}
+	normalizePlaintextCompactionItems(body)
 
 	// 保存展开后的 input 原始 JSON（用于响应缓存链路）
 	var expandedInputRaw string
@@ -774,6 +775,49 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		return rawBody, expandedInputRaw
 	}
 	return result, expandedInputRaw
+}
+
+func normalizePlaintextCompactionItems(body map[string]any) {
+	input, ok := body["input"].([]any)
+	if !ok || len(input) == 0 {
+		return
+	}
+
+	changed := false
+	normalized := make([]any, 0, len(input))
+	for _, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok || firstNonEmptyAnyString(itemMap["type"]) != "compaction" {
+			normalized = append(normalized, item)
+			continue
+		}
+		if firstNonEmptyAnyString(itemMap["encrypted_content"]) != "" {
+			normalized = append(normalized, item)
+			continue
+		}
+
+		summary := firstNonEmptyAnyString(itemMap["summary"])
+		if summary == "" {
+			summary = firstNonEmptyAnyString(itemMap["text"])
+		}
+		if summary == "" {
+			changed = true
+			continue
+		}
+
+		normalized = append(normalized, map[string]any{
+			"type": "message",
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "output_text", "text": summary},
+			},
+		})
+		changed = true
+	}
+
+	if changed {
+		body["input"] = normalized
+	}
 }
 
 // PrepareCompactResponsesBody 将 /responses/compact 请求转换为上游可接受的格式。
