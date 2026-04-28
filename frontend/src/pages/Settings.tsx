@@ -1,5 +1,5 @@
 import type { ChangeEvent, ReactNode } from 'react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState, setAdminKey } from '../api'
 import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
@@ -38,31 +38,60 @@ const DEFAULT_MODEL_MAPPING: Record<string, string> = {
   'claude-opus-4-5-20251101': 'gpt-5.3-codex',
 }
 
+type ModelMappingEntry = [string, string]
+
+const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
+  Object.entries(DEFAULT_MODEL_MAPPING) as ModelMappingEntry[]
+
+const parseModelMappingEntries = (value: string): ModelMappingEntry[] => {
+  try {
+    const parsed = JSON.parse(value || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return getDefaultModelMappingEntries()
+    }
+
+    const entries = Object.entries(parsed).map(([key, model]) => [
+      key,
+      typeof model === 'string' ? model : String(model ?? ''),
+    ]) as ModelMappingEntry[]
+
+    // 如果数据库中为空，用默认值填充
+    return entries.length > 0 ? entries : getDefaultModelMappingEntries()
+  } catch {
+    return getDefaultModelMappingEntries()
+  }
+}
+
+const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
+  const obj: Record<string, string> = {}
+  for (const [key, model] of entries) {
+    const trimmedKey = key.trim()
+    if (trimmedKey) obj[trimmedKey] = model.trim()
+  }
+  return JSON.stringify(obj)
+}
+
 // 模型映射编辑器组件
 function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { t } = useTranslation()
+  const [mappings, setMappings] = useState<ModelMappingEntry[]>(() => parseModelMappingEntries(value))
+  const lastEmittedValueRef = useRef<string | null>(null)
 
-  let mappings: [string, string][] = []
-  try {
-    const parsed = JSON.parse(value || '{}')
-    const entries = Object.entries(parsed) as [string, string][]
-    // 如果数据库中为空，用默认值填充
-    mappings = entries.length > 0 ? entries : Object.entries(DEFAULT_MODEL_MAPPING) as [string, string][]
-  } catch {
-    mappings = Object.entries(DEFAULT_MODEL_MAPPING) as [string, string][]
-  }
+  useEffect(() => {
+    if (value === lastEmittedValueRef.current) return
+    setMappings(parseModelMappingEntries(value))
+  }, [value])
 
-  const updateMappings = (entries: [string, string][]) => {
-    const obj: Record<string, string> = {}
-    for (const [k, v] of entries) {
-      if (k.trim()) obj[k.trim()] = v.trim()
-    }
-    onChange(JSON.stringify(obj))
+  const updateMappings = (entries: ModelMappingEntry[]) => {
+    setMappings(entries)
+    const serialized = serializeModelMappingEntries(entries)
+    lastEmittedValueRef.current = serialized
+    onChange(serialized)
   }
 
   const handleChange = (index: number, field: 0 | 1, val: string) => {
     const next = [...mappings]
-    next[index] = [...next[index]] as [string, string]
+    next[index] = [...next[index]] as ModelMappingEntry
     next[index][field] = val
     updateMappings(next)
   }
@@ -98,6 +127,7 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
             onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
           />
           <button
+            type="button"
             onClick={() => handleRemove(i)}
             className="flex items-center justify-center size-9 rounded-lg text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
           >
@@ -105,7 +135,7 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
           </button>
         </div>
       ))}
-      <Button variant="outline" size="sm" onClick={handleAdd}>
+      <Button type="button" variant="outline" size="sm" onClick={handleAdd}>
         + {t('settings2.addMapping')}
       </Button>
     </div>
