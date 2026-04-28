@@ -157,7 +157,7 @@ func canonicalizeCodexModel(model string, supportedModels []string) string {
 				return canonical
 			}
 		}
-		return canonical
+		return trimmed
 	}
 	return trimmed
 }
