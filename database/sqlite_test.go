@@ -36,10 +36,52 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size"} {
+	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size", "effective_model"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_logs 缺少列 %q", name)
 		}
+	}
+}
+
+func TestUsageLogsPersistEffectiveModel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:        1,
+		Endpoint:         "/v1/messages",
+		InboundEndpoint:  "/v1/messages",
+		UpstreamEndpoint: "/v1/responses",
+		Model:            "claude-haiku-4-5-20251001",
+		EffectiveModel:   "gpt-5.4",
+		StatusCode:       200,
+		ReasoningEffort:  "high",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len(logs) = %d, want 1", len(logs))
+	}
+	if logs[0].Model != "claude-haiku-4-5-20251001" {
+		t.Fatalf("Model = %q, want claude-haiku-4-5-20251001", logs[0].Model)
+	}
+	if logs[0].EffectiveModel != "gpt-5.4" {
+		t.Fatalf("EffectiveModel = %q, want gpt-5.4", logs[0].EffectiveModel)
+	}
+	if logs[0].ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", logs[0].ReasoningEffort)
 	}
 }
 
