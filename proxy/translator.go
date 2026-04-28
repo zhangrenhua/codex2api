@@ -753,12 +753,7 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 	}
 	if reasoning, ok := body["reasoning"].(map[string]any); ok {
 		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
-			switch strings.ToLower(effort) {
-			case "low", "medium", "high", "xhigh":
-				// 合法值，保留
-			default:
-				reasoning["effort"] = "high"
-			}
+			reasoning["effort"] = normalizeReasoningEffort(effort)
 		}
 	}
 
@@ -864,12 +859,15 @@ func PrepareCompactResponsesBody(rawBody []byte) ([]byte, string) {
 
 // normalizeReasoningEffort 将 reasoning_effort 钳位到上游支持的值
 func normalizeReasoningEffort(effort string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
 	if effort == "" {
 		return ""
 	}
-	switch strings.ToLower(effort) {
+	switch effort {
 	case "low", "medium", "high", "xhigh":
 		return effort
+	case "max":
+		return "xhigh"
 	default:
 		return "high"
 	}
