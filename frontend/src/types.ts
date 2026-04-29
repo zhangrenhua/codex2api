@@ -15,6 +15,11 @@ export interface StatsResponse {
   today_requests: number
 }
 
+export interface AccountUsageWindow {
+  requests: number
+  tokens: number
+}
+
 export interface AccountRow {
   id: number
   name: string
@@ -55,6 +60,8 @@ export interface AccountRow {
   error_requests?: number
   usage_percent_7d?: number | null
   usage_percent_5h?: number | null
+  usage_5h_detail?: AccountUsageWindow
+  usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
   cooldown_until?: ISODateString
@@ -366,6 +373,8 @@ export interface ImageAsset {
   job_id: number
   template_id: number
   filename: string
+  proxy_url?: string
+  thumbnail_url?: string
   mime_type: string
   bytes: number
   width: number
@@ -435,6 +444,7 @@ export interface CreateImageJobPayload {
   output_format?: string
   background?: string
   style?: string
+  upscale?: string
   api_key_id?: number
   template_id?: number
 }

@@ -97,6 +97,8 @@ func (h *Handler) SetPoolSizes(pgMaxConns, redisPoolSize int) {
 
 // RegisterRoutes 注册管理 API 路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	r.GET("/p/img/:id", h.GetSignedImageAssetFile)
+
 	api := r.Group("/api/admin")
 	api.Use(h.adminAuthMiddleware())
 	api.GET("/stats", h.GetStats)
@@ -283,6 +285,8 @@ type accountResponse struct {
 	ErrorRequests            int64                      `json:"error_requests"`
 	UsagePercent7d           *float64                   `json:"usage_percent_7d"`
 	UsagePercent5h           *float64                   `json:"usage_percent_5h"`
+	Usage5hDetail            *accountUsageWindow        `json:"usage_5h_detail,omitempty"`
+	Usage7dDetail            *accountUsageWindow        `json:"usage_7d_detail,omitempty"`
 	Reset5hAt                string                     `json:"reset_5h_at,omitempty"`
 	Reset7dAt                string                     `json:"reset_7d_at,omitempty"`
 	ScoreBreakdown           schedulerBreakdownResponse `json:"scheduler_breakdown"`
@@ -292,6 +296,11 @@ type accountResponse struct {
 	LastServerErrorAt        string                     `json:"last_server_error_at,omitempty"`
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
+}
+
+type accountUsageWindow struct {
+	Requests int64 `json:"requests"`
+	Tokens   int64 `json:"tokens"`
 }
 
 type schedulerBreakdownResponse struct {
@@ -328,6 +337,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 
 	// 获取每账号近 7 天请求统计（带 30 秒内存缓存）
 	reqCounts := h.getCachedRequestCounts()
+	usage5h, usage7d := h.getAccountUsageWindows(ctx)
 
 	accounts := make([]accountResponse, 0, len(rows))
 	for _, row := range rows {
@@ -411,6 +421,12 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		if rc, ok := reqCounts[row.ID]; ok {
 			resp.SuccessRequests = rc.SuccessCount
 			resp.ErrorRequests = rc.ErrorCount
+		}
+		if usage, ok := usage5h[row.ID]; ok {
+			resp.Usage5hDetail = &accountUsageWindow{Requests: usage.Requests, Tokens: usage.Tokens}
+		}
+		if usage, ok := usage7d[row.ID]; ok {
+			resp.Usage7dDetail = &accountUsageWindow{Requests: usage.Requests, Tokens: usage.Tokens}
 		}
 		accounts = append(accounts, resp)
 	}
@@ -689,6 +705,21 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 	return counts
 }
 
+func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*database.AccountTimeRangeUsage, map[int64]*database.AccountTimeRangeUsage) {
+	now := time.Now()
+	usage5h, err := h.db.GetAccountTimeRangeUsage(ctx, now.Add(-5*time.Hour))
+	if err != nil {
+		log.Printf("获取账号 5h 用量统计失败: %v", err)
+		usage5h = make(map[int64]*database.AccountTimeRangeUsage)
+	}
+	usage7d, err := h.db.GetAccountTimeRangeUsage(ctx, now.AddDate(0, 0, -7))
+	if err != nil {
+		log.Printf("获取账号 7d 用量统计失败: %v", err)
+		usage7d = make(map[int64]*database.AccountTimeRangeUsage)
+	}
+	return usage5h, usage7d
+}
+
 type addAccountReq struct {
 	Name         string `json:"name"`
 	RefreshToken string `json:"refresh_token"`
@@ -944,6 +975,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 // importToken 导入时的统一 token 载体
 type importToken struct {
 	refreshToken string
+	sessionToken string
 	accessToken  string // AT-only 兼容路径
 	name         string
 	email        string
@@ -955,15 +987,17 @@ type importToken struct {
 
 // jsonAccountEntry CLIProxyAPI 凭证 JSON 条目
 type jsonAccountEntry struct {
-	RefreshToken string `json:"refresh_token"`
-	AccessToken  string `json:"access_token"`
-	IDToken      string `json:"id_token"`
-	AccountID    string `json:"account_id"`
-	Email        string `json:"email"`
-	Name         string `json:"name"`
-	PlanType     string `json:"plan_type"`
-	Expired      string `json:"expired"`
-	ExpiresAt    string `json:"expires_at"`
+	RefreshToken      string `json:"refresh_token"`
+	SessionToken      string `json:"session_token"`
+	SessionTokenCamel string `json:"sessionToken"`
+	AccessToken       string `json:"access_token"`
+	IDToken           string `json:"id_token"`
+	AccountID         string `json:"account_id"`
+	Email             string `json:"email"`
+	Name              string `json:"name"`
+	PlanType          string `json:"plan_type"`
+	Expired           string `json:"expired"`
+	ExpiresAt         string `json:"expires_at"`
 }
 
 type sub2apiImportPayload struct {
@@ -976,14 +1010,16 @@ type sub2apiAccountEntry struct {
 }
 
 type sub2apiAccountCredentials struct {
-	RefreshToken string `json:"refresh_token"`
-	AccessToken  string `json:"access_token"`
-	IDToken      string `json:"id_token"`
-	AccountID    string `json:"account_id"`
-	Email        string `json:"email"`
-	PlanType     string `json:"plan_type"`
-	ExpiresAt    string `json:"expires_at"`
-	Expired      string `json:"expired"`
+	RefreshToken      string `json:"refresh_token"`
+	SessionToken      string `json:"session_token"`
+	SessionTokenCamel string `json:"sessionToken"`
+	AccessToken       string `json:"access_token"`
+	IDToken           string `json:"id_token"`
+	AccountID         string `json:"account_id"`
+	Email             string `json:"email"`
+	PlanType          string `json:"plan_type"`
+	ExpiresAt         string `json:"expires_at"`
+	Expired           string `json:"expired"`
 }
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
@@ -1028,13 +1064,15 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 	tokens := make([]importToken, 0, len(entries))
 	for _, entry := range entries {
 		rt := strings.TrimSpace(entry.RefreshToken)
+		st := firstNonEmpty(entry.SessionToken, entry.SessionTokenCamel)
 		at := strings.TrimSpace(entry.AccessToken)
 		email := strings.TrimSpace(entry.Email)
 		name := firstNonEmpty(entry.Name, email)
 
-		if rt != "" || at != "" {
+		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
 				refreshToken: rt,
+				sessionToken: st,
 				accessToken:  at,
 				name:         name,
 				email:        email,
@@ -1057,6 +1095,7 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 	tokens := make([]importToken, 0, len(payload.Accounts))
 	for _, account := range payload.Accounts {
 		rt := strings.TrimSpace(account.Credentials.RefreshToken)
+		st := firstNonEmpty(account.Credentials.SessionToken, account.Credentials.SessionTokenCamel)
 		at := strings.TrimSpace(account.Credentials.AccessToken)
 		name := strings.TrimSpace(account.Name)
 		email := strings.TrimSpace(account.Credentials.Email)
@@ -1065,9 +1104,10 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 			name = email
 		}
 
-		if rt != "" || at != "" {
+		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
 				refreshToken: rt,
+				sessionToken: st,
 				accessToken:  at,
 				name:         name,
 				email:        email,
@@ -1247,14 +1287,26 @@ func setupSSE(c *gin.Context) {
 
 // importAccountsCommon 公共的去重、并发插入、SSE 进度推送逻辑（支持 RT 和 AT-only 混合导入）
 func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, proxyURL string) {
-	// 文件内去重（RT 和 AT 分别去重）
+	// 文件内去重（RT、ST 和 AT 分别去重）
 	seenRT := make(map[string]bool)
+	seenST := make(map[string]bool)
 	seenAT := make(map[string]bool)
 	var unique []importToken
 	for _, t := range tokens {
 		if t.refreshToken != "" {
 			if !seenRT[t.refreshToken] {
 				seenRT[t.refreshToken] = true
+				unique = append(unique, t)
+			}
+			if t.sessionToken != "" {
+				seenST[t.sessionToken] = true
+			}
+			if t.accessToken != "" {
+				seenAT[t.accessToken] = true
+			}
+		} else if t.sessionToken != "" {
+			if !seenST[t.sessionToken] {
+				seenST[t.sessionToken] = true
 				unique = append(unique, t)
 			}
 			if t.accessToken != "" {
@@ -1290,6 +1342,15 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			existingATs = make(map[string]bool)
 		}
 	}
+	hasST := len(seenST) > 0
+	var existingSTs map[string]bool
+	if hasST {
+		existingSTs, err = h.db.GetAllSessionTokens(dedupeCtx)
+		if err != nil {
+			log.Printf("查询已有 ST 失败: %v", err)
+			existingSTs = make(map[string]bool)
+		}
+	}
 
 	var newTokens []importToken
 	duplicateCount := 0
@@ -1297,6 +1358,16 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 		switch {
 		case t.refreshToken != "":
 			if existingRTs[t.refreshToken] {
+				duplicateCount++
+			} else if t.sessionToken != "" && existingSTs[t.sessionToken] {
+				duplicateCount++
+			} else if t.accessToken != "" && existingATs[t.accessToken] {
+				duplicateCount++
+			} else {
+				newTokens = append(newTokens, t)
+			}
+		case t.sessionToken != "":
+			if existingSTs[t.sessionToken] {
 				duplicateCount++
 			} else if t.accessToken != "" && existingATs[t.accessToken] {
 				duplicateCount++
@@ -1388,6 +1459,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
 				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+					sessionToken: tok.sessionToken,
 					accessToken:  tok.accessToken,
 					idToken:      tok.idToken,
 					accountID:    tok.accountID,
@@ -1409,7 +1481,22 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccount(insertCtx, name, tok.refreshToken, proxyURL)
+				var id int64
+				var err error
+				if tok.refreshToken != "" {
+					id, err = h.db.InsertAccount(insertCtx, name, tok.refreshToken, proxyURL)
+				} else {
+					seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+						sessionToken: tok.sessionToken,
+						accessToken:  tok.accessToken,
+						idToken:      tok.idToken,
+						accountID:    tok.accountID,
+						email:        tok.email,
+						planType:     tok.planType,
+						expiresAtRaw: tok.expiresAt,
+					})
+					id, err = h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
+				}
 				insertCancel()
 
 				if err != nil {
@@ -1425,6 +1512,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
 					refreshToken: tok.refreshToken,
+					sessionToken: tok.sessionToken,
 					accessToken:  tok.accessToken,
 					idToken:      tok.idToken,
 					accountID:    tok.accountID,

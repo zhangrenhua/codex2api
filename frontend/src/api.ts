@@ -230,8 +230,13 @@ export const api = {
     if (params.pageSize) sp.set('page_size', String(params.pageSize))
     return request<ImageAssetsResponse>(`/images/assets?${sp.toString()}`)
   },
-  getImageAssetFile: (id: number, download = false) =>
-    requestBlob(`/images/assets/${id}/file${download ? '?download=1' : ''}`),
+  getImageAssetFile: (id: number, download = false, thumbKB = 0) => {
+    const sp = new URLSearchParams()
+    if (download) sp.set('download', '1')
+    if (thumbKB > 0) sp.set('thumb_kb', String(thumbKB))
+    const query = sp.toString()
+    return requestBlob(`/images/assets/${id}/file${query ? `?${query}` : ''}`)
+  },
   deleteImageAsset: (id: number) =>
     request<MessageResponse>(`/images/assets/${id}`, { method: 'DELETE' }),
   clearUsageLogs: () =>

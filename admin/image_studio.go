@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/imageproc"
+	"github.com/codex2api/internal/signedasset"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -30,6 +32,7 @@ import (
 
 const defaultImageAssetDir = "/data/images"
 const maxInlineImageAssetCacheBytes = 64 * 1024 * 1024
+const defaultSignedImageThumbKB = 32
 
 type imagePromptTemplatePayload struct {
 	Name         *string  `json:"name"`
@@ -52,12 +55,20 @@ type imageGenerationJobPayload struct {
 	OutputFormat string `json:"output_format"`
 	Background   string `json:"background"`
 	Style        string `json:"style"`
+	Upscale      string `json:"upscale"`
 	APIKeyID     int64  `json:"api_key_id"`
 	TemplateID   int64  `json:"template_id"`
 }
 
 type imageJobResponse struct {
 	Job *database.ImageGenerationJob `json:"job"`
+}
+
+type imageAssetFileOptions struct {
+	download        bool
+	private         bool
+	thumbKB         int
+	requireAssetDir bool
 }
 
 type imagePromptTemplatesResponse struct {
@@ -255,6 +266,7 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 	}
 	req.Background = normalizeOptionalImageParam(req.Background)
 	req.Style = normalizeOptionalImageParam(req.Style)
+	req.Upscale = imageproc.NormalizeUpscale(req.Upscale)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -284,13 +296,14 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
-	log.Printf("[image-studio] job=%d queued model=%s size=%s quality=%s format=%s background=%s style=%t api_key=%s template=%d prompt=%q",
+	log.Printf("[image-studio] job=%d queued model=%s size=%s quality=%s format=%s background=%s upscale=%s style=%t api_key=%s template=%d prompt=%q",
 		jobID,
 		imageLogValue(req.Model),
 		imageLogValue(req.Size),
 		imageLogValue(req.Quality),
 		imageLogValue(req.OutputFormat),
 		imageLogValue(req.Background),
+		imageLogValue(req.Upscale),
 		strings.TrimSpace(req.Style) != "",
 		imageLogAPIKeyLabel(keyID, keyName, keyMasked),
 		req.TemplateID,
@@ -309,6 +322,7 @@ func (h *Handler) ListImageGenerationJobs(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	decorateImageJobPage(result)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -332,6 +346,7 @@ func (h *Handler) GetImageGenerationJob(c *gin.Context) {
 	if c.Query("include_cache") == "1" {
 		h.attachImageJobAssetCachePayload(job)
 	}
+	decorateImageJobAssets(job)
 	c.JSON(http.StatusOK, imageJobResponse{Job: job})
 }
 
@@ -365,6 +380,9 @@ func (h *Handler) ListImageAssets(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	if result != nil {
+		decorateImageAssets(result.Assets)
+	}
 	c.JSON(http.StatusOK, result)
 }
 
@@ -385,24 +403,145 @@ func (h *Handler) GetImageAssetFile(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
-	if _, err := os.Stat(asset.StoragePath); err != nil {
+	h.serveImageAssetFile(c, asset, imageAssetFileOptions{
+		download: c.Query("download") == "1",
+		private:  true,
+		thumbKB:  imageproc.ClampThumbKB(queryInt(c, "thumb_kb")),
+	})
+}
+
+func (h *Handler) GetSignedImageAssetFile(c *gin.Context) {
+	id, err := parsePositiveIDParam(c, "id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	exp, err := strconv.ParseInt(strings.TrimSpace(c.Query("exp")), 10, 64)
+	if err != nil || exp <= 0 {
+		writeError(c, http.StatusBadRequest, "签名参数无效")
+		return
+	}
+	thumbKB := imageproc.ClampThumbKB(queryInt(c, "thumb_kb"))
+	if !signedasset.VerifyImageAssetURL(id, exp, thumbKB, strings.TrimSpace(c.Query("sig")), time.Now()) {
+		writeError(c, http.StatusForbidden, "图片链接已失效")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+	asset, err := h.db.GetImageAsset(ctx, id)
+	if err == sql.ErrNoRows {
+		writeError(c, http.StatusNotFound, "图片不存在")
+		return
+	}
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	h.serveImageAssetFile(c, asset, imageAssetFileOptions{
+		thumbKB:         thumbKB,
+		requireAssetDir: true,
+	})
+}
+
+func (h *Handler) serveImageAssetFile(c *gin.Context, asset *database.ImageAsset, opts imageAssetFileOptions) {
+	if asset == nil || strings.TrimSpace(asset.StoragePath) == "" {
 		writeError(c, http.StatusNotFound, "图片文件不存在")
 		return
 	}
-	disposition := "inline"
-	if c.Query("download") == "1" {
-		disposition = "attachment"
+	if opts.requireAssetDir && !imageAssetPathAllowed(asset.StoragePath) {
+		writeError(c, http.StatusNotFound, "图片文件不存在")
+		return
 	}
+	info, err := os.Stat(asset.StoragePath)
+	if err != nil || info.IsDir() {
+		writeError(c, http.StatusNotFound, "图片文件不存在")
+		return
+	}
+
 	c.Request.Header.Del("If-Modified-Since")
 	c.Request.Header.Del("If-None-Match")
-	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
+	if opts.private {
+		c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+	} else {
+		c.Header("Cache-Control", "public, max-age=86400")
+	}
+
+	disposition := "inline"
+	if opts.download {
+		disposition = "attachment"
+	}
+	filename := sanitizeDownloadFilename(asset.Filename)
+	if opts.thumbKB > 0 && !opts.download {
+		if data, err := os.ReadFile(asset.StoragePath); err == nil {
+			if thumb, contentType, ok := imageproc.MakeThumbnail(data, opts.thumbKB); ok {
+				c.Header("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, thumbnailFilename(filename)))
+				c.Data(http.StatusOK, contentType, thumb)
+				return
+			}
+		}
+	}
+
 	if strings.TrimSpace(asset.MimeType) != "" {
 		c.Header("Content-Type", asset.MimeType)
 	}
-	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, sanitizeDownloadFilename(asset.Filename)))
+	c.Header("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
 	c.File(asset.StoragePath)
+}
+
+func imageAssetPathAllowed(storagePath string) bool {
+	assetPath, err := filepath.Abs(strings.TrimSpace(storagePath))
+	if err != nil {
+		return false
+	}
+	basePath, err := filepath.Abs(imageAssetDir())
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(basePath, assetPath)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func thumbnailFilename(filename string) string {
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+	if base == "" {
+		base = "image"
+	}
+	return base + ".thumb.jpg"
+}
+
+func decorateImageJobPage(page *database.ImageJobPage) {
+	if page == nil {
+		return
+	}
+	for idx := range page.Jobs {
+		decorateImageAssets(page.Jobs[idx].Assets)
+	}
+}
+
+func decorateImageJobAssets(job *database.ImageGenerationJob) {
+	if job == nil {
+		return
+	}
+	decorateImageAssets(job.Assets)
+}
+
+func decorateImageAssets(assets []database.ImageAsset) {
+	for idx := range assets {
+		decorateImageAsset(&assets[idx])
+	}
+}
+
+func decorateImageAsset(asset *database.ImageAsset) {
+	if asset == nil || asset.ID <= 0 {
+		return
+	}
+	asset.ProxyURL = signedasset.ImageAssetURL(asset.ID, 0)
+	asset.ThumbnailURL = signedasset.ImageAssetURL(asset.ID, defaultSignedImageThumbKB)
 }
 
 func (h *Handler) DeleteImageAsset(c *gin.Context) {
@@ -651,6 +790,17 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		if err != nil {
 			return saved, err
 		}
+		if req.Upscale != "" {
+			upscaledBytes, upscaledMime, ok := h.upscaleImageJobAsset(ctx, jobID, idx+1, imageBytes, req.Upscale)
+			if ok {
+				imageBytes = upscaledBytes
+				mimeType = upscaledMime
+				format = extensionFromMimeType(upscaledMime)
+				if format == "" {
+					format = "png"
+				}
+			}
+		}
 		width, height := imageDimensions(imageBytes)
 		actualSize := ""
 		if width > 0 && height > 0 {
@@ -695,6 +845,7 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		if err != nil {
 			return saved, err
 		}
+		decorateImageAsset(asset)
 		saved = append(saved, *asset)
 		log.Printf("[image-studio] job=%d asset=%d saved file=%s size=%s requested=%s bytes=%d format=%s mime=%s model=%s",
 			jobID,
@@ -709,6 +860,63 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		)
 	}
 	return saved, nil
+}
+
+func (h *Handler) upscaleImageJobAsset(ctx context.Context, jobID int64, assetIndex int, imageBytes []byte, scale string) ([]byte, string, bool) {
+	scale = imageproc.NormalizeUpscale(scale)
+	if scale == "" || len(imageBytes) == 0 {
+		return nil, "", false
+	}
+	cache := imageproc.GlobalUpscaleCache()
+	key := imageproc.ComputeUpscaleCacheKey(imageBytes, scale)
+	if data, contentType, ok := cache.Get(key); ok && contentType != "" {
+		return data, contentType, true
+	}
+
+	upscaleCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if err := cache.Acquire(upscaleCtx); err != nil {
+		log.Printf("[image-studio] job=%d asset_index=%d local_upscale_skipped scale=%s error=%s",
+			jobID,
+			assetIndex,
+			imageLogValue(scale),
+			security.SanitizeLog(err.Error()),
+		)
+		return nil, "", false
+	}
+	defer cache.Release()
+
+	if data, contentType, ok := cache.Get(key); ok && contentType != "" {
+		return data, contentType, true
+	}
+
+	beforeWidth, beforeHeight := imageDimensions(imageBytes)
+	upscaled, contentType, err := imageproc.DoUpscale(imageBytes, scale)
+	if err != nil {
+		log.Printf("[image-studio] job=%d asset_index=%d local_upscale_failed scale=%s error=%s",
+			jobID,
+			assetIndex,
+			imageLogValue(scale),
+			security.SanitizeLog(err.Error()),
+		)
+		return nil, "", false
+	}
+	if contentType == "" {
+		return nil, "", false
+	}
+
+	cache.Put(key, upscaled, contentType)
+	afterWidth, afterHeight := imageDimensions(upscaled)
+	log.Printf("[image-studio] job=%d asset_index=%d local_upscale=%s from=%s to=%s bytes=%d->%d",
+		jobID,
+		assetIndex,
+		imageLogValue(scale),
+		imageLogDimensions(beforeWidth, beforeHeight),
+		imageLogDimensions(afterWidth, afterHeight),
+		len(imageBytes),
+		len(upscaled),
+	)
+	return upscaled, contentType, true
 }
 
 func (h *Handler) resolveImageJobAPIKey(ctx context.Context, id int64) (*database.APIKeyRow, error) {
@@ -807,6 +1015,14 @@ func parsePositiveIDParam(c *gin.Context, name string) (int64, error) {
 		return 0, fmt.Errorf("invalid id")
 	}
 	return id, nil
+}
+
+func queryInt(c *gin.Context, name string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(c.Query(name)))
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func paginationParams(c *gin.Context, defaultPageSize int) (int, int) {
@@ -936,6 +1152,13 @@ func imageLogFirstAssetSize(assets []database.ImageAsset) string {
 		}
 	}
 	return "unknown"
+}
+
+func imageLogDimensions(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%dx%d", width, height)
 }
 
 func logImageJobError(jobID int64, err error) {

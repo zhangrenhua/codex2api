@@ -803,6 +803,12 @@
     "quality": "Quality",
     "format": "Format",
     "background": "Background",
+    "localUpscale": "Local Upscale",
+    "upscaleOptions": {
+      "none": "Off",
+      "2k": "Upscale to 2K",
+      "4k": "Upscale to 4K"
+    },
     "backgroundOptions": {
       "auto": "Auto",
       "opaque": "Opaque",

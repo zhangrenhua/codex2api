@@ -803,6 +803,12 @@
     "quality": "质量",
     "format": "格式",
     "background": "背景",
+    "localUpscale": "本地放大",
+    "upscaleOptions": {
+      "none": "不放大",
+      "2k": "放大到 2K",
+      "4k": "放大到 4K"
+    },
     "backgroundOptions": {
       "auto": "自动",
       "opaque": "不透明",

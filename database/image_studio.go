@@ -77,6 +77,8 @@ type ImageAsset struct {
 	TemplateID    int64     `json:"template_id"`
 	Filename      string    `json:"filename"`
 	StoragePath   string    `json:"-"`
+	ProxyURL      string    `json:"proxy_url,omitempty"`
+	ThumbnailURL  string    `json:"thumbnail_url,omitempty"`
 	MimeType      string    `json:"mime_type"`
 	Bytes         int       `json:"bytes"`
 	Width         int       `json:"width"`

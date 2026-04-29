@@ -43,6 +43,7 @@ type Account struct {
 	mu             sync.RWMutex
 	DBID           int64 // 数据库 ID
 	RefreshToken   string
+	SessionToken   string
 	AccessToken    string
 	ExpiresAt      time.Time
 	AccountID      string
@@ -1461,15 +1462,17 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 
 	for _, row := range rows {
 		rt := row.GetCredential("refresh_token")
+		st := row.GetCredential("session_token")
 		at := row.GetCredential("access_token")
-		if rt == "" && at == "" {
-			log.Printf("[账号 %d] 缺少 refresh_token 和 access_token，跳过", row.ID)
+		if rt == "" && st == "" && at == "" {
+			log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
 			continue
 		}
 
 		account := &Account{
 			DBID:         row.ID,
 			RefreshToken: rt,
+			SessionToken: st,
 			ProxyURL:     strings.TrimSpace(row.ProxyURL),
 			HealthTier:   HealthTierWarm,
 			AddedAt:      row.CreatedAt.UnixNano(),
@@ -2755,6 +2758,7 @@ func (s *Store) parallelRefreshAll(ctx context.Context) {
 func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	acc.mu.RLock()
 	rt := acc.RefreshToken
+	st := acc.SessionToken
 	dbID := acc.DBID
 	cooldownUntil := acc.CooldownUtil
 	cooldownReason := acc.CooldownReason
@@ -2830,7 +2834,25 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	// 3. 执行 RT 刷新（Resin 启用时传入 DBID 用于粘性代理）
 	resinID := fmt.Sprintf("%d", dbID)
 	proxy := s.ResolveProxyForAccount(acc)
-	td, info, err := RefreshWithRetry(ctx, rt, proxy, resinID)
+	var td *TokenData
+	var info *AccountInfo
+	if rt != "" {
+		td, info, err = RefreshWithRetry(ctx, rt, proxy, resinID)
+	} else {
+		err = fmt.Errorf("refresh_token 为空")
+	}
+	if err != nil && st != "" {
+		rtErr := err
+		if stTD, stInfo, stErr := RefreshWithSessionTokenRetry(ctx, st, proxy, resinID); stErr == nil {
+			td, info, err = stTD, stInfo, nil
+			if td.RefreshToken == "" {
+				td.RefreshToken = rt
+			}
+			log.Printf("[账号 %d] RT 刷新失败后已使用 session_token 回退刷新 AT", dbID)
+		} else {
+			err = fmt.Errorf("RT 刷新失败: %v；session_token 回退失败: %w", rtErr, stErr)
+		}
+	}
 	if err != nil {
 		if isNonRetryable(err) {
 			acc.mu.Lock()
@@ -2847,7 +2869,10 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	// 4. 更新内存状态
 	acc.mu.Lock()
 	acc.AccessToken = td.AccessToken
-	acc.RefreshToken = td.RefreshToken
+	if td.RefreshToken != "" {
+		acc.RefreshToken = td.RefreshToken
+	}
+	acc.SessionToken = st
 	acc.ExpiresAt = td.ExpiresAt
 	acc.ErrorMsg = ""
 	if info != nil {
@@ -2885,10 +2910,15 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 
 	// 6. 更新数据库 credentials
 	credentials := map[string]interface{}{
-		"refresh_token": td.RefreshToken,
-		"access_token":  td.AccessToken,
-		"id_token":      td.IDToken,
-		"expires_at":    td.ExpiresAt.Format(time.RFC3339),
+		"access_token": td.AccessToken,
+		"id_token":     td.IDToken,
+		"expires_at":   td.ExpiresAt.Format(time.RFC3339),
+	}
+	if td.RefreshToken != "" {
+		credentials["refresh_token"] = td.RefreshToken
+	}
+	if st != "" {
+		credentials["session_token"] = st
 	}
 	if info != nil {
 		if info.ChatGPTAccountID != "" {

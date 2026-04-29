@@ -2679,6 +2679,17 @@ function formatResetAt(resetAt: string | undefined): string | null {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+function formatCompactUsageNumber(value?: number): string {
+  const n = Number(value || 0)
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`
+  return String(n)
+}
+
+function hasUsageWindowDetail(detail?: AccountRow['usage_5h_detail']): boolean {
+  return Boolean(detail && ((detail.requests ?? 0) > 0 || (detail.tokens ?? 0) > 0))
+}
+
 // 用量进度条颜色
 function usageBarColor(pct: number): string {
   if (pct >= 90) return 'bg-red-500'
@@ -2687,8 +2698,11 @@ function usageBarColor(pct: number): string {
 }
 
 // 单行用量进度条
-function UsageBar({ label, pct, resetAt }: { label: string; pct: number; resetAt?: string }) {
+function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number; resetAt?: string; detail?: AccountRow['usage_5h_detail'] }) {
   const resetText = formatResetAt(resetAt)
+  const detailText = hasUsageWindowDetail(detail)
+    ? `${formatCompactUsageNumber(detail?.requests)} req / ${formatCompactUsageNumber(detail?.tokens)} tok`
+    : ''
   return (
     <div>
       <div className="flex items-center gap-1.5">
@@ -2698,7 +2712,18 @@ function UsageBar({ label, pct, resetAt }: { label: string; pct: number; resetAt
         </div>
         <span className="text-[12px] font-semibold w-[42px] text-right shrink-0">{pct.toFixed(1)}%</span>
       </div>
+      {detailText && <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">{detailText}</div>}
       {resetText && <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">⏱ {resetText}</div>}
+    </div>
+  )
+}
+
+function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow['usage_5h_detail'] }) {
+  if (!hasUsageWindowDetail(detail)) return null
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+      <span className="w-5 shrink-0">{label}</span>
+      <span>{formatCompactUsageNumber(detail?.requests)} req / {formatCompactUsageNumber(detail?.tokens)} tok</span>
     </div>
   )
 }
@@ -2708,30 +2733,48 @@ function UsageCell({ account }: { account: AccountRow }) {
   const plan = (account.plan_type || '').toLowerCase()
   const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
   const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+  const has7dDetail = hasUsageWindowDetail(account.usage_7d_detail)
+  const has5hDetail = hasUsageWindowDetail(account.usage_5h_detail)
 
   if (plan === 'free') {
-    if (!has7d) return <span className="text-[12px] text-muted-foreground">-</span>
+    if (!has7d && !has7dDetail) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
+      <div className="w-48">
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }
 
   if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
-    if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">-</span>
+    if (!has5h && !has7d && !has5hDetail && !has7dDetail) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-48 space-y-1.5">
-        {has5h && <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} />}
-        {has7d && <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />}
+      <div className="w-52 space-y-1.5">
+        {has5h ? (
+          <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} detail={account.usage_5h_detail} />
+        ) : (
+          <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
+        )}
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }
 
-  if (has7d) {
+  if (has7d || has7dDetail) {
     return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
+      <div className="w-48">
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }

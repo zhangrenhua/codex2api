@@ -1593,6 +1593,13 @@ type AccountRequestCount struct {
 	ErrorCount   int64
 }
 
+// AccountTimeRangeUsage 每个账号在指定时间窗口内的真实请求/token 统计。
+type AccountTimeRangeUsage struct {
+	AccountID int64
+	Requests  int64
+	Tokens    int64
+}
+
 // GetAccountRequestCounts 按 account_id 聚合近 7 天成功/失败请求数
 func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRequestCount, error) {
 	since := time.Now().AddDate(0, 0, -7)
@@ -1617,6 +1624,33 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 			return nil, err
 		}
 		result[rc.AccountID] = rc
+	}
+	return result, rows.Err()
+}
+
+// GetAccountTimeRangeUsage 按 account_id 聚合 since 之后的请求数和 token 数。
+func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (map[int64]*AccountTimeRangeUsage, error) {
+	query := `
+	SELECT account_id,
+		COUNT(*) AS requests,
+		COALESCE(SUM(total_tokens), 0) AS tokens
+	FROM usage_logs
+	WHERE created_at >= $1 AND status_code <> 499
+	GROUP BY account_id
+	`
+	rows, err := db.conn.QueryContext(ctx, query, db.timeArg(since))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*AccountTimeRangeUsage)
+	for rows.Next() {
+		usage := &AccountTimeRangeUsage{}
+		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens); err != nil {
+			return nil, err
+		}
+		result[usage.AccountID] = usage
 	}
 	return result, rows.Err()
 }
@@ -2067,6 +2101,23 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 	)
 }
 
+// InsertAccountWithCredentials 插入带完整 credentials 的账号。
+func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+	if credentials == nil {
+		credentials = map[string]interface{}{}
+	}
+	credJSON, err := json.Marshal(credentials)
+	if err != nil {
+		return 0, err
+	}
+
+	return db.insertRowID(ctx,
+		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3) RETURNING id`,
+		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3)`,
+		name, credJSON, proxyURL,
+	)
+}
+
 // GetAllAccessTokens 获取所有已存在的 access_token（用于 AT 导入去重，排除已删除账号）
 func (db *DB) GetAllAccessTokens(ctx context.Context) (map[string]bool, error) {
 	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
@@ -2084,6 +2135,28 @@ func (db *DB) GetAllAccessTokens(ctx context.Context) (map[string]bool, error) {
 		at := credentialString(raw, "access_token")
 		if at != "" {
 			result[at] = true
+		}
+	}
+	return result, rows.Err()
+}
+
+// GetAllSessionTokens 获取所有已存在的 session_token（用于导入去重，排除已删除账号）
+func (db *DB) GetAllSessionTokens(ctx context.Context) (map[string]bool, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var raw interface{}
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		st := credentialString(raw, "session_token")
+		if st != "" {
+			result[st] = true
 		}
 	}
 	return result, rows.Err()

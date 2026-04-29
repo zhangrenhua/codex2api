@@ -91,6 +91,8 @@ const FORMAT_OPTIONS = [
   { label: 'JPEG', value: 'jpeg' },
 ]
 
+const UPSCALE_VALUES = ['', '2k', '4k'] as const
+
 const STYLE_PRESETS = [
   {
     id: 'cinematic',
@@ -258,6 +260,23 @@ function assetDisplayFrameClass(asset: ImageAsset, compact: boolean, gallery: bo
   return 'aspect-[3/4]'
 }
 
+function normalizeUpscale(value?: string): string {
+  const normalized = (value || '').trim().toLowerCase()
+  return UPSCALE_VALUES.includes(normalized as typeof UPSCALE_VALUES[number]) ? normalized : ''
+}
+
+function assetThumbnailURL(asset: ImageAsset, imageURLs: Record<number, string>): string | undefined {
+  return asset.thumbnail_url || asset.proxy_url || imageURLs[asset.id]
+}
+
+function assetPreviewURL(asset: ImageAsset, imageURLs: Record<number, string>): string | undefined {
+  return asset.proxy_url || imageURLs[asset.id] || asset.thumbnail_url
+}
+
+function hasServerImageURL(asset: ImageAsset): boolean {
+  return Boolean(asset.thumbnail_url || asset.proxy_url)
+}
+
 type CachedImageAsset = {
   id: number
   blob: Blob
@@ -403,6 +422,7 @@ export default function ImageStudio() {
   const [quality, setQuality] = useState('auto')
   const [outputFormat, setOutputFormat] = useState('png')
   const [background, setBackground] = useState('auto')
+  const [upscale, setUpscale] = useState('')
   const [style, setStyle] = useState('')
   const [apiKeyID, setAPIKeyID] = useState('')
   const [templateName, setTemplateName] = useState('')
@@ -501,6 +521,7 @@ export default function ImageStudio() {
 
   useEffect(() => {
     const activeIDs = new Set(visibleAssets.map(asset => asset.id))
+    const serverURLIDs = new Set(visibleAssets.filter(hasServerImageURL).map(asset => asset.id))
     activeAssetIDsRef.current = activeIDs
 
     setAssetURLs(prev => {
@@ -508,7 +529,7 @@ export default function ImageStudio() {
       const next = { ...prev }
       for (const [id, url] of Object.entries(prev)) {
         const assetID = Number(id)
-        if (!activeIDs.has(assetID)) {
+        if (!activeIDs.has(assetID) || serverURLIDs.has(assetID)) {
           URL.revokeObjectURL(url)
           delete next[assetID]
           assetURLRequestsRef.current.delete(assetID)
@@ -522,6 +543,7 @@ export default function ImageStudio() {
     })
 
     visibleAssets.forEach(asset => {
+      if (hasServerImageURL(asset)) return
       if (assetURLsRef.current[asset.id] || assetURLRequestsRef.current.has(asset.id)) return
       assetURLRequestsRef.current.add(asset.id)
       void (async () => {
@@ -736,6 +758,7 @@ export default function ImageStudio() {
     if (size !== 'auto') payload.size = size
     if (quality !== 'auto') payload.quality = quality
     if (background !== 'auto') payload.background = background
+    if (upscale) payload.upscale = upscale
     if (style.trim()) payload.style = style.trim()
     if (apiKeyID) payload.api_key_id = Number(apiKeyID)
     if (selectedTemplateId) payload.template_id = selectedTemplateId
@@ -770,6 +793,7 @@ export default function ImageStudio() {
     setQuality(params.quality || 'auto')
     setOutputFormat(params.output_format || 'png')
     setBackground(params.background || 'auto')
+    setUpscale(normalizeUpscale(params.upscale))
     setStyle(params.style || '')
     setSelectedTemplateId(params.template_id ? Number(params.template_id) : null)
     navigate('/images/studio')
@@ -780,6 +804,7 @@ export default function ImageStudio() {
       quality: params.quality && params.quality !== 'auto' ? params.quality : undefined,
       output_format: params.output_format || 'png',
       background: params.background && params.background !== 'auto' ? params.background : undefined,
+      upscale: normalizeUpscale(params.upscale) || undefined,
       style: params.style,
       api_key_id: apiKeyID ? Number(apiKeyID) : undefined,
       template_id: params.template_id ? Number(params.template_id) : undefined,
@@ -916,6 +941,11 @@ export default function ImageStudio() {
     { label: t('images.backgroundOptions.opaque'), value: 'opaque' },
     { label: t('images.backgroundOptions.transparent'), value: 'transparent' },
   ], [t])
+  const upscaleOptions = useMemo(() => [
+    { label: t('images.upscaleOptions.none'), value: '' },
+    { label: t('images.upscaleOptions.2k'), value: '2k' },
+    { label: t('images.upscaleOptions.4k'), value: '4k' },
+  ], [t])
   const hasGenerationDraft = Boolean(
     prompt.trim() ||
     selectedTemplateId ||
@@ -927,6 +957,7 @@ export default function ImageStudio() {
     quality !== 'auto' ||
     outputFormat !== 'png' ||
     background !== 'auto' ||
+    upscale ||
     apiKeyID
   )
 
@@ -938,6 +969,7 @@ export default function ImageStudio() {
     setQuality('auto')
     setOutputFormat('png')
     setBackground('auto')
+    setUpscale('')
     setStyle('')
     setAPIKeyID('')
     setTemplateName('')
@@ -967,6 +999,7 @@ export default function ImageStudio() {
           <Field label={t('images.quality')}><Select value={quality} onValueChange={setQuality} options={QUALITY_OPTIONS} compact /></Field>
           <Field label={t('images.format')}><Select value={outputFormat} onValueChange={setOutputFormat} options={FORMAT_OPTIONS} compact /></Field>
           <Field label={t('images.background')}><Select value={background} onValueChange={setBackground} options={backgroundOptions} compact /></Field>
+          <Field label={t('images.localUpscale')}><Select value={upscale} onValueChange={setUpscale} options={upscaleOptions} compact /></Field>
           <Field label={t('images.apiKey')}>
             <Select
               value={apiKeyID}
@@ -1101,7 +1134,7 @@ export default function ImageStudio() {
             {latestAsset && (
               <AssetCard
                 asset={latestAsset}
-                imageURL={assetURLs[latestAsset.id]}
+                imageURL={assetThumbnailURL(latestAsset, assetURLs)}
                 prompt={currentJob.prompt}
                 compact
                 onPreview={() => setPreviewAsset(latestAsset)}
@@ -1242,7 +1275,7 @@ export default function ImageStudio() {
           <AssetCard
             key={asset.id}
             asset={asset}
-            imageURL={assetURLs[asset.id]}
+            imageURL={assetThumbnailURL(asset, assetURLs)}
             prompt={promptForAsset(asset)}
             gallery
             onPreview={() => setPreviewAsset(asset)}
@@ -1290,7 +1323,7 @@ export default function ImageStudio() {
 
       <AssetPreviewDialog
         asset={previewAsset}
-        imageURL={previewAsset ? assetURLs[previewAsset.id] : undefined}
+        imageURL={previewAsset ? assetPreviewURL(previewAsset, assetURLs) : undefined}
         prompt={previewAsset ? promptForAsset(previewAsset) : ''}
         open={Boolean(previewAsset)}
         onClose={() => setPreviewAsset(null)}
@@ -1700,8 +1733,8 @@ function HistoryJobCard({
                     onClick={() => onPreview(asset)}
                     aria-label={t('images.openPreview')}
                   >
-                    {imageURLs[asset.id] ? (
-                      <img src={imageURLs[asset.id]} alt={job.prompt || asset.filename} className="h-full w-full object-contain" />
+                    {assetThumbnailURL(asset, imageURLs) ? (
+                      <img src={assetThumbnailURL(asset, imageURLs)} alt={job.prompt || asset.filename} className="h-full w-full object-contain" />
                     ) : (
                       <span className="flex h-full w-full items-center justify-center text-muted-foreground">
                         <ImageIcon className="size-5" />
