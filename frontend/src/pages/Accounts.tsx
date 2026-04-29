@@ -2720,10 +2720,22 @@ function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number;
 
 function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow['usage_5h_detail'] }) {
   if (!hasUsageWindowDetail(detail)) return null
+
+  const hasAccountBilled = detail?.account_billed !== undefined && detail?.account_billed !== null
+  const hasUserBilled = detail?.user_billed !== undefined && detail?.user_billed !== null
+
   return (
-    <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-      <span className="w-5 shrink-0">{label}</span>
-      <span>{formatCompactUsageNumber(detail?.requests)} req / {formatCompactUsageNumber(detail?.tokens)} tok</span>
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <span className="w-5 shrink-0">{label}</span>
+        <span>{formatCompactUsageNumber(detail?.requests)} req / {formatCompactUsageNumber(detail?.tokens)} tok</span>
+      </div>
+      {(hasAccountBilled || hasUserBilled) && (
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
+          {hasAccountBilled && <span>账号: ${detail.account_billed.toFixed(4)}</span>}
+          {hasUserBilled && <span>用户: ${detail.user_billed.toFixed(4)}</span>}
+        </div>
+      )}
     </div>
   )
 }
