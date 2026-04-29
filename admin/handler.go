@@ -306,8 +306,8 @@ type accountResponse struct {
 type accountUsageWindow struct {
 	Requests      int64   `json:"requests"`
 	Tokens        int64   `json:"tokens"`
-	AccountBilled float64 `json:"account_billed,omitempty"`
-	UserBilled    float64 `json:"user_billed,omitempty"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
 }
 
 type schedulerBreakdownResponse struct {
