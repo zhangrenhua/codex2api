@@ -839,7 +839,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	}
 
 	// 计算账号计费金额（标准费用）
-	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, billingModel)
+	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, log.ServiceTier)
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled

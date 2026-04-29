@@ -2719,10 +2719,10 @@ function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number;
 }
 
 function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow['usage_5h_detail'] }) {
-  if (!hasUsageWindowDetail(detail)) return null
+  if (!detail || !hasUsageWindowDetail(detail)) return null
 
-  const hasAccountBilled = detail?.account_billed !== undefined && detail?.account_billed !== null
-  const hasUserBilled = detail?.user_billed !== undefined && detail?.user_billed !== null
+  const accountBilledText = typeof detail.account_billed === 'number' ? detail.account_billed.toFixed(4) : ''
+  const userBilledText = typeof detail.user_billed === 'number' ? detail.user_billed.toFixed(4) : ''
 
   return (
     <div className="flex flex-col gap-0.5">
@@ -2730,10 +2730,10 @@ function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow
         <span className="w-5 shrink-0">{label}</span>
         <span>{formatCompactUsageNumber(detail?.requests)} req / {formatCompactUsageNumber(detail?.tokens)} tok</span>
       </div>
-      {(hasAccountBilled || hasUserBilled) && (
+      {(accountBilledText || userBilledText) && (
         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
-          {hasAccountBilled && <span>账号: ${detail.account_billed.toFixed(4)}</span>}
-          {hasUserBilled && <span>用户: ${detail.user_billed.toFixed(4)}</span>}
+          {accountBilledText && <span>账号: ${accountBilledText}</span>}
+          {userBilledText && <span>用户: ${userBilledText}</span>}
         </div>
       )}
     </div>
