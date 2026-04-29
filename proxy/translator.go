@@ -839,9 +839,10 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		"max_output_tokens", "max_tokens", "max_completion_tokens",
 		"temperature", "top_p", "frequency_penalty", "presence_penalty",
 		"logprobs", "top_logprobs", "n", "seed", "stop", "user",
-		"logit_bias", "response_format", "serviceTier",
+		"logit_bias", "response_format", "serviceTier", "metadata",
 		"stream_options", "reasoning_effort", "truncation", "context_management",
-		"disable_response_storage", "verbosity",
+		"disable_response_storage", "verbosity", "previous_response_id",
+		"prompt_cache_retention", "safety_identifier",
 	} {
 		delete(body, field)
 	}

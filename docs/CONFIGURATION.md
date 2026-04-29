@@ -46,6 +46,17 @@ Codex2API 采用三层配置架构：
 | `ADMIN_SECRET` | 否 | - | 管理后台登录密钥 |
 | `TZ` | 否 | UTC | 时区，如 `Asia/Shanghai` |
 
+### Codex 上游稳定性配置
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `CODEX_UPSTREAM_TRANSPORT` | 否 | `http` | Codex 上游协议：`http` / `auto` / `ws`。HTTP 入站在 `auto` 下仍走 HTTP 上游 |
+| `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
+| `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
+| `CODEX_WS_SEND_USER_AGENT` | 否 | `false` | WS 握手是否发送 `User-Agent`/`Version`；默认关闭 |
+| `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
+| `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
+
 ### 数据库配置
 
 #### PostgreSQL 模式

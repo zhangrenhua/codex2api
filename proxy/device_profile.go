@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultDeviceProfileUserAgent      = latestCodexCLIUserAgentPrefix + " (Mac OS 15.5.0; arm64) Apple_Terminal/464"
+	defaultDeviceProfileUserAgent      = latestCodexCLIUserAgentPrefix
 	defaultDeviceProfilePackageVersion = latestCodexCLIVersion
 	defaultDeviceProfileRuntimeVersion = latestCodexCLIVersion
 	defaultDeviceProfileOS             = "MacOS"

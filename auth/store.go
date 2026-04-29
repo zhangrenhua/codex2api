@@ -1050,7 +1050,21 @@ type sessionAffinity struct {
 	expiresAt time.Time
 }
 
-const sessionAffinityTTL = 30 * time.Minute
+const defaultSessionAffinityTTL = time.Hour
+
+func sessionAffinityTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CODEX_SESSION_AFFINITY_TTL"))
+	if raw == "" {
+		return defaultSessionAffinityTTL
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return defaultSessionAffinityTTL
+}
 
 func fastSchedulerEnabledFromEnv() bool {
 	for _, key := range []string{"FAST_SCHEDULER_ENABLED", "CODEX_FAST_SCHEDULER"} {
@@ -1760,7 +1774,7 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	s.sessionBindings[key] = sessionAffinity{
 		accountID: account.DBID,
 		proxyURL:  strings.TrimSpace(proxyURL),
-		expiresAt: time.Now().Add(sessionAffinityTTL),
+		expiresAt: time.Now().Add(sessionAffinityTTL()),
 	}
 	s.sessionMu.Unlock()
 }

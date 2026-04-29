@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 )
 
 // ==================== 动态 User-Agent 生成 ====================
@@ -25,6 +26,52 @@ const (
 	latestCodexCLIVersion         = "0.125.0"
 	latestCodexCLIUserAgentPrefix = "codex_cli_rs/" + latestCodexCLIVersion
 )
+
+var codexOfficialClientUserAgentPrefixes = []string{
+	"codex_cli_rs/",
+	"codex_vscode/",
+	"codex_app/",
+	"codex_chatgpt_desktop/",
+	"codex_atlas/",
+	"codex_exec/",
+	"codex_sdk_ts/",
+	"codex ",
+}
+
+var codexOfficialClientOriginatorPrefixes = []string{
+	"codex_",
+	"codex ",
+}
+
+func IsCodexOfficialClientByHeaders(userAgent, originator string) bool {
+	return matchCodexClientHeaderPrefixes(userAgent, codexOfficialClientUserAgentPrefixes) ||
+		matchCodexClientHeaderPrefixes(originator, codexOfficialClientOriginatorPrefixes)
+}
+
+func LatestCodexCLIVersionForHeaders() string {
+	return latestCodexCLIVersion
+}
+
+func MinimalCodexCLIUserAgentForHeaders() string {
+	return latestCodexCLIUserAgentPrefix
+}
+
+func matchCodexClientHeaderPrefixes(value string, prefixes []string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, prefix := range prefixes {
+		prefix = strings.ToLower(strings.TrimSpace(prefix))
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(value, prefix) || strings.Contains(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // 预定义的真实客户端画像池
 // 按开发者常见环境分布：macOS（主力） > Linux > Windows
