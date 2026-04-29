@@ -97,13 +97,13 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
   }
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
         <span>{t('settings2.anthropicModel')}</span>
         <span>{t('settings2.codexModel')}</span>
         <span />
       </div>
-      <div className="max-h-[260px] space-y-1.5 overflow-y-auto pr-1">
+      <div className="min-h-[180px] flex-1 space-y-1.5 overflow-y-auto pr-1">
         {mappings.map(([k, v], i) => (
           <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-1.5">
             <Input
@@ -121,6 +121,7 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
             <button
               type="button"
               onClick={() => handleRemove(i)}
+              aria-label={t('common.delete')}
               className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
             >
               <Trash2 className="size-3.5" />
@@ -128,7 +129,7 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
           </div>
         ))}
       </div>
-      <Button type="button" variant="outline" size="sm" onClick={handleAdd}>
+      <Button type="button" variant="outline" size="sm" className="self-start" onClick={handleAdd}>
         + {t('settings2.addMapping')}
       </Button>
     </div>
@@ -140,18 +141,20 @@ function SettingsCard({
   description,
   children,
   className,
+  contentClassName,
   footer,
 }: {
   title: string
   description?: string
   children: ReactNode
   className?: string
+  contentClassName?: string
   footer?: ReactNode
 }) {
   return (
     <Card className={cn('py-0', className)}>
-      <CardContent className="p-5">
-        <div className="mb-4">
+      <CardContent className={cn('p-5', contentClassName)}>
+        <div className="mb-4 shrink-0">
           <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
           {description ? (
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
@@ -647,9 +650,14 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <div className="grid items-start gap-4 xl:grid-cols-2">
-            <SettingsCard title={t('settings.modelRegistry')} description={t('settings.modelRegistryDesc')}>
-              <div className="space-y-4">
+          <div className="grid items-stretch gap-4 xl:grid-cols-2">
+            <SettingsCard
+              title={t('settings.modelRegistry')}
+              description={t('settings.modelRegistryDesc')}
+              className="h-full xl:h-[430px]"
+              contentClassName="flex h-full min-h-0 flex-col"
+            >
+              <div className="flex min-h-0 flex-1 flex-col gap-4">
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
                   <StatusTile label={t('settings.modelsEnabled')}>
                     {enabledModelCount}
@@ -658,7 +666,7 @@ export default function Settings() {
                     <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
                   </StatusTile>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                   <a
                     href={modelsSourceLabel}
                     target="_blank"
@@ -673,9 +681,9 @@ export default function Settings() {
                     {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
                   </Button>
                 </div>
-                <div className="flex max-h-[170px] flex-wrap gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-3">
+                <div className="flex min-h-0 flex-1 flex-wrap content-start gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-3">
                   {visibleModelItems.map((model) => (
-                    <div key={model.id} className="flex flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
+                    <div key={model.id} className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
                       <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
                       <Badge variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'} className="text-[11px]">
                         {model.source === 'official_codex_docs' ? t('settings.modelSourceOfficial') : t('settings.modelSourceBuiltin')}
@@ -688,7 +696,12 @@ export default function Settings() {
               </div>
             </SettingsCard>
 
-            <SettingsCard title={t('settings2.modelMapping')} description={t('settings2.modelMappingDesc')}>
+            <SettingsCard
+              title={t('settings2.modelMapping')}
+              description={t('settings2.modelMappingDesc')}
+              className="h-full xl:h-[430px]"
+              contentClassName="flex h-full min-h-0 flex-col"
+            >
               <ModelMappingEditor
                 value={settingsForm.model_mapping}
                 onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
