@@ -96,6 +96,9 @@ func (h *Handler) Messages(c *gin.Context) {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
+		return
+	}
 
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 
@@ -200,6 +203,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/messages",

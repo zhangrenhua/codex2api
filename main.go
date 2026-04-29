@@ -73,6 +73,13 @@ func main() {
 			RedisPoolSize:                    30,
 			AutoCleanUnauthorized:            false,
 			AutoCleanRateLimited:             false,
+			PromptFilterMode:                 "monitor",
+			PromptFilterThreshold:            50,
+			PromptFilterStrictThreshold:      90,
+			PromptFilterLogMatches:           true,
+			PromptFilterMaxTextLength:        81920,
+			PromptFilterCustomPatterns:       "[]",
+			PromptFilterDisabledPatterns:     "[]",
 		}
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {
@@ -87,6 +94,13 @@ func main() {
 			RecoveryProbeIntervalMinutes:     30,
 			PgMaxConns:                       50,
 			RedisPoolSize:                    30,
+			PromptFilterMode:                 "monitor",
+			PromptFilterThreshold:            50,
+			PromptFilterStrictThreshold:      90,
+			PromptFilterLogMatches:           true,
+			PromptFilterMaxTextLength:        81920,
+			PromptFilterCustomPatterns:       "[]",
+			PromptFilterDisabledPatterns:     "[]",
 		}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
@@ -229,6 +243,8 @@ func main() {
 		// 同时处理 /admin 和 /admin/*，避免依赖自动补斜杠重定向。
 		r.GET("/admin", serveAdmin)
 		r.GET("/admin/*filepath", serveAdmin)
+		r.HEAD("/admin", serveAdmin)
+		r.HEAD("/admin/*filepath", serveAdmin)
 	}
 
 	// 根路径重定向到管理后台（使用 302 避免浏览器永久缓存）

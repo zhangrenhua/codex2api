@@ -17,6 +17,7 @@ import (
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/security/promptfilter"
 )
 
 // AccountStatus 账号状态
@@ -1024,6 +1025,7 @@ type Store struct {
 	recoveryProbeInterval     int64 // 恢复探测最小间隔（ns）
 	backgroundRefreshWakeCh   chan struct{}
 	stopCh                    chan struct{}
+	stopOnce                  sync.Once
 	wg                        sync.WaitGroup
 
 	// 代理池
@@ -1040,6 +1042,7 @@ type Store struct {
 
 	allowRemoteMigration atomic.Bool  // 是否允许远程迁移拉取账号
 	modelMapping         atomic.Value // 模型映射 JSON 字符串
+	promptFilterConfig   atomic.Value // promptfilter.Config
 	sessionMu            sync.RWMutex
 	sessionBindings      map[string]sessionAffinity
 }
@@ -1126,6 +1129,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	if settings.ModelMapping != "" {
 		s.modelMapping.Store(settings.ModelMapping)
 	}
+	s.SetPromptFilterConfig(promptFilterConfigFromSettings(settings))
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -1646,7 +1650,9 @@ func (s *Store) StartBackgroundRefresh() {
 
 // Stop 停止后台刷新
 func (s *Store) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 	s.wg.Wait()
 }
 
@@ -2013,6 +2019,38 @@ func (s *Store) GetModelMapping() string {
 		return v
 	}
 	return "{}"
+}
+
+func promptFilterConfigFromSettings(settings *database.SystemSettings) promptfilter.Config {
+	cfg := promptfilter.DefaultConfig()
+	if settings == nil {
+		return cfg
+	}
+	cfg.Enabled = settings.PromptFilterEnabled
+	cfg.Mode = settings.PromptFilterMode
+	cfg.Threshold = settings.PromptFilterThreshold
+	cfg.StrictThreshold = settings.PromptFilterStrictThreshold
+	cfg.LogMatches = settings.PromptFilterLogMatches
+	cfg.MaxTextLength = settings.PromptFilterMaxTextLength
+	cfg.SensitiveWords = settings.PromptFilterSensitiveWords
+	if patterns, err := promptfilter.ParseCustomPatterns(settings.PromptFilterCustomPatterns); err == nil {
+		cfg.CustomPatterns = patterns
+	}
+	if disabled, err := promptfilter.ParseDisabledPatterns(settings.PromptFilterDisabledPatterns); err == nil {
+		cfg.DisabledPatterns = disabled
+	}
+	return promptfilter.NormalizeConfig(cfg)
+}
+
+func (s *Store) SetPromptFilterConfig(cfg promptfilter.Config) {
+	s.promptFilterConfig.Store(promptfilter.NormalizeConfig(cfg))
+}
+
+func (s *Store) GetPromptFilterConfig() promptfilter.Config {
+	if v, ok := s.promptFilterConfig.Load().(promptfilter.Config); ok {
+		return promptfilter.NormalizeConfig(v)
+	}
+	return promptfilter.DefaultConfig()
 }
 
 // AddAccount 热加载新账号到内存池（前端添加后即刻生效）

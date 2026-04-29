@@ -605,6 +605,9 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
+	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/generations", imageModel) {
+		return
+	}
 	tool := []byte(`{"type":"image_generation","action":"generate","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
@@ -701,6 +704,9 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 
 	style := strings.TrimSpace(c.PostForm("style"))
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
+	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/edits", imageModel) {
+		return
+	}
 	tool := buildImagesEditToolFromForm(c, imageModel, maskDataURL)
 	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
 	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, responsesBody, responseFormat, "image_edit", stream)
@@ -788,6 +794,9 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
+	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/edits", imageModel) {
+		return
+	}
 	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
@@ -912,6 +921,8 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			resp.Body.Close()
 			h.store.Release(account)
 			excludeAccounts[account.ID()] = true
+			logUpstreamError(inboundEndpoint, resp.StatusCode, requestModel, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, inboundEndpoint, requestModel, errBody)
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
 				lastStatusCode = resp.StatusCode

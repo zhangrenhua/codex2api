@@ -26,6 +26,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
+	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -133,6 +134,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/settings", h.GetSettings)
 	api.PUT("/settings", h.UpdateSettings)
+	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
+	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
+	api.POST("/prompt-filter/test", h.TestPromptFilter)
+	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
 	api.GET("/image-prompts", h.ListImagePromptTemplates)
@@ -297,10 +302,10 @@ type accountResponse struct {
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
 	// 图片配额信息
-	ImageQuotaRemaining      *int                       `json:"image_quota_remaining,omitempty"`
-	ImageQuotaTotal          *int                       `json:"image_quota_total,omitempty"`
-	TodayUsedCount           *int                       `json:"today_used_count,omitempty"`
-	ImageQuotaResetAt        string                     `json:"image_quota_reset_at,omitempty"`
+	ImageQuotaRemaining *int   `json:"image_quota_remaining,omitempty"`
+	ImageQuotaTotal     *int   `json:"image_quota_total,omitempty"`
+	TodayUsedCount      *int   `json:"today_used_count,omitempty"`
+	ImageQuotaResetAt   string `json:"image_quota_reset_at,omitempty"`
 }
 
 type accountUsageWindow struct {
@@ -2090,6 +2095,15 @@ type settingsResponse struct {
 	ModelMapping                     string `json:"model_mapping"`
 	ResinURL                         string `json:"resin_url"`
 	ResinPlatformName                string `json:"resin_platform_name"`
+	PromptFilterEnabled              bool   `json:"prompt_filter_enabled"`
+	PromptFilterMode                 string `json:"prompt_filter_mode"`
+	PromptFilterThreshold            int    `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold      int    `json:"prompt_filter_strict_threshold"`
+	PromptFilterLogMatches           bool   `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength        int    `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords       string `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns       string `json:"prompt_filter_custom_patterns"`
+	PromptFilterDisabledPatterns     string `json:"prompt_filter_disabled_patterns"`
 }
 
 type updateSettingsReq struct {
@@ -2116,6 +2130,15 @@ type updateSettingsReq struct {
 	ModelMapping                     *string `json:"model_mapping"`
 	ResinURL                         *string `json:"resin_url"`
 	ResinPlatformName                *string `json:"resin_platform_name"`
+	PromptFilterEnabled              *bool   `json:"prompt_filter_enabled"`
+	PromptFilterMode                 *string `json:"prompt_filter_mode"`
+	PromptFilterThreshold            *int    `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold      *int    `json:"prompt_filter_strict_threshold"`
+	PromptFilterLogMatches           *bool   `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength        *int    `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords       *string `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns       *string `json:"prompt_filter_custom_patterns"`
+	PromptFilterDisabledPatterns     *string `json:"prompt_filter_disabled_patterns"`
 }
 
 // GetSettings 获取当前系统设置
@@ -2133,6 +2156,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		resinURL = dbSettings.ResinURL
 		resinPlatformName = dbSettings.ResinPlatformName
 	}
+	promptFilterCfg := h.store.GetPromptFilterConfig()
 	c.JSON(http.StatusOK, settingsResponse{
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
@@ -2162,6 +2186,15 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ModelMapping:                     h.store.GetModelMapping(),
 		ResinURL:                         resinURL,
 		ResinPlatformName:                resinPlatformName,
+		PromptFilterEnabled:              promptFilterCfg.Enabled,
+		PromptFilterMode:                 promptFilterCfg.Mode,
+		PromptFilterThreshold:            promptFilterCfg.Threshold,
+		PromptFilterStrictThreshold:      promptFilterCfg.StrictThreshold,
+		PromptFilterLogMatches:           promptFilterCfg.LogMatches,
+		PromptFilterMaxTextLength:        promptFilterCfg.MaxTextLength,
+		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
+		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 	})
 }
 
@@ -2363,6 +2396,64 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: model_mapping")
 	}
 
+	promptFilterCfg := h.store.GetPromptFilterConfig()
+	promptFilterChanged := false
+	if req.PromptFilterEnabled != nil {
+		promptFilterCfg.Enabled = *req.PromptFilterEnabled
+		promptFilterChanged = true
+	}
+	if req.PromptFilterMode != nil {
+		promptFilterCfg.Mode = *req.PromptFilterMode
+		promptFilterChanged = true
+	}
+	if req.PromptFilterThreshold != nil {
+		promptFilterCfg.Threshold = *req.PromptFilterThreshold
+		promptFilterChanged = true
+	}
+	if req.PromptFilterStrictThreshold != nil {
+		promptFilterCfg.StrictThreshold = *req.PromptFilterStrictThreshold
+		promptFilterChanged = true
+	}
+	if req.PromptFilterLogMatches != nil {
+		promptFilterCfg.LogMatches = *req.PromptFilterLogMatches
+		promptFilterChanged = true
+	}
+	if req.PromptFilterMaxTextLength != nil {
+		promptFilterCfg.MaxTextLength = *req.PromptFilterMaxTextLength
+		promptFilterChanged = true
+	}
+	if req.PromptFilterSensitiveWords != nil {
+		promptFilterCfg.SensitiveWords = *req.PromptFilterSensitiveWords
+		promptFilterChanged = true
+	}
+	if req.PromptFilterCustomPatterns != nil {
+		patterns, err := promptfilter.ParseCustomPatterns(*req.PromptFilterCustomPatterns)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查自定义规则 JSON 无效: "+err.Error())
+			return
+		}
+		promptFilterCfg.CustomPatterns = patterns
+		promptFilterChanged = true
+	}
+	if req.PromptFilterDisabledPatterns != nil {
+		disabled, err := promptfilter.ParseDisabledPatterns(*req.PromptFilterDisabledPatterns)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查禁用规则 JSON 无效: "+err.Error())
+			return
+		}
+		promptFilterCfg.DisabledPatterns = disabled
+		promptFilterChanged = true
+	}
+	if promptFilterChanged {
+		promptFilterCfg = promptfilter.NormalizeConfig(promptFilterCfg)
+		if _, err := promptfilter.NewEngine(promptFilterCfg); err != nil {
+			writeError(c, http.StatusBadRequest, "Prompt 检查规则无效: "+err.Error())
+			return
+		}
+		h.store.SetPromptFilterConfig(promptFilterCfg)
+		log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
+	}
+
 	// Resin 粘性代理池配置
 	resinURL := ""
 	resinPlatformName := ""
@@ -2417,6 +2508,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ModelMapping:                     h.store.GetModelMapping(),
 		ResinURL:                         resinURL,
 		ResinPlatformName:                resinPlatformName,
+		PromptFilterEnabled:              promptFilterCfg.Enabled,
+		PromptFilterMode:                 promptFilterCfg.Mode,
+		PromptFilterThreshold:            promptFilterCfg.Threshold,
+		PromptFilterStrictThreshold:      promptFilterCfg.StrictThreshold,
+		PromptFilterLogMatches:           promptFilterCfg.LogMatches,
+		PromptFilterMaxTextLength:        promptFilterCfg.MaxTextLength,
+		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
+		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -2465,6 +2565,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ModelMapping:                     h.store.GetModelMapping(),
 		ResinURL:                         resinURL,
 		ResinPlatformName:                resinPlatformName,
+		PromptFilterEnabled:              promptFilterCfg.Enabled,
+		PromptFilterMode:                 promptFilterCfg.Mode,
+		PromptFilterThreshold:            promptFilterCfg.Threshold,
+		PromptFilterStrictThreshold:      promptFilterCfg.StrictThreshold,
+		PromptFilterLogMatches:           promptFilterCfg.LogMatches,
+		PromptFilterMaxTextLength:        promptFilterCfg.MaxTextLength,
+		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
+		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 	})
 }
 

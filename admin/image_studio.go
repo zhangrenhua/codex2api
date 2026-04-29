@@ -277,6 +277,9 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 	}
 	paramsJSON, _ := json.Marshal(req)
 	keyID, keyName, keyMasked := imageJobAPIKeyMeta(apiKey)
+	if h.inspectImageStudioPromptFilter(c, proxy.AppendImageStyleToPrompt(req.Prompt, req.Style), req.Model, keyID, keyName, keyMasked) {
+		return
+	}
 	jobID, err := h.db.InsertImageGenerationJob(ctx, database.ImageGenerationJobInput{
 		Prompt:       req.Prompt,
 		ParamsJSON:   string(paramsJSON),

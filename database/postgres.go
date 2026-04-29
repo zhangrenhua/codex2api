@@ -373,6 +373,36 @@ func (db *DB) migrate(ctx context.Context) error {
 		ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS recovery_probe_interval_minutes INT DEFAULT 30;
 			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
 			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_enabled BOOLEAN DEFAULT FALSE;
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_mode VARCHAR(20) DEFAULT 'monitor';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_threshold INT DEFAULT 50;
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_strict_threshold INT DEFAULT 90;
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_log_matches BOOLEAN DEFAULT TRUE;
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_max_text_length INT DEFAULT 81920;
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_sensitive_words TEXT DEFAULT '';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_custom_patterns TEXT DEFAULT '[]';
+			ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_disabled_patterns TEXT DEFAULT '[]';
+
+			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
+				id               SERIAL PRIMARY KEY,
+				created_at       TIMESTAMPTZ DEFAULT NOW(),
+				source           VARCHAR(50) DEFAULT '',
+				endpoint         VARCHAR(100) DEFAULT '',
+				model            VARCHAR(100) DEFAULT '',
+				action           VARCHAR(20) DEFAULT '',
+				mode             VARCHAR(20) DEFAULT '',
+				score            INT DEFAULT 0,
+				threshold_value  INT DEFAULT 0,
+				matched_patterns TEXT DEFAULT '[]',
+				text_preview     TEXT DEFAULT '',
+				api_key_id       INT DEFAULT 0,
+				api_key_name     VARCHAR(255) DEFAULT '',
+				api_key_masked   VARCHAR(64) DEFAULT '',
+				client_ip        VARCHAR(64) DEFAULT '',
+				error_code       VARCHAR(100) DEFAULT ''
+			);
+			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_created_at ON prompt_filter_logs(created_at);
+			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_action_created_at ON prompt_filter_logs(action, created_at);
 
 			CREATE TABLE IF NOT EXISTS model_registry (
 				id                     VARCHAR(100) PRIMARY KEY,
@@ -573,6 +603,15 @@ type SystemSettings struct {
 	RecoveryProbeIntervalMinutes     int
 	ResinURL                         string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
 	ResinPlatformName                string // Resin 平台标识，例如 codex2api
+	PromptFilterEnabled              bool
+	PromptFilterMode                 string
+	PromptFilterThreshold            int
+	PromptFilterStrictThreshold      int
+	PromptFilterLogMatches           bool
+	PromptFilterMaxTextLength        int
+	PromptFilterSensitiveWords       string
+	PromptFilterCustomPatterns       string
+	PromptFilterDisabledPatterns     string
 }
 
 // GetSystemSettings 加载全局设置
@@ -592,7 +631,16 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(usage_probe_max_age_minutes, 10),
 		       COALESCE(recovery_probe_interval_minutes, 30),
 		       COALESCE(resin_url, ''),
-		       COALESCE(resin_platform_name, '')
+		       COALESCE(resin_platform_name, ''),
+		       COALESCE(prompt_filter_enabled, false),
+		       COALESCE(prompt_filter_mode, 'monitor'),
+		       COALESCE(prompt_filter_threshold, 50),
+		       COALESCE(prompt_filter_strict_threshold, 90),
+		       COALESCE(prompt_filter_log_matches, true),
+		       COALESCE(prompt_filter_max_text_length, 81920),
+		       COALESCE(prompt_filter_sensitive_words, ''),
+		       COALESCE(prompt_filter_custom_patterns, '[]'),
+		       COALESCE(prompt_filter_disabled_patterns, '[]')
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
@@ -601,6 +649,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.ModelMapping,
 		&s.BackgroundRefreshIntervalMinutes, &s.UsageProbeMaxAgeMinutes, &s.RecoveryProbeIntervalMinutes,
 		&s.ResinURL, &s.ResinPlatformName,
+		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold,
+		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
+		&s.PromptFilterCustomPatterns, &s.PromptFilterDisabledPatterns,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -616,9 +667,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
 				fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping,
 				background_refresh_interval_minutes, usage_probe_max_age_minutes, recovery_probe_interval_minutes,
-				resin_url, resin_platform_name
+				resin_url, resin_platform_name, prompt_filter_enabled, prompt_filter_mode, prompt_filter_threshold,
+				prompt_filter_strict_threshold, prompt_filter_log_matches, prompt_filter_max_text_length,
+				prompt_filter_sensitive_words, prompt_filter_custom_patterns, prompt_filter_disabled_patterns
 			)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
 			ON CONFLICT (id) DO UPDATE SET
 				max_concurrency         = EXCLUDED.max_concurrency,
 				global_rpm              = EXCLUDED.global_rpm,
@@ -642,12 +695,23 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				usage_probe_max_age_minutes = EXCLUDED.usage_probe_max_age_minutes,
 				recovery_probe_interval_minutes = EXCLUDED.recovery_probe_interval_minutes,
 				resin_url               = EXCLUDED.resin_url,
-				resin_platform_name     = EXCLUDED.resin_platform_name
+				resin_platform_name     = EXCLUDED.resin_platform_name,
+				prompt_filter_enabled   = EXCLUDED.prompt_filter_enabled,
+				prompt_filter_mode      = EXCLUDED.prompt_filter_mode,
+				prompt_filter_threshold = EXCLUDED.prompt_filter_threshold,
+				prompt_filter_strict_threshold = EXCLUDED.prompt_filter_strict_threshold,
+				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
+				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
+				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
+				prompt_filter_custom_patterns = EXCLUDED.prompt_filter_custom_patterns,
+				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns
 		`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
 		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping,
 		s.BackgroundRefreshIntervalMinutes, s.UsageProbeMaxAgeMinutes, s.RecoveryProbeIntervalMinutes,
-		s.ResinURL, s.ResinPlatformName)
+		s.ResinURL, s.ResinPlatformName, s.PromptFilterEnabled, s.PromptFilterMode, s.PromptFilterThreshold,
+		s.PromptFilterStrictThreshold, s.PromptFilterLogMatches, s.PromptFilterMaxTextLength,
+		s.PromptFilterSensitiveWords, s.PromptFilterCustomPatterns, s.PromptFilterDisabledPatterns)
 	return err
 }
 

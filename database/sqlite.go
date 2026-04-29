@@ -183,6 +183,24 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			revised_prompt TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS prompt_filter_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			source TEXT DEFAULT '',
+			endpoint TEXT DEFAULT '',
+			model TEXT DEFAULT '',
+			action TEXT DEFAULT '',
+			mode TEXT DEFAULT '',
+			score INTEGER DEFAULT 0,
+			threshold_value INTEGER DEFAULT 0,
+			matched_patterns TEXT DEFAULT '[]',
+			text_preview TEXT DEFAULT '',
+			api_key_id INTEGER DEFAULT 0,
+			api_key_name TEXT DEFAULT '',
+			api_key_masked TEXT DEFAULT '',
+			client_ip TEXT DEFAULT '',
+			error_code TEXT DEFAULT ''
+		);`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {
@@ -240,6 +258,15 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "model_mapping", "TEXT DEFAULT '{}'"},
 		{"system_settings", "resin_url", "TEXT DEFAULT ''"},
 		{"system_settings", "resin_platform_name", "TEXT DEFAULT ''"},
+		{"system_settings", "prompt_filter_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "prompt_filter_mode", "TEXT DEFAULT 'monitor'"},
+		{"system_settings", "prompt_filter_threshold", "INTEGER DEFAULT 50"},
+		{"system_settings", "prompt_filter_strict_threshold", "INTEGER DEFAULT 90"},
+		{"system_settings", "prompt_filter_log_matches", "INTEGER DEFAULT 1"},
+		{"system_settings", "prompt_filter_max_text_length", "INTEGER DEFAULT 81920"},
+		{"system_settings", "prompt_filter_sensitive_words", "TEXT DEFAULT ''"},
+		{"system_settings", "prompt_filter_custom_patterns", "TEXT DEFAULT '[]'"},
+		{"system_settings", "prompt_filter_disabled_patterns", "TEXT DEFAULT '[]'"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "image_quota_remaining", "INTEGER NULL"},
 		{"accounts", "image_quota_total", "INTEGER NULL"},
@@ -272,6 +299,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_status ON image_generation_jobs(status, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_created ON image_assets(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_created_at ON prompt_filter_logs(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_action_created_at ON prompt_filter_logs(action, created_at);`,
 	}
 	for _, stmt := range indexStatements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {

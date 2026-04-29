@@ -675,6 +675,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses", model) {
+		return
+	}
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
@@ -776,6 +779,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, "/v1/responses", model, errBody)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/responses",
@@ -1060,6 +1064,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		sendImageOnlyModelError(c, model)
 		return
 	}
+	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses/compact", model) {
+		return
+	}
 
 	rawBody = normalizeServiceTierField(rawBody)
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
@@ -1152,6 +1159,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			excludeAccounts[account.ID()] = true
 
 			logUpstreamError("/v1/responses/compact", resp.StatusCode, model, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, "/v1/responses/compact", model, errBody)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/responses/compact",
@@ -1268,6 +1276,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/chat/completions", model) {
+		return
+	}
 
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	reasoningEffort := extractReasoningEffort(rawBody)
@@ -1369,6 +1380,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/chat/completions", resp.StatusCode, model, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, "/v1/chat/completions", model, errBody)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/chat/completions",
