@@ -270,6 +270,7 @@ export interface UsageLog {
   account_id: number
   endpoint: string
   model: string
+  effective_model: string
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number

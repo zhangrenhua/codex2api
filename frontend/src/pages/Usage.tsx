@@ -11,7 +11,6 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import type { APIKeyRow, UsageLog, UsageStats } from '../types'
-import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
 import { formatCompactEmail } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
@@ -33,31 +32,6 @@ import { Select } from '@/components/ui/select'
 function formatTokens(value?: number | null): string {
   if (value === undefined || value === null) return '0'
   return value.toLocaleString()
-}
-
-function parseClaudeModelMap(value: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(value || '{}')
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return DEFAULT_CLAUDE_MODEL_MAP
-    }
-
-    const customMap: Record<string, string> = {}
-    for (const [key, mappedModel] of Object.entries(parsed)) {
-      const trimmedKey = key.trim()
-      const trimmedModel = typeof mappedModel === 'string' ? mappedModel.trim() : ''
-      if (trimmedKey && trimmedModel) {
-        customMap[trimmedKey] = trimmedModel
-      }
-    }
-    return { ...DEFAULT_CLAUDE_MODEL_MAP, ...customMap }
-  } catch {
-    return DEFAULT_CLAUDE_MODEL_MAP
-  }
-}
-
-function getCodexModel(model: string, modelMap: Record<string, string>): string {
-  return modelMap[model] || ''
 }
 
 function getStatusBadgeClassName(statusCode: number): string {
@@ -189,7 +163,6 @@ export default function Usage() {
   const [filterStream, setFilterStream] = useState<'' | 'true' | 'false'>('')
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([])
   const [modelOptions, setModelOptions] = useState<string[]>([])
-  const [claudeModelMap, setClaudeModelMap] = useState<Record<string, string>>(DEFAULT_CLAUDE_MODEL_MAP)
   const [apiKeyLoadFailed, setAPIKeyLoadFailed] = useState(false)
   const showFastFilter = false
   const pageSizeOptions = [10, 20, 50, 100]
@@ -260,22 +233,6 @@ export default function Usage() {
   useEffect(() => {
     void loadAPIKeys()
   }, [loadAPIKeys])
-
-  useEffect(() => {
-    let active = true
-    const loadModelMapping = async () => {
-      try {
-        const settings = await api.getSettings()
-        if (active) setClaudeModelMap(parseClaudeModelMap(settings.model_mapping))
-      } catch {
-        if (active) setClaudeModelMap(DEFAULT_CLAUDE_MODEL_MAP)
-      }
-    }
-    void loadModelMapping()
-    return () => {
-      active = false
-    }
-  }, [])
 
   useEffect(() => {
     let active = true
@@ -620,7 +577,6 @@ export default function Usage() {
                   </TableHeader>
                   <TableBody>
                     {logs.map((log: UsageLog) => {
-                      const mappedModel = log.model?.startsWith('claude') ? getCodexModel(log.model, claudeModelMap) : ''
                       return (
                       <TableRow key={log.id}>
                         <TableCell>
@@ -636,9 +592,9 @@ export default function Usage() {
                             <Badge variant="outline" className={usageTableBadgeClass}>
                               {log.model || '-'}
                             </Badge>
-                            {mappedModel && (
+                            {log.effective_model && log.effective_model !== log.model && (
                               <Badge variant="outline" className="text-[11px] font-medium border-transparent bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
-                                → {mappedModel}
+                                → {log.effective_model}
                               </Badge>
                             )}
                             {log.reasoning_effort && (

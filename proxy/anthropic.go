@@ -131,6 +131,42 @@ var defaultAnthropicModelMap = map[string]string{
 	"claude-3-5-haiku-20241022":  "gpt-5.4-mini",
 }
 
+func canonicalizeCodexModel(model string, supportedModels []string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	for _, supported := range supportedModels {
+		if trimmed == supported {
+			return trimmed
+		}
+	}
+
+	lower := strings.ToLower(trimmed)
+	aliases := map[string]string{
+		"gpt5-5":       "gpt-5.5",
+		"gpt5.5":       "gpt-5.5",
+		"gpt5-4":       "gpt-5.4",
+		"gpt5.4":       "gpt-5.4",
+		"gpt5-4-mini":  "gpt-5.4-mini",
+		"gpt5.4-mini":  "gpt-5.4-mini",
+		"gpt-5.4mini":  "gpt-5.4-mini",
+		"gpt5-3-codex": "gpt-5.3-codex",
+		"gpt5.3-codex": "gpt-5.3-codex",
+		"gpt5-2":       "gpt-5.2",
+		"gpt5.2":       "gpt-5.2",
+	}
+	if canonical, ok := aliases[lower]; ok {
+		for _, supported := range supportedModels {
+			if canonical == supported {
+				return canonical
+			}
+		}
+		return trimmed
+	}
+	return trimmed
+}
+
 // resolveAnthropicModel 将 Anthropic 模型名解析为 Codex 模型名
 // 优先使用数据库中的动态映射，回退到默认映射
 func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedModels []string) string {
@@ -141,20 +177,22 @@ func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedMod
 		var dynamicMap map[string]string
 		if json.Unmarshal([]byte(dynamicMappingJSON), &dynamicMap) == nil {
 			if mapped, ok := dynamicMap[model]; ok && mapped != "" {
-				return mapped
+				return canonicalizeCodexModel(mapped, supportedModels)
 			}
 		}
 	}
 
 	// 2. 尝试默认映射
 	if mapped, ok := defaultAnthropicModelMap[model]; ok {
-		return mapped
+		return canonicalizeCodexModel(mapped, supportedModels)
 	}
 
 	// 3. 允许直接传入 Codex 模型名
-	for _, supported := range supportedModels {
-		if model == supported {
-			return model
+	if canonical := canonicalizeCodexModel(model, supportedModels); canonical != model || canonical != "" {
+		for _, supported := range supportedModels {
+			if canonical == supported {
+				return canonical
+			}
 		}
 	}
 

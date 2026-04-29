@@ -87,6 +87,7 @@ type usageLogEntry struct {
 	AccountID        int64
 	Endpoint         string
 	Model            string
+	EffectiveModel   string
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
@@ -272,6 +273,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS reasoning_tokens INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS first_token_ms INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS reasoning_effort VARCHAR(20) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS effective_model VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS inbound_endpoint VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_endpoint VARCHAR(100) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS stream BOOLEAN DEFAULT false;
@@ -790,6 +792,7 @@ type UsageLog struct {
 	AccountID        int64     `json:"account_id"`
 	Endpoint         string    `json:"endpoint"`
 	Model            string    `json:"model"`
+	EffectiveModel   string    `json:"effective_model"`
 	PromptTokens     int       `json:"prompt_tokens"`
 	CompletionTokens int       `json:"completion_tokens"`
 	TotalTokens      int       `json:"total_tokens"`
@@ -825,6 +828,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		AccountID:        log.AccountID,
 		Endpoint:         log.Endpoint,
 		Model:            log.Model,
+		EffectiveModel:   log.EffectiveModel,
 		PromptTokens:     log.PromptTokens,
 		CompletionTokens: log.CompletionTokens,
 		TotalTokens:      log.TotalTokens,
@@ -865,6 +869,7 @@ type UsageLogInput struct {
 	AccountID        int64
 	Endpoint         string
 	Model            string
+	EffectiveModel   string
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
@@ -940,10 +945,10 @@ func (db *DB) flushLogs() {
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO usage_logs (account_id, endpoint, model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
+		`INSERT INTO usage_logs (account_id, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 		  input_tokens, output_tokens, reasoning_tokens, first_token_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, cached_tokens, service_tier,
 		  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`)
 	if err != nil {
 		tx.Rollback()
 		log.Printf("批量写入日志失败（准备语句）: %v", err)
@@ -952,7 +957,7 @@ func (db *DB) flushLogs() {
 	defer stmt.Close()
 
 	for _, e := range batch {
-		if _, err := stmt.ExecContext(ctx, e.AccountID, e.Endpoint, e.Model, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
+		if _, err := stmt.ExecContext(ctx, e.AccountID, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.CachedTokens, e.ServiceTier,
 			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize); err != nil {
 			tx.Rollback()
@@ -972,13 +977,13 @@ func (db *DB) flushLogs() {
 }
 
 // batchInsertLogs 使用 PostgreSQL 的批量插入优化
-// 分批处理以避免 PostgreSQL 65535 参数限制（每行 27 个参数，每批最多 2427 行）
+// 分批处理以避免 PostgreSQL 65535 参数限制（每行 28 个参数，每批最多 2340 行）
 func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	const maxRowsPerBatch = 2400 // 安全阈值，低于 2427 行的理论上限
+	const maxRowsPerBatch = 2300
 
 	// 分批处理
 	for start := 0; start < len(batch); start += maxRowsPerBatch {
@@ -1003,21 +1008,21 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, batch []usageLogEntry) e
 
 	// 使用 COPY 或批量 VALUES 优化插入性能
 	valueStrings := make([]string, 0, len(batch))
-	valueArgs := make([]interface{}, 0, len(batch)*27)
+	valueArgs := make([]interface{}, 0, len(batch)*28)
 	argIdx := 1
 
 	for _, e := range batch {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
 			argIdx+10, argIdx+11, argIdx+12, argIdx+13, argIdx+14, argIdx+15, argIdx+16, argIdx+17, argIdx+18, argIdx+19,
-			argIdx+20, argIdx+21, argIdx+22, argIdx+23, argIdx+24, argIdx+25, argIdx+26))
-		valueArgs = append(valueArgs, e.AccountID, e.Endpoint, e.Model, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
+			argIdx+20, argIdx+21, argIdx+22, argIdx+23, argIdx+24, argIdx+25, argIdx+26, argIdx+27))
+		valueArgs = append(valueArgs, e.AccountID, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
 			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.CachedTokens, e.ServiceTier,
 			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize)
-		argIdx += 27
+		argIdx += 28
 	}
 
-	query := fmt.Sprintf(`INSERT INTO usage_logs (account_id, endpoint, model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
+	query := fmt.Sprintf(`INSERT INTO usage_logs (account_id, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
 		input_tokens, output_tokens, reasoning_tokens, first_token_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, cached_tokens, service_tier,
 		api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size)
 		VALUES %s`, strings.Join(valueStrings, ","))
@@ -1163,7 +1168,7 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 	if limit <= 0 || limit > 5000 {
 		limit = 50
 	}
-	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
+	query := `SELECT u.id, u.account_id, u.endpoint, u.model, COALESCE(u.effective_model, ''), u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
 	            COALESCE(u.input_tokens, 0), COALESCE(u.output_tokens, 0), COALESCE(u.reasoning_tokens, 0),
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
@@ -1186,7 +1191,7 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 		l := &UsageLog{}
 		var credentialRaw interface{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.EffectiveModel, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens, &l.ServiceTier,
 			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize, &credentialRaw, &createdAtRaw); err != nil {
 			return nil, err
@@ -1389,7 +1394,7 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 // ListUsageLogsByTimeRange 按时间范围查询请求日志
 func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time) ([]*UsageLog, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
-	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
+	query := `SELECT u.id, u.account_id, u.endpoint, u.model, COALESCE(u.effective_model, ''), u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
 	            COALESCE(u.input_tokens, 0), COALESCE(u.output_tokens, 0), COALESCE(u.reasoning_tokens, 0),
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
@@ -1413,7 +1418,7 @@ func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time
 		l := &UsageLog{}
 		var credentialRaw interface{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.EffectiveModel, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens, &l.ServiceTier,
 			&l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize, &credentialRaw, &createdAtRaw); err != nil {
 			return nil, err
@@ -1469,7 +1474,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 		paramIdx++
 	}
 	if f.Model != "" {
-		where += fmt.Sprintf(` AND u.model = $%d`, paramIdx)
+		where += fmt.Sprintf(` AND (u.model = $%d OR COALESCE(u.effective_model, '') = $%d)`, paramIdx, paramIdx)
 		args = append(args, f.Model)
 		paramIdx++
 	}
@@ -1500,7 +1505,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 	where += fmt.Sprintf(` ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d`, paramIdx, paramIdx+1)
 	args = append(args, f.PageSize, offset)
 
-	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
+	query := `SELECT u.id, u.account_id, u.endpoint, u.model, COALESCE(u.effective_model, ''), u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
 	            COALESCE(u.input_tokens, 0), COALESCE(u.output_tokens, 0), COALESCE(u.reasoning_tokens, 0),
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
@@ -1524,7 +1529,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 		l := &UsageLog{}
 		var credentialRaw interface{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.EffectiveModel, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens,
 			&l.ServiceTier, &l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize,
 			&credentialRaw, &createdAtRaw, &result.Total); err != nil {

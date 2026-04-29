@@ -205,6 +205,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/messages",
 				Model:            model,
+				EffectiveModel:   effectiveModel,
 				StatusCode:       resp.StatusCode,
 				DurationMs:       durationMs,
 				ReasoningEffort:  reasoningEffort,
@@ -235,7 +236,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()
 		c.Set("x-account-proxy", proxyURL)
-		c.Set("x-model", model)
+		c.Set("x-model", effectiveModel)
 		c.Set("x-reasoning-effort", reasoningEffort)
 
 		var firstTokenMs int
@@ -398,6 +399,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			AccountID:        account.ID(),
 			Endpoint:         "/v1/messages",
 			Model:            model,
+			EffectiveModel:   effectiveModel,
 			StatusCode:       logStatusCode,
 			DurationMs:       totalDuration,
 			FirstTokenMs:     firstTokenMs,
