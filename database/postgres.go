@@ -1595,9 +1595,11 @@ type AccountRequestCount struct {
 
 // AccountTimeRangeUsage 每个账号在指定时间窗口内的真实请求/token 统计。
 type AccountTimeRangeUsage struct {
-	AccountID int64
-	Requests  int64
-	Tokens    int64
+	AccountID     int64
+	Requests      int64
+	Tokens        int64
+	AccountBilled float64
+	UserBilled    float64
 }
 
 // GetAccountRequestCounts 按 account_id 聚合近 7 天成功/失败请求数
@@ -1633,7 +1635,9 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 	query := `
 	SELECT account_id,
 		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens
+		COALESCE(SUM(total_tokens), 0) AS tokens,
+		COALESCE(SUM(account_billed), 0) AS account_billed,
+		COALESCE(SUM(user_billed), 0) AS user_billed
 	FROM usage_logs
 	WHERE created_at >= $1 AND status_code <> 499
 	GROUP BY account_id
@@ -1647,7 +1651,7 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 	result := make(map[int64]*AccountTimeRangeUsage)
 	for rows.Next() {
 		usage := &AccountTimeRangeUsage{}
-		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens); err != nil {
+		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens, &usage.AccountBilled, &usage.UserBilled); err != nil {
 			return nil, err
 		}
 		result[usage.AccountID] = usage
