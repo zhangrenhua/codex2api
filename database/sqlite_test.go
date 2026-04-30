@@ -22,6 +22,51 @@ func TestNewSQLiteInitializesFreshDatabase(t *testing.T) {
 	}
 }
 
+func TestSQLiteAccountsEnabledDefaultsAndCanToggle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	id, err := db.InsertAccount(ctx, "test", "rt", "")
+	if err != nil {
+		t.Fatalf("InsertAccount 返回错误: %v", err)
+	}
+
+	rows, err := db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive 返回错误: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListActive 返回 %d 条，want 1", len(rows))
+	}
+	if !rows[0].Enabled {
+		t.Fatal("new account Enabled = false, want true")
+	}
+
+	if err := db.SetAccountEnabled(ctx, id, false); err != nil {
+		t.Fatalf("SetAccountEnabled 返回错误: %v", err)
+	}
+	rows, err = db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive 返回错误: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListActive 返回 %d 条，want 1", len(rows))
+	}
+	if rows[0].Enabled {
+		t.Fatal("disabled account Enabled = true, want false")
+	}
+
+	if err := db.SetAccountEnabled(ctx, id+1, false); err != sql.ErrNoRows {
+		t.Fatalf("SetAccountEnabled missing account error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
