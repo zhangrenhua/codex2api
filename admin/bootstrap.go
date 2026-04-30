@@ -35,8 +35,7 @@ const (
 // bootstrapAllowRate 使用 CAS 实现固定窗口限频：
 //   - 任意时刻只有一个 goroutine 能成功翻新窗口起点，其它失败者读到的就是
 //     翻新后的最新值，避免多个 goroutine 同时把 count 重置为 0。
-//   - 在并发下，最坏情况只是有一个 reset 与若干 Add 交错，但所有"翻窗"
-//     操作都是原子的，不会出现窗口被重复清零导致超额放行的情况。
+//   - 先递增计数再判断，确保高并发下不会超过限制。
 func bootstrapAllowRate() bool {
 	now := time.Now().Unix()
 	for {
@@ -51,7 +50,8 @@ func bootstrapAllowRate() bool {
 			break
 		}
 	}
-	return bootstrapState.count.Add(1) <= bootstrapMaxPerWin
+	newCount := bootstrapState.count.Add(1)
+	return newCount <= bootstrapMaxPerWin
 }
 
 // GetBootstrapStatus 返回当前是否需要执行初始化（GET /api/admin/bootstrap-status）。
@@ -101,7 +101,7 @@ func (h *Handler) GetBootstrapStatus(c *gin.Context) {
 //  1. 仅在系统未配置 ADMIN_SECRET 时可用，否则一律 409；
 //  2. 通过互斥锁 + 双重检查避免并发写入；
 //  3. 简单全局限频，防止扫描器穷举；
-//  4. 校验最小长度（12 个 rune），避免过弱密钥；
+//  4. 校验最小长度（8 个 rune），避免过弱密钥；
 //  5. 全程审计日志。
 func (h *Handler) PostBootstrap(c *gin.Context) {
 	if !bootstrapAllowRate() {
