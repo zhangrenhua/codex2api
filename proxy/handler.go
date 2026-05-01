@@ -789,7 +789,6 @@ func (h *Handler) Responses(c *gin.Context) {
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
 	rateLimitRetries := 0
-	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
@@ -850,7 +849,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
-			lastErr = reqErr
 			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
 				continue
 			}
@@ -1035,10 +1033,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			lastErr = readErr
-			if lastErr == nil {
-				lastErr = errors.New(outcome.failureMessage)
-			}
 			continue
 		}
 
@@ -1108,15 +1102,6 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		h.store.Release(account)
 		return
-	}
-
-	// 所有重试都失败
-	if lastErr != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
-		})
-	} else if lastStatusCode != 0 {
-		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 	}
 }
 
@@ -1192,7 +1177,6 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
 	rateLimitRetries := 0
-	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
@@ -1243,7 +1227,6 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 
 			log.Printf("compact 上游请求失败 (attempt %d): %v", attempt+1, reqErr)
-			lastErr = reqErr
 			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
 				continue
 			}
@@ -1332,15 +1315,6 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		c.Data(http.StatusOK, "application/json", respBody)
 		return
 	}
-
-	// 所有重试都失败
-	if lastErr != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
-		})
-	} else if lastStatusCode != 0 {
-		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
-	}
 }
 
 func (h *Handler) ChatCompletions(c *gin.Context) {
@@ -1414,7 +1388,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
 	rateLimitRetries := 0
-	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
@@ -1475,7 +1448,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
-			lastErr = reqErr
 			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
 				continue
 			}
@@ -1654,10 +1626,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			lastErr = readErr
-			if lastErr == nil {
-				lastErr = errors.New(outcome.failureMessage)
-			}
 			continue
 		}
 
@@ -1726,15 +1694,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		h.store.Release(account)
 		return
-	}
-
-	// 所有重试都失败
-	if lastErr != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"},
-		})
-	} else if lastStatusCode != 0 {
-		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 	}
 }
 

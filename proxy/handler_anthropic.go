@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -127,7 +126,6 @@ func (h *Handler) Messages(c *gin.Context) {
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
 	rateLimitRetries := 0
-	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
@@ -187,7 +185,6 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			log.Printf("上游请求失败 (attempt %d, /v1/messages): %v", attempt+1, reqErr)
-			lastErr = reqErr
 			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
 				continue
 			}
@@ -384,10 +381,6 @@ func (h *Handler) Messages(c *gin.Context) {
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			lastErr = readErr
-			if lastErr == nil {
-				lastErr = errors.New(outcome.failureMessage)
-			}
 			continue
 		}
 
@@ -448,13 +441,5 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		h.store.Release(account)
 		return
-	}
-
-	// 所有重试都失败
-	if lastErr != nil {
-		sendAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed: "+lastErr.Error())
-	} else if lastStatusCode != 0 {
-		errType := mapHTTPStatusToAnthropicError(lastStatusCode)
-		sendAnthropicError(c, lastStatusCode, errType, fmt.Sprintf("Upstream returned status %d", lastStatusCode))
 	}
 }

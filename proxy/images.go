@@ -870,7 +870,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
 	rateLimitRetries := 0
-	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
@@ -909,7 +908,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				ErrorToGinResponse(c, reqErr)
 				return
 			}
-			lastErr = reqErr
 			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
 				continue
 			}
@@ -1021,11 +1019,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		return
 	}
 
-	if lastErr != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"}})
-	} else if lastStatusCode != 0 {
-		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
-	}
 }
 
 func collectImagesResponse(body io.Reader, responseFormat, fallbackModel string) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
