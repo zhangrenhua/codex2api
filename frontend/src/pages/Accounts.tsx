@@ -38,7 +38,7 @@ export default function Accounts() {
   const [pageSize, setPageSize] = useState(20)
   const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'error' | 'disabled' | 'locked'>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'plus' | 'team' | 'free'>('all')
+  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'prolite' | 'plus' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [addForm, setAddForm] = useState<AddAccountRequest>({
@@ -189,9 +189,9 @@ export default function Accounts() {
         if (!account.locked) return false
         break
     }
-    // 套餐过滤
+    // 套餐过滤：按原始 plan_type 匹配，使 pro 与 prolite 成为独立过滤项
     if (planFilter !== 'all') {
-      const plan = normalizePlanType(account.plan_type)
+      const plan = (account.plan_type || '').toLowerCase().trim()
       if (plan !== planFilter) return false
     }
     // 搜索过滤
@@ -1133,7 +1133,7 @@ export default function Accounts() {
             />
           </div>
           <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
-            {(['all', 'pro', 'plus', 'team', 'free'] as const).map((key) => (
+            {(['all', 'pro', 'prolite', 'plus', 'team', 'free'] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => { setPlanFilter(key); setPage(1) }}
@@ -1143,7 +1143,11 @@ export default function Accounts() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {key === 'all' ? t('accounts.filterAll') : key.charAt(0).toUpperCase() + key.slice(1)}
+                {key === 'all'
+                  ? t('accounts.filterAll')
+                  : key === 'prolite'
+                    ? 'ProLite'
+                    : key.charAt(0).toUpperCase() + key.slice(1)}
               </button>
             ))}
           </div>
@@ -1263,7 +1267,7 @@ export default function Accounts() {
                         <TableCell
                           className="text-[13px] font-medium"
                         >
-                          {account.plan_type || '-'}
+                          {formatPlanLabel(account.plan_type)}
                         </TableCell>
                         <TableCell>
                           <div className="space-y-1.5">
@@ -2249,6 +2253,14 @@ function getDispatchScore(account: AccountRow): number {
 function normalizePlanType(planType?: string): string {
   const raw = (planType || '').toLowerCase().trim()
   if (raw === 'prolite' || raw === 'pro_lite' || raw === 'pro-lite') return 'pro'
+  return raw
+}
+
+function formatPlanLabel(planType?: string): string {
+  const raw = (planType || '').trim()
+  if (!raw) return '-'
+  const lower = raw.toLowerCase()
+  if (lower === 'prolite' || lower === 'pro_lite' || lower === 'pro-lite') return 'ProLite'
   return raw
 }
 
