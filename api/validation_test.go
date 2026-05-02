@@ -75,7 +75,7 @@ func TestValidateResponsesAPIRequestAllowsCompactionInputType(t *testing.T) {
 	}
 }
 
-func TestValidateResponsesAPIRequestUsesModelAwareMaxOutputTokens(t *testing.T) {
+func TestValidateResponsesAPIRequestMaxOutputTokensCap(t *testing.T) {
 	tests := []struct {
 		name  string
 		body  []byte
@@ -92,8 +92,13 @@ func TestValidateResponsesAPIRequestUsesModelAwareMaxOutputTokens(t *testing.T) 
 			valid: false,
 		},
 		{
-			name:  "other models keep 64k output cap",
-			body:  []byte(`{"model":"gpt-5.4","input":"hello","max_output_tokens":65537}`),
+			name:  "other models also allow up to 128k (aligned cap, upstream decides actual ceiling)",
+			body:  []byte(`{"model":"gpt-5.4","input":"hello","max_output_tokens":100000}`),
+			valid: true,
+		},
+		{
+			name:  "other models reject above 128k",
+			body:  []byte(`{"model":"gpt-5.4","input":"hello","max_output_tokens":128001}`),
 			valid: false,
 		},
 	}

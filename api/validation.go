@@ -14,10 +14,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const (
-	defaultResponsesMaxOutputTokens = 65536
-	gpt55ResponsesMaxOutputTokens   = 128000
-)
+// responsesMaxOutputTokensCap is the upper bound enforced by the local
+// validator on the /v1/responses max_output_tokens field. The translator
+// strips the field before forwarding to the Codex upstream (which does not
+// accept it), so this cap only guards against obviously-absurd client values
+// — it does not control the actual output length, which is decided upstream.
+// Aligned to 128000 to match the highest cap OpenAI currently advertises on
+// any Codex-served model, so SDKs that default to 100k+ pass through.
+const responsesMaxOutputTokensCap = 128000
 
 // ValidationRule represents a validation rule function
 type ValidationRule func(value gjson.Result, path string) *ValidationError
@@ -424,16 +428,12 @@ func ChatCompletionValidationRules() map[string][]ValidationRule {
 	}
 }
 
-// ResponsesMaxOutputTokensForModel returns the downstream validation cap for
-// max_output_tokens. Most Codex models still use the legacy 64k output cap,
-// while gpt-5.5 clients may legitimately request up to 128k.
-func ResponsesMaxOutputTokensForModel(model string) int {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt-5.5":
-		return gpt55ResponsesMaxOutputTokens
-	default:
-		return defaultResponsesMaxOutputTokens
-	}
+// ResponsesMaxOutputTokensForModel returns the local validation cap for
+// max_output_tokens. The cap is intentionally model-agnostic: the translator
+// drops the field before forwarding to Codex, so the real upstream ceiling is
+// enforced server-side. The model argument is kept for API compatibility.
+func ResponsesMaxOutputTokensForModel(_ string) int {
+	return responsesMaxOutputTokensCap
 }
 
 // ResponsesAPIValidationRules returns validation rules for responses API request
@@ -442,12 +442,11 @@ func ResponsesAPIValidationRules() map[string][]ValidationRule {
 	return ResponsesAPIValidationRulesForModel("")
 }
 
-func ResponsesAPIValidationRulesForModel(model string) map[string][]ValidationRule {
-	maxOutputTokens := ResponsesMaxOutputTokensForModel(model)
+func ResponsesAPIValidationRulesForModel(_ string) map[string][]ValidationRule {
 	return map[string][]ValidationRule{
 		"model": {Required(), TypeString(), MaxLength(64)},
 		// input validation is handled separately to support both string and array formats
-		"max_output_tokens": {TypeNumber(), MinValue(1), MaxValue(float64(maxOutputTokens))},
+		"max_output_tokens": {TypeNumber(), MinValue(1), MaxValue(float64(responsesMaxOutputTokensCap))},
 		"temperature":       {TypeNumber(), Range(0, 2)},
 		"top_p":             {TypeNumber(), Range(0, 1)},
 		"stream":            {TypeBoolean()},

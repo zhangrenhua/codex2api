@@ -342,7 +342,11 @@ components:
           type: integer
           minimum: 1
           maximum: 128000
-          description: Maximum output tokens. gpt-5.5 supports up to 128000; other models may be capped lower.
+          description: |
+            Client-side hint for maximum output tokens. The proxy strips this
+            field before forwarding to the Codex upstream (which does not
+            accept it), so the effective ceiling is enforced upstream, not here.
+            The 128000 cap above is a sanity bound for obviously-absurd values.
         temperature:
           type: number
           minimum: 0
