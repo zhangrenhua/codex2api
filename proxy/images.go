@@ -941,7 +941,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				Stream:            stream,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
-				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, decision),
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
 			})
 			if shouldRetry {
 				lastStatusCode = resp.StatusCode

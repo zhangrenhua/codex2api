@@ -223,7 +223,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				Stream:            isStream,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
-				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, decision),
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
 			})
 
 			if shouldRetry {

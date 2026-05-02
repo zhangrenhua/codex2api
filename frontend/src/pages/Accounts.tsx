@@ -1271,6 +1271,11 @@ export default function Accounts() {
                             {account.cooldown_until && (account.status === 'rate_limited' || account.status === 'error') && (
                               <CooldownTimer until={account.cooldown_until} />
                             )}
+                            {account.status === 'error' && account.error_message && (
+                              <div className="max-w-[180px] truncate text-[11px] leading-tight text-red-500" title={account.error_message}>
+                                {account.error_message}
+                              </div>
+                            )}
                             {(account.model_cooldowns?.length ?? 0) > 0 && (
                               <div className="text-[11px] leading-tight text-amber-600">
                                 model {account.model_cooldowns?.[0]?.model}

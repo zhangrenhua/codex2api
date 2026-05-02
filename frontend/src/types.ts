@@ -28,6 +28,7 @@ export interface AccountRow {
   email: string
   plan_type: string
   status: AccountStatus
+  error_message?: string
   at_only?: boolean
   health_tier?: string
   scheduler_score?: number

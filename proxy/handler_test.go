@@ -165,6 +165,43 @@ func TestResponsesEndpointsAllowCompactionInputType(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointsAllowGPT55MaxOutputTokens128K(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := NewHandler(auth.NewStore(nil, nil, nil), nil, nil, nil)
+	body := []byte(`{"model":"gpt-5.5","input":"hello","max_output_tokens":128000}`)
+
+	tests := []struct {
+		name    string
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{name: "responses", path: "/v1/responses", handler: handler.Responses},
+		{name: "responses compact", path: "/v1/responses/compact", handler: handler.ResponsesCompact},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			req := httptest.NewRequest(http.MethodPost, test.path, bytes.NewReader(body)).WithContext(ctx)
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(recorder)
+			ginCtx.Request = req
+
+			test.handler(ginCtx)
+
+			if recorder.Code == http.StatusBadRequest && strings.Contains(recorder.Body.String(), "max_output_tokens") {
+				t.Fatalf("gpt-5.5 128k max_output_tokens was rejected by local validation: %s", recorder.Body.String())
+			}
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d after validation passes; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestExtractResponseImageGenerationOutputDedupes(t *testing.T) {
 	event := []byte(`{"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}}`)
 	seen := make(map[string]struct{})
@@ -316,6 +353,32 @@ func TestShouldRetryHTTPStatusSplitsRateLimitBudget(t *testing.T) {
 	}
 	if generalRetries != 1 || rateLimitRetries != 1 {
 		t.Fatalf("budgets = general %d rate %d, want 1/1", generalRetries, rateLimitRetries)
+	}
+}
+
+func TestDeactivatedWorkspace402MarksAccountError(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 42, AccessToken: "at"}
+	handler := &Handler{store: store}
+	body := []byte(`{"detail":{"code":"deactivated_workspace"}}`)
+
+	if !IsDeactivatedWorkspaceError(body) {
+		t.Fatal("expected deactivated workspace body to be detected")
+	}
+	if got := upstreamErrorKind(http.StatusPaymentRequired, body, codex429Decision{}); got != "deactivated_workspace" {
+		t.Fatalf("upstreamErrorKind = %q, want deactivated_workspace", got)
+	}
+
+	handler.applyCooldownForModel(account, http.StatusPaymentRequired, body, &http.Response{Header: make(http.Header)}, "gpt-5.4")
+
+	if got := account.RuntimeStatus(); got != "error" {
+		t.Fatalf("RuntimeStatus() = %q, want error", got)
+	}
+	account.Mu().RLock()
+	errorMsg := account.ErrorMsg
+	account.Mu().RUnlock()
+	if !strings.Contains(errorMsg, "deactivated_workspace") {
+		t.Fatalf("ErrorMsg = %q, want deactivated_workspace", errorMsg)
 	}
 }
 

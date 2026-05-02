@@ -683,7 +683,37 @@ func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries i
 	return false
 }
 
-func upstreamErrorKind(statusCode int, decision codex429Decision) string {
+func IsDeactivatedWorkspaceError(body []byte) bool {
+	for _, path := range []string{"detail.code", "error.code", "code"} {
+		code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String()))
+		if code == "deactivated_workspace" {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(string(body)), "deactivated_workspace")
+}
+
+func upstreamAccountErrorMessage(statusCode int, body []byte) string {
+	if IsDeactivatedWorkspaceError(body) {
+		return fmt.Sprintf("上游返回 %d: deactivated_workspace", statusCode)
+	}
+	message := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(gjson.GetBytes(body, "detail.message").String())
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	if len(message) > 300 {
+		message = message[:300]
+	}
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	return fmt.Sprintf("上游返回 %d: %s", statusCode, message)
+}
+
+func upstreamErrorKind(statusCode int, body []byte, decision codex429Decision) string {
 	switch statusCode {
 	case http.StatusTooManyRequests:
 		if decision.Reason != "" {
@@ -693,6 +723,9 @@ func upstreamErrorKind(statusCode int, decision codex429Decision) string {
 	case http.StatusUnauthorized:
 		return "unauthorized"
 	case http.StatusPaymentRequired, http.StatusForbidden:
+		if IsDeactivatedWorkspaceError(body) {
+			return "deactivated_workspace"
+		}
 		return "payment_required"
 	case http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout:
 		return "server"
@@ -730,7 +763,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	// Validate request
 	validator := api.NewValidator(rawBody)
-	rules := api.ResponsesAPIValidationRules()
+	rules := api.ResponsesAPIValidationRulesForModel(gjson.GetBytes(rawBody, "model").String())
 	rules["model"] = append(rules["model"], api.ModelValidator(h.supportedModelIDs(c.Request.Context())))
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
@@ -885,7 +918,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				ServiceTier:       serviceTier,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
-				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, decision),
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
 			})
 
 			if shouldRetry {
@@ -1116,7 +1149,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	// Validate request
 	validator := api.NewValidator(rawBody)
-	rules := api.ResponsesAPIValidationRules()
+	rules := api.ResponsesAPIValidationRulesForModel(gjson.GetBytes(rawBody, "model").String())
 	rules["model"] = append(rules["model"], api.ModelValidator(h.supportedModelIDs(c.Request.Context())))
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
@@ -1261,7 +1294,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				ServiceTier:       serviceTier,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
-				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, decision),
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
 			})
 
 			if shouldRetry {
@@ -1484,7 +1517,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				ServiceTier:       serviceTier,
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
-				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, decision),
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
 			})
 
 			if shouldRetry {
@@ -2051,6 +2084,13 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 			h.store.MarkCooldown(account, 5*time.Minute, "unauthorized")
 		}
 	case http.StatusPaymentRequired, http.StatusForbidden:
+		if IsDeactivatedWorkspaceError(body) {
+			log.Printf("账号 %d 工作区已停用，标记为错误", account.ID())
+			if h.store != nil {
+				h.store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
+			}
+			return codex429Decision{}
+		}
 		h.store.MarkCooldown(account, 30*time.Minute, "payment_required")
 	}
 	return codex429Decision{}

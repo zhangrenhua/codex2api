@@ -339,7 +339,8 @@ components:
         max_output_tokens:
           type: integer
           minimum: 1
-          maximum: 65536
+          maximum: 128000
+          description: Maximum output tokens. gpt-5.5 supports up to 128000; other models may be capped lower.
         temperature:
           type: number
           minimum: 0

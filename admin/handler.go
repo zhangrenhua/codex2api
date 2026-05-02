@@ -287,6 +287,7 @@ type accountResponse struct {
 	Email                    string                     `json:"email"`
 	PlanType                 string                     `json:"plan_type"`
 	Status                   string                     `json:"status"`
+	ErrorMessage             string                     `json:"error_message,omitempty"`
 	ATOnly                   bool                       `json:"at_only"`
 	HealthTier               string                     `json:"health_tier"`
 	SchedulerScore           float64                    `json:"scheduler_score"`
@@ -388,6 +389,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			Email:                    row.GetCredential("email"),
 			PlanType:                 row.GetCredential("plan_type"),
 			Status:                   row.Status,
+			ErrorMessage:             row.ErrorMessage,
 			ATOnly:                   row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			ProxyURL:                 row.ProxyURL,
 			Enabled:                  row.Enabled,
@@ -468,6 +470,9 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 			// 使用运行时状态（优先于 DB 状态）
 			resp.Status = acc.RuntimeStatus()
+			acc.Mu().RLock()
+			resp.ErrorMessage = acc.ErrorMsg
+			acc.Mu().RUnlock()
 		} else if row.CooldownUntil.Valid && row.CooldownUntil.Time.After(time.Now()) {
 			resp.CooldownReason = row.CooldownReason
 			resp.CooldownUntil = row.CooldownUntil.Time.Format(time.RFC3339)

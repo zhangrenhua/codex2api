@@ -467,6 +467,9 @@ func (h *Handler) BatchTest(c *gin.Context) {
 
 func shouldMarkBatchTestAccountError(statusCode int, body []byte) bool {
 	msg := strings.ToLower(string(body))
+	if statusCode == http.StatusPaymentRequired && proxy.IsDeactivatedWorkspaceError(body) {
+		return true
+	}
 	if statusCode == http.StatusForbidden {
 		return true
 	}

@@ -19,6 +19,12 @@ func TestShouldMarkBatchTestAccountError(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "payment required deactivated workspace is account scoped",
+			statusCode: http.StatusPaymentRequired,
+			body:       []byte(`{"detail":{"code":"deactivated_workspace"}}`),
+			want:       true,
+		},
+		{
 			name:       "invalid grant bad request is account scoped",
 			statusCode: http.StatusBadRequest,
 			body:       []byte(`{"error":"invalid_grant"}`),
