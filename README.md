@@ -54,6 +54,7 @@ Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管
 - [在线 Demo](#在线-demo)
 - [界面预览](#界面预览)
 - [快速部署](#快速部署)
+  - [一键交互部署 (推荐)](#一键交互部署-推荐)
 - [完整文档](#完整文档)
 - [升级与本地开发](#升级与本地开发)
 - [环境配置](#环境配置)
@@ -72,6 +73,43 @@ Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管
 ## 快速部署
 
 > 详细部署指南请参考：[DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+### 一键交互部署 (推荐)
+
+`deploy.sh` 提供 6 步交互式向导，依次询问 **端口 / 监听范围 / 数据库 / 密钥 / 构建方式 / 确认**，自动生成 `.env` 并拉起容器。
+
+**场景 1：尚未克隆仓库（一行远程拉起）**
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/james-6-23/codex2api/main/deploy.sh)
+```
+
+脚本会自动检测当前目录是否是 `codex2api` 仓库，若不是则克隆到 `./codex2api`，进入目录后再执行部署。
+
+**场景 2：已经 `git clone` 到本地**
+
+```bash
+git clone https://github.com/james-6-23/codex2api.git
+cd codex2api
+bash deploy.sh
+```
+
+**监听范围选项**
+
+| 选项 | 绑定地址 | 适用场景 |
+| --- | --- | --- |
+| 1) 仅本机访问 | `127.0.0.1` | 服务放在 nginx / Caddy 等反向代理后端，外网无法直接访问端口 |
+| 2) 全部网络 (默认) | `0.0.0.0` | 直接通过服务器 IP 对外暴露，部署完成后会展示本机 / 内网 / 公网地址 |
+
+绑定地址会写入 `.env` 的 `BIND_HOST`，后续可手动修改后 `docker compose up -d` 重启生效。
+
+**可选环境变量**（用于自定义自举行为）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `CODEX2API_REPO_URL` | `https://github.com/james-6-23/codex2api.git` | 克隆使用的仓库地址 |
+| `CODEX2API_REPO_BRANCH` | `main` | 克隆使用的分支 |
+| `CODEX2API_DIR_NAME` | `codex2api` | 克隆到本地的目录名 |
 
 ### 部署模式总览
 
