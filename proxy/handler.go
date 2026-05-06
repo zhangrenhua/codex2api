@@ -1041,6 +1041,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.Release(account)
 				return
 			}
+			streamWriter := newStreamFlushWriter(c.Writer, flusher)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -1074,14 +1075,16 @@ func (h *Handler) Responses(c *gin.Context) {
 					gotTerminal = true
 				}
 
-				if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", data); err != nil {
+				if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", data)); err != nil {
 					writeErr = err
 					return false
 				}
 				wroteAnyBody = true
-				flusher.Flush()
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
+			if writeErr == nil {
+				writeErr = streamWriter.Flush()
+			}
 		} else {
 			// 非流式收集
 			var lastResponseData []byte
@@ -1643,6 +1646,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				h.store.Release(account)
 				return
 			}
+			streamWriter := newStreamFlushWriter(c.Writer, flusher)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				chunk, done := streamTranslator.Translate(data)
@@ -1669,24 +1673,29 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 
 				if chunk != nil {
-					if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", chunk); err != nil {
+					if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", chunk)); err != nil {
 						writeErr = err
 						return false
 					}
 					wroteAnyBody = true
-					flusher.Flush()
 				}
 				if done {
-					if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
+					if err := streamWriter.WriteString("data: [DONE]\n\n"); err != nil {
+						writeErr = err
+						return false
+					}
+					if err := streamWriter.Flush(); err != nil {
 						writeErr = err
 						return false
 					}
 					wroteAnyBody = true
-					flusher.Flush()
 					return false
 				}
 				return true
 			})
+			if writeErr == nil {
+				writeErr = streamWriter.Flush()
+			}
 		} else {
 			var fullContent strings.Builder
 			var toolCalls []ToolCallResult
@@ -1824,19 +1833,24 @@ func (h *Handler) handleStreamResponse(c *gin.Context, body io.Reader, model, ch
 		return
 	}
 
+	streamWriter := newStreamFlushWriter(c.Writer, flusher)
 	err := ReadSSEStream(body, func(data []byte) bool {
 		chunk, done := TranslateStreamChunk(data, model, chunkID, created)
 		if chunk != nil {
-			fmt.Fprintf(c.Writer, "data: %s\n\n", chunk)
-			flusher.Flush()
+			if err := streamWriter.WriteString(fmt.Sprintf("data: %s\n\n", chunk)); err != nil {
+				return false
+			}
 		}
 		if done {
-			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-			flusher.Flush()
+			if err := streamWriter.WriteString("data: [DONE]\n\n"); err != nil {
+				return false
+			}
+			_ = streamWriter.Flush()
 			return false
 		}
 		return true
 	})
+	_ = streamWriter.Flush()
 
 	if err != nil {
 		log.Printf("读取上游流失败: %v", err)

@@ -218,6 +218,10 @@ func TestApplyCodexRequestHeadersUsesMinimalFallbackByDefault(t *testing.T) {
 }
 
 func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	if err != nil {
 		t.Fatalf("http.NewRequest() error = %v", err)
@@ -247,6 +251,34 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 		if got := req.Header.Get(name); got != downstreamHeaders.Get(name) {
 			t.Fatalf("%s = %q, want %q", name, got, downstreamHeaders.Get(name))
 		}
+	}
+}
+
+func TestApplyCodexRequestHeadersAutoUpgradesOldCodexCLI(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:   ClientCompatModeAuto,
+		CodexMinCLIVersion: "0.118.0",
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}
+	downstreamHeaders := http.Header{
+		"User-Agent": []string{"codex_cli_rs/0.117.0 (Mac OS 15.5.0; arm64) Apple_Terminal/464"},
+		"Originator": []string{Originator},
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "", "api-key-1", nil, downstreamHeaders)
+
+	if got := req.Header.Get("User-Agent"); got == downstreamHeaders.Get("User-Agent") {
+		t.Fatalf("User-Agent preserved old CLI UA %q", got)
+	}
+	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
+		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
 	}
 }
 

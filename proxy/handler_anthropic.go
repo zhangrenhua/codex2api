@@ -276,6 +276,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			translator := newAnthropicStreamTranslator(originalModel)
+			streamWriter := newStreamFlushWriter(c.Writer, flusher)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -307,18 +308,18 @@ func (h *Handler) Messages(c *gin.Context) {
 				events := translator.translateEvent(data)
 				for _, evt := range events {
 					sse := anthropicEventToSSE(evt)
-					if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+					if err := streamWriter.WriteString(sse); err != nil {
 						writeErr = err
 						return false
 					}
 					wroteAnyBody = true
 				}
-				if len(events) > 0 {
-					flusher.Flush()
-				}
 
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
+			if writeErr == nil {
+				writeErr = streamWriter.Flush()
+			}
 
 			// 流结束后补齐事件
 			if writeErr == nil {
@@ -327,9 +328,14 @@ func (h *Handler) Messages(c *gin.Context) {
 				if !gotTerminal {
 					for _, evt := range finalEvents {
 						sse := anthropicEventToSSE(evt)
-						fmt.Fprint(c.Writer, sse)
+						if err := streamWriter.WriteString(sse); err != nil {
+							writeErr = err
+							break
+						}
 					}
-					flusher.Flush()
+					if writeErr == nil {
+						writeErr = streamWriter.Flush()
+					}
 				}
 			}
 		} else {

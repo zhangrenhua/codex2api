@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -87,8 +88,58 @@ type DB struct {
 	logMu   sync.Mutex
 	logStop chan struct{}
 	logWg   sync.WaitGroup
-	// 预分配日志缓冲以减少内存分配
-	logBufCap int
+
+	usageLogMode          atomic.Value // string: full|errors|off
+	usageLogBatchSize     int64
+	usageLogFlushInterval int64 // ns
+	logFlushNotify        chan struct{}
+}
+
+const (
+	UsageLogModeFull   = "full"
+	UsageLogModeErrors = "errors"
+	UsageLogModeOff    = "off"
+
+	defaultUsageLogMode                 = UsageLogModeFull
+	defaultUsageLogBatchSize            = 200
+	defaultUsageLogFlushIntervalSeconds = 5
+	minUsageLogBatchSize                = 1
+	maxUsageLogBatchSize                = 10000
+	minUsageLogFlushIntervalSeconds     = 1
+	maxUsageLogFlushIntervalSeconds     = 300
+)
+
+func NormalizeUsageLogMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", UsageLogModeFull:
+		return UsageLogModeFull
+	case UsageLogModeErrors:
+		return UsageLogModeErrors
+	case UsageLogModeOff:
+		return UsageLogModeOff
+	default:
+		return UsageLogModeFull
+	}
+}
+
+func NormalizeUsageLogBatchSize(n int) int {
+	if n < minUsageLogBatchSize {
+		return defaultUsageLogBatchSize
+	}
+	if n > maxUsageLogBatchSize {
+		return maxUsageLogBatchSize
+	}
+	return n
+}
+
+func NormalizeUsageLogFlushIntervalSeconds(n int) int {
+	if n < minUsageLogFlushIntervalSeconds {
+		return defaultUsageLogFlushIntervalSeconds
+	}
+	if n > maxUsageLogFlushIntervalSeconds {
+		return maxUsageLogFlushIntervalSeconds
+	}
+	return n
 }
 
 // usageLogEntry 日志缓冲条目
@@ -162,11 +213,12 @@ func New(driver string, dsn string) (*DB, error) {
 	}
 
 	db := &DB{
-		conn:      conn,
-		driver:    driver,
-		logStop:   make(chan struct{}),
-		logBufCap: 128,
+		conn:           conn,
+		driver:         driver,
+		logStop:        make(chan struct{}),
+		logFlushNotify: make(chan struct{}, 1),
 	}
+	db.SetUsageLogConfig(defaultUsageLogMode, defaultUsageLogBatchSize, defaultUsageLogFlushIntervalSeconds)
 	if db.isSQLite() {
 		if err := db.configureSQLite(ctx); err != nil {
 			return nil, fmt.Errorf("配置 SQLite 失败: %w", err)
@@ -256,6 +308,79 @@ func (db *DB) Close() error {
 	db.logWg.Wait()
 	db.flushLogs() // 最后一次 flush
 	return db.conn.Close()
+}
+
+func (db *DB) SetUsageLogConfig(mode string, batchSize int, flushIntervalSeconds int) {
+	if db == nil {
+		return
+	}
+	mode = NormalizeUsageLogMode(mode)
+	batchSize = NormalizeUsageLogBatchSize(batchSize)
+	flushIntervalSeconds = NormalizeUsageLogFlushIntervalSeconds(flushIntervalSeconds)
+	db.usageLogMode.Store(mode)
+	atomic.StoreInt64(&db.usageLogBatchSize, int64(batchSize))
+	atomic.StoreInt64(&db.usageLogFlushInterval, int64(time.Duration(flushIntervalSeconds)*time.Second))
+}
+
+func (db *DB) GetUsageLogMode() string {
+	if db == nil {
+		return defaultUsageLogMode
+	}
+	if v, ok := db.usageLogMode.Load().(string); ok && v != "" {
+		return NormalizeUsageLogMode(v)
+	}
+	return defaultUsageLogMode
+}
+
+func (db *DB) GetUsageLogBatchSize() int {
+	if db == nil {
+		return defaultUsageLogBatchSize
+	}
+	n := int(atomic.LoadInt64(&db.usageLogBatchSize))
+	return NormalizeUsageLogBatchSize(n)
+}
+
+func (db *DB) GetUsageLogFlushIntervalSeconds() int {
+	if db == nil {
+		return defaultUsageLogFlushIntervalSeconds
+	}
+	d := time.Duration(atomic.LoadInt64(&db.usageLogFlushInterval))
+	if d <= 0 {
+		return defaultUsageLogFlushIntervalSeconds
+	}
+	return NormalizeUsageLogFlushIntervalSeconds(int(d / time.Second))
+}
+
+func (db *DB) getUsageLogFlushInterval() time.Duration {
+	if db == nil {
+		return time.Duration(defaultUsageLogFlushIntervalSeconds) * time.Second
+	}
+	d := time.Duration(atomic.LoadInt64(&db.usageLogFlushInterval))
+	if d <= 0 {
+		return time.Duration(defaultUsageLogFlushIntervalSeconds) * time.Second
+	}
+	return d
+}
+
+func (db *DB) shouldStoreUsageLog(input *UsageLogInput) bool {
+	switch db.GetUsageLogMode() {
+	case UsageLogModeOff:
+		return false
+	case UsageLogModeErrors:
+		return input != nil && input.StatusCode >= 400
+	default:
+		return true
+	}
+}
+
+func (db *DB) notifyLogFlush() {
+	if db == nil || db.logFlushNotify == nil {
+		return
+	}
+	select {
+	case db.logFlushNotify <- struct{}{}:
+	default:
+	}
 }
 
 // migrate 自动建表
@@ -410,6 +535,13 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_sensitive_words TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_custom_patterns TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_disabled_patterns TEXT DEFAULT '[]';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS client_compat_mode VARCHAR(20) DEFAULT 'preserve';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.118.0';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_log_mode VARCHAR(20) DEFAULT 'full';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_log_batch_size INT DEFAULT 200;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_log_flush_interval_seconds INT DEFAULT 5;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_policy VARCHAR(20) DEFAULT 'immediate';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_interval_ms INT DEFAULT 20;
 
 			CREATE TABLE IF NOT EXISTS prompt_filter_logs (
 				id               SERIAL PRIMARY KEY,
@@ -641,6 +773,13 @@ type SystemSettings struct {
 	PromptFilterSensitiveWords       string
 	PromptFilterCustomPatterns       string
 	PromptFilterDisabledPatterns     string
+	ClientCompatMode                 string
+	CodexMinCLIVersion               string
+	UsageLogMode                     string
+	UsageLogBatchSize                int
+	UsageLogFlushIntervalSeconds     int
+	StreamFlushPolicy                string
+	StreamFlushIntervalMS            int
 }
 
 // GetSystemSettings 加载全局设置
@@ -670,7 +809,14 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_max_text_length, 81920),
 		       COALESCE(prompt_filter_sensitive_words, ''),
 		       COALESCE(prompt_filter_custom_patterns, '[]'),
-		       COALESCE(prompt_filter_disabled_patterns, '[]')
+		       COALESCE(prompt_filter_disabled_patterns, '[]'),
+		       COALESCE(client_compat_mode, 'preserve'),
+		       COALESCE(codex_min_cli_version, '0.118.0'),
+		       COALESCE(usage_log_mode, 'full'),
+		       COALESCE(usage_log_batch_size, 200),
+		       COALESCE(usage_log_flush_interval_seconds, 5),
+		       COALESCE(stream_flush_policy, 'immediate'),
+		       COALESCE(stream_flush_interval_ms, 20)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
@@ -682,6 +828,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold,
 		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
 		&s.PromptFilterCustomPatterns, &s.PromptFilterDisabledPatterns,
+		&s.ClientCompatMode, &s.CodexMinCLIVersion, &s.UsageLogMode, &s.UsageLogBatchSize,
+		&s.UsageLogFlushIntervalSeconds, &s.StreamFlushPolicy, &s.StreamFlushIntervalMS,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -699,9 +847,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				background_refresh_interval_minutes, usage_probe_max_age_minutes, recovery_probe_interval_minutes,
 				resin_url, resin_platform_name, prompt_filter_enabled, prompt_filter_mode, prompt_filter_threshold,
 				prompt_filter_strict_threshold, prompt_filter_log_matches, prompt_filter_max_text_length,
-				prompt_filter_sensitive_words, prompt_filter_custom_patterns, prompt_filter_disabled_patterns
+				prompt_filter_sensitive_words, prompt_filter_custom_patterns, prompt_filter_disabled_patterns,
+				client_compat_mode, codex_min_cli_version, usage_log_mode, usage_log_batch_size,
+				usage_log_flush_interval_seconds, stream_flush_policy, stream_flush_interval_ms
 			)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)
 			ON CONFLICT (id) DO UPDATE SET
 				max_concurrency         = EXCLUDED.max_concurrency,
 				global_rpm              = EXCLUDED.global_rpm,
@@ -735,14 +885,23 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
 				prompt_filter_custom_patterns = EXCLUDED.prompt_filter_custom_patterns,
-				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns
+				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
+				client_compat_mode = EXCLUDED.client_compat_mode,
+				codex_min_cli_version = EXCLUDED.codex_min_cli_version,
+				usage_log_mode = EXCLUDED.usage_log_mode,
+				usage_log_batch_size = EXCLUDED.usage_log_batch_size,
+				usage_log_flush_interval_seconds = EXCLUDED.usage_log_flush_interval_seconds,
+				stream_flush_policy = EXCLUDED.stream_flush_policy,
+				stream_flush_interval_ms = EXCLUDED.stream_flush_interval_ms
 		`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
 		s.FastSchedulerEnabled, s.MaxRetries, s.MaxRateLimitRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping,
 		s.BackgroundRefreshIntervalMinutes, s.UsageProbeMaxAgeMinutes, s.RecoveryProbeIntervalMinutes,
 		s.ResinURL, s.ResinPlatformName, s.PromptFilterEnabled, s.PromptFilterMode, s.PromptFilterThreshold,
 		s.PromptFilterStrictThreshold, s.PromptFilterLogMatches, s.PromptFilterMaxTextLength,
-		s.PromptFilterSensitiveWords, s.PromptFilterCustomPatterns, s.PromptFilterDisabledPatterns)
+		s.PromptFilterSensitiveWords, s.PromptFilterCustomPatterns, s.PromptFilterDisabledPatterns,
+		s.ClientCompatMode, s.CodexMinCLIVersion, s.UsageLogMode, s.UsageLogBatchSize,
+		s.UsageLogFlushIntervalSeconds, s.StreamFlushPolicy, s.StreamFlushIntervalMS)
 	return err
 }
 
@@ -971,6 +1130,10 @@ type UsageLog struct {
 
 // InsertUsageLog 将日志追加到内存缓冲（非阻塞）
 func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
+	if db == nil || log == nil || !db.shouldStoreUsageLog(log) {
+		return nil
+	}
+
 	// 计算计费金额（基于 input/output tokens 和模型）
 	// 使用 EffectiveModel 作为计费模型（如果有映射则使用映射后的模型）
 	billingModel := log.EffectiveModel
@@ -1025,8 +1188,8 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 	db.logMu.Unlock()
 
 	// 增加触发 flush 的阈值，减少 flush 频率
-	if bufLen >= 200 {
-		go db.flushLogs()
+	if bufLen >= db.GetUsageLogBatchSize() {
+		db.notifyLogFlush()
 	}
 	return nil
 }
@@ -1103,17 +1266,32 @@ func (db *DB) startLogFlusher() {
 	db.logWg.Add(1)
 	go func() {
 		defer db.logWg.Done()
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
 		for {
+			timer := time.NewTimer(db.getUsageLogFlushInterval())
 			select {
-			case <-ticker.C:
+			case <-timer.C:
+				db.flushLogs()
+			case <-db.logFlushNotify:
+				stopTimer(timer)
 				db.flushLogs()
 			case <-db.logStop:
+				stopTimer(timer)
 				return
 			}
 		}
 	}()
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 }
 
 // flushLogs 将缓冲中的日志批量写入 PG
@@ -1124,7 +1302,7 @@ func (db *DB) flushLogs() {
 		return
 	}
 	batch := db.logBuf
-	db.logBuf = make([]usageLogEntry, 0, db.logBufCap)
+	db.logBuf = make([]usageLogEntry, 0, db.GetUsageLogBatchSize())
 	db.logMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // 增加超时时间

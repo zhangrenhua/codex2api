@@ -211,6 +211,20 @@ export default function Settings() {
     { label: t('common.disabled'), value: 'false' },
     { label: t('common.enabled'), value: 'true' },
   ]
+  const clientCompatOptions = [
+    { label: t('settings.clientCompatPreserve'), value: 'preserve' },
+    { label: t('settings.clientCompatAuto'), value: 'auto' },
+    { label: t('settings.clientCompatForce'), value: 'force' },
+  ]
+  const usageLogModeOptions = [
+    { label: t('settings.usageLogFull'), value: 'full' },
+    { label: t('settings.usageLogErrors'), value: 'errors' },
+    { label: t('settings.usageLogOff'), value: 'off' },
+  ]
+  const streamFlushPolicyOptions = [
+    { label: t('settings.streamFlushImmediate'), value: 'immediate' },
+    { label: t('settings.streamFlushCoalesce'), value: 'coalesce' },
+  ]
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     max_concurrency: 2,
     global_rpm: 0,
@@ -249,6 +263,13 @@ export default function Settings() {
     prompt_filter_sensitive_words: '',
     prompt_filter_custom_patterns: '[]',
     prompt_filter_disabled_patterns: '[]',
+    client_compat_mode: 'preserve',
+    codex_min_cli_version: '0.118.0',
+    usage_log_mode: 'full',
+    usage_log_batch_size: 200,
+    usage_log_flush_interval_seconds: 5,
+    stream_flush_policy: 'immediate',
+    stream_flush_interval_ms: 20,
   })
   const [savingSettings, setSavingSettings] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
@@ -499,6 +520,65 @@ export default function Settings() {
               </div>
             </SettingsCard>
           </div>
+
+          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
+              <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
+                <Select
+                  value={settingsForm.client_compat_mode}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, client_compat_mode: value }))}
+                  options={clientCompatOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
+                <Input
+                  value={settingsForm.codex_min_cli_version}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogMode')} description={t('settings.usageLogModeDesc')}>
+                <Select
+                  value={settingsForm.usage_log_mode}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, usage_log_mode: value }))}
+                  options={usageLogModeOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogBatchSize')} description={t('settings.usageLogBatchSizeDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={settingsForm.usage_log_batch_size}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_batch_size: parseInt(e.target.value) || 200 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogFlushInterval')} description={t('settings.usageLogFlushIntervalDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={settingsForm.usage_log_flush_interval_seconds}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: parseInt(e.target.value) || 5 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.streamFlushPolicy')} description={t('settings.streamFlushPolicyDesc')}>
+                <Select
+                  value={settingsForm.stream_flush_policy}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, stream_flush_policy: value }))}
+                  options={streamFlushPolicyOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.streamFlushInterval')} description={t('settings.streamFlushIntervalDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={settingsForm.stream_flush_interval_ms}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
 
           <SettingsCard title={t('settings.autoCleanup')}>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">

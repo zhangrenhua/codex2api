@@ -81,6 +81,13 @@ func main() {
 			PromptFilterMaxTextLength:        81920,
 			PromptFilterCustomPatterns:       "[]",
 			PromptFilterDisabledPatterns:     "[]",
+			ClientCompatMode:                 proxy.ClientCompatModePreserve,
+			CodexMinCLIVersion:               "0.118.0",
+			UsageLogMode:                     database.UsageLogModeFull,
+			UsageLogBatchSize:                200,
+			UsageLogFlushIntervalSeconds:     5,
+			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
+			StreamFlushIntervalMS:            20,
 		}
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {
@@ -103,6 +110,13 @@ func main() {
 			PromptFilterMaxTextLength:        81920,
 			PromptFilterCustomPatterns:       "[]",
 			PromptFilterDisabledPatterns:     "[]",
+			ClientCompatMode:                 proxy.ClientCompatModePreserve,
+			CodexMinCLIVersion:               "0.118.0",
+			UsageLogMode:                     database.UsageLogModeFull,
+			UsageLogBatchSize:                200,
+			UsageLogFlushIntervalSeconds:     5,
+			StreamFlushPolicy:                proxy.StreamFlushPolicyImmediate,
+			StreamFlushIntervalMS:            20,
 		}
 	} else {
 		log.Printf("已加载持久化业务设置: ProxyURL=%s, MaxConcurrency=%d, GlobalRPM=%d, PgMaxConns=%d, RedisPoolSize=%d",
@@ -145,6 +159,17 @@ func main() {
 		db.SetMaxOpenConns(settings.PgMaxConns)
 		log.Printf("%s 连接池: max_conns=%d", cfg.Database.Label(), settings.PgMaxConns)
 	}
+	db.SetUsageLogConfig(settings.UsageLogMode, settings.UsageLogBatchSize, settings.UsageLogFlushIntervalSeconds)
+	runtimeSettings := proxy.ApplyRuntimeSettingsFromSystem(settings)
+	log.Printf("运行时优化配置: client_compat=%s min_cli=%s usage_log=%s batch=%d flush=%ds stream_flush=%s/%dms",
+		runtimeSettings.ClientCompatMode,
+		runtimeSettings.CodexMinCLIVersion,
+		db.GetUsageLogMode(),
+		db.GetUsageLogBatchSize(),
+		db.GetUsageLogFlushIntervalSeconds(),
+		runtimeSettings.StreamFlushPolicy,
+		runtimeSettings.StreamFlushIntervalMS,
+	)
 
 	// 4c. 初始化 Resin 粘性代理池
 	if settings.ResinURL != "" && settings.ResinPlatformName != "" {

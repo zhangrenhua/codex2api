@@ -243,6 +243,13 @@ export interface SystemSettings {
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
   prompt_filter_disabled_patterns: string
+  client_compat_mode: 'preserve' | 'auto' | 'force' | string
+  codex_min_cli_version: string
+  usage_log_mode: 'full' | 'errors' | 'off' | string
+  usage_log_batch_size: number
+  usage_log_flush_interval_seconds: number
+  stream_flush_policy: 'immediate' | 'coalesce' | string
+  stream_flush_interval_ms: number
 }
 
 export interface PromptFilterMatch {

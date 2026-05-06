@@ -88,6 +88,78 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 	}
 }
 
+func TestUsageLogModeErrorsSkipsSuccessfulLogs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+	db.SetUsageLogConfig(UsageLogModeErrors, 10, 5)
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:  1,
+		Endpoint:   "/v1/responses",
+		Model:      "gpt-5.4",
+		StatusCode: 200,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog success 返回错误: %v", err)
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:    1,
+		Endpoint:     "/v1/responses",
+		Model:        "gpt-5.4",
+		StatusCode:   500,
+		ErrorMessage: "upstream failed",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog error 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len(logs) = %d, want 1", len(logs))
+	}
+	if logs[0].StatusCode != 500 {
+		t.Fatalf("StatusCode = %d, want 500", logs[0].StatusCode)
+	}
+}
+
+func TestUsageLogModeOffSkipsAllLogs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+	db.SetUsageLogConfig(UsageLogModeOff, 10, 5)
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:  1,
+		Endpoint:   "/v1/responses",
+		Model:      "gpt-5.4",
+		StatusCode: 500,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("len(logs) = %d, want 0", len(logs))
+	}
+}
+
 func TestSQLiteModelCooldownPersistence(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")

@@ -35,7 +35,7 @@ func TestIsCodexOfficialClientByHeaders(t *testing.T) {
 		originator string
 		want       bool
 	}{
-		{name: "cli ua", userAgent: "codex_cli_rs/0.125.0", want: true},
+		{name: "cli ua", userAgent: "codex_cli_rs/0.128.0", want: true},
 		{name: "vscode ua", userAgent: "codex_vscode/1.2.3", want: true},
 		{name: "desktop originator", originator: "codex_chatgpt_desktop", want: true},
 		{name: "non official", userAgent: "curl/8.0", originator: "opencode", want: false},

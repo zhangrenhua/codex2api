@@ -2195,6 +2195,13 @@ type settingsResponse struct {
 	PromptFilterSensitiveWords       string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     string `json:"prompt_filter_disabled_patterns"`
+	ClientCompatMode                 string `json:"client_compat_mode"`
+	CodexMinCLIVersion               string `json:"codex_min_cli_version"`
+	UsageLogMode                     string `json:"usage_log_mode"`
+	UsageLogBatchSize                int    `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds     int    `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                string `json:"stream_flush_policy"`
+	StreamFlushIntervalMS            int    `json:"stream_flush_interval_ms"`
 }
 
 type updateSettingsReq struct {
@@ -2231,6 +2238,13 @@ type updateSettingsReq struct {
 	PromptFilterSensitiveWords       *string `json:"prompt_filter_sensitive_words"`
 	PromptFilterCustomPatterns       *string `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns     *string `json:"prompt_filter_disabled_patterns"`
+	ClientCompatMode                 *string `json:"client_compat_mode"`
+	CodexMinCLIVersion               *string `json:"codex_min_cli_version"`
+	UsageLogMode                     *string `json:"usage_log_mode"`
+	UsageLogBatchSize                *int    `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds     *int    `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                *string `json:"stream_flush_policy"`
+	StreamFlushIntervalMS            *int    `json:"stream_flush_interval_ms"`
 }
 
 // GetSettings 获取当前系统设置
@@ -2249,6 +2263,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		resinPlatformName = dbSettings.ResinPlatformName
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
+	runtimeCfg := proxy.CurrentRuntimeSettings()
 	c.JSON(http.StatusOK, settingsResponse{
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
@@ -2288,6 +2303,13 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
+		UsageLogMode:                     h.db.GetUsageLogMode(),
+		UsageLogBatchSize:                h.db.GetUsageLogBatchSize(),
+		UsageLogFlushIntervalSeconds:     h.db.GetUsageLogFlushIntervalSeconds(),
+		StreamFlushPolicy:                runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 	})
 }
 
@@ -2312,6 +2334,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 	}
 	hasAdminSecret := strings.TrimSpace(currentAdminSecret) != "" || strings.TrimSpace(h.adminSecretEnv) != ""
+	runtimeCfg := proxy.CurrentRuntimeSettings()
+	usageLogMode := h.db.GetUsageLogMode()
+	usageLogBatchSize := h.db.GetUsageLogBatchSize()
+	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
 
 	if req.MaxConcurrency != nil {
 		v := *req.MaxConcurrency
@@ -2501,6 +2527,47 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: model_mapping")
 	}
 
+	if req.ClientCompatMode != nil {
+		runtimeCfg.ClientCompatMode = proxy.NormalizeClientCompatMode(*req.ClientCompatMode)
+		log.Printf("设置已更新: client_compat_mode = %s", runtimeCfg.ClientCompatMode)
+	}
+	if req.CodexMinCLIVersion != nil {
+		runtimeCfg.CodexMinCLIVersion = strings.TrimSpace(*req.CodexMinCLIVersion)
+		log.Printf("设置已更新: codex_min_cli_version = %s", runtimeCfg.CodexMinCLIVersion)
+	}
+	if req.StreamFlushPolicy != nil {
+		runtimeCfg.StreamFlushPolicy = proxy.NormalizeStreamFlushPolicy(*req.StreamFlushPolicy)
+		log.Printf("设置已更新: stream_flush_policy = %s", runtimeCfg.StreamFlushPolicy)
+	}
+	if req.StreamFlushIntervalMS != nil {
+		runtimeCfg.StreamFlushIntervalMS = *req.StreamFlushIntervalMS
+		log.Printf("设置已更新: stream_flush_interval_ms = %d", runtimeCfg.StreamFlushIntervalMS)
+	}
+	runtimeCfg = proxy.ApplyRuntimeSettings(runtimeCfg)
+
+	usageLogChanged := false
+	if req.UsageLogMode != nil {
+		usageLogMode = database.NormalizeUsageLogMode(*req.UsageLogMode)
+		usageLogChanged = true
+		log.Printf("设置已更新: usage_log_mode = %s", usageLogMode)
+	}
+	if req.UsageLogBatchSize != nil {
+		usageLogBatchSize = database.NormalizeUsageLogBatchSize(*req.UsageLogBatchSize)
+		usageLogChanged = true
+		log.Printf("设置已更新: usage_log_batch_size = %d", usageLogBatchSize)
+	}
+	if req.UsageLogFlushIntervalSeconds != nil {
+		usageLogFlushIntervalSeconds = database.NormalizeUsageLogFlushIntervalSeconds(*req.UsageLogFlushIntervalSeconds)
+		usageLogChanged = true
+		log.Printf("设置已更新: usage_log_flush_interval_seconds = %d", usageLogFlushIntervalSeconds)
+	}
+	if usageLogChanged {
+		h.db.SetUsageLogConfig(usageLogMode, usageLogBatchSize, usageLogFlushIntervalSeconds)
+		usageLogMode = h.db.GetUsageLogMode()
+		usageLogBatchSize = h.db.GetUsageLogBatchSize()
+		usageLogFlushIntervalSeconds = h.db.GetUsageLogFlushIntervalSeconds()
+	}
+
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	promptFilterChanged := false
 	if req.PromptFilterEnabled != nil {
@@ -2623,6 +2690,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
+		UsageLogMode:                     usageLogMode,
+		UsageLogBatchSize:                usageLogBatchSize,
+		UsageLogFlushIntervalSeconds:     usageLogFlushIntervalSeconds,
+		StreamFlushPolicy:                runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -2681,6 +2755,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterSensitiveWords:       promptFilterCfg.SensitiveWords,
 		PromptFilterCustomPatterns:       promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:     promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		ClientCompatMode:                 runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:               runtimeCfg.CodexMinCLIVersion,
+		UsageLogMode:                     usageLogMode,
+		UsageLogBatchSize:                usageLogBatchSize,
+		UsageLogFlushIntervalSeconds:     usageLogFlushIntervalSeconds,
+		StreamFlushPolicy:                runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 	})
 }
 
