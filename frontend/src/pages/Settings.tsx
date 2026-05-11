@@ -369,8 +369,6 @@ export default function Settings() {
     site_logo: '',
     max_concurrency: 2,
     global_rpm: 0,
-    account_rpm: 0,
-    model_rpm: 0,
     test_model: '',
     test_concurrency: 50,
     background_refresh_interval_minutes: 2,
@@ -645,22 +643,6 @@ export default function Settings() {
                     min={0}
                     value={settingsForm.global_rpm}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, global_rpm: parseInt(e.target.value) || 0 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.accountRpm')} description={t('settings.accountRpmRange')}>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settingsForm.account_rpm}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, account_rpm: parseInt(e.target.value) || 0 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.modelRpm')} description={t('settings.modelRpmRange')}>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settingsForm.model_rpm}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, model_rpm: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')}>

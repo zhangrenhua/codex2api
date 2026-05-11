@@ -7,8 +7,12 @@ services:
     ports:
       - "${BIND_HOST:-0.0.0.0}:${CODEX_PORT:-8080}:${CODEX_PORT:-8080}"
     env_file:
-      - .env.sqlite.example
+      - .env
     volumes:
-      - ./sqlite-data-local:/data
+      - sqlite-data-local:/data
       - ./logs:/app/logs
     restart: unless-stopped
+
+volumes:
+  sqlite-data-local:
+    name: codex2api-sqlite-local_sqlite-data-local

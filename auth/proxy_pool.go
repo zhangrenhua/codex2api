@@ -336,7 +336,6 @@ func (p *ProxyPool) selectLeastConnections() *ProxyEntry {
 func (p *ProxyPool) MarkSuccess(url string) {
 	p.mu.RLock()
 	entry, exists := p.findEntry(url)
-	stats := p.stats[url]
 	p.mu.RUnlock()
 
 	if !exists || entry == nil {
@@ -363,8 +362,8 @@ func (p *ProxyPool) MarkSuccess(url string) {
 		}
 	}
 
-	// 更新 stats（指针在 RLock 期间获取，指向稳定对象）
-	if stats != nil {
+	// 在锁内更新 stats
+	if stats, ok := p.stats[url]; ok {
 		stats.TotalRequests = atomic.LoadInt64(&entry.TotalRequests)
 		stats.FailedRequests = atomic.LoadInt64(&entry.FailedRequests)
 		stats.SuccessRate = entry.SuccessRate
@@ -381,7 +380,6 @@ func (p *ProxyPool) MarkSuccess(url string) {
 func (p *ProxyPool) MarkFailure(url string) {
 	p.mu.RLock()
 	entry, exists := p.findEntry(url)
-	stats := p.stats[url]
 	p.mu.RUnlock()
 
 	if !exists || entry == nil {
@@ -410,8 +408,8 @@ func (p *ProxyPool) MarkFailure(url string) {
 		}
 	}
 
-	// 更新 stats（指针在 RLock 期间获取，指向稳定对象）
-	if stats != nil {
+	// 在锁内更新 stats
+	if stats, ok := p.stats[url]; ok {
 		stats.TotalRequests = atomic.LoadInt64(&entry.TotalRequests)
 		stats.FailedRequests = atomic.LoadInt64(&entry.FailedRequests)
 		stats.SuccessRate = entry.SuccessRate
@@ -584,10 +582,9 @@ func (p *ProxyPool) checkProxy(ctx context.Context, entry *ProxyEntry) *HealthCh
 
 // processHealthCheckResult 处理健康检查结果
 func (p *ProxyPool) processHealthCheckResult(result *HealthCheckResult) {
-	p.mu.RLock()
+	p.mu.Lock()
 	entry, exists := p.findEntry(result.URL)
-	stats := p.stats[result.URL]
-	p.mu.RUnlock()
+	p.mu.Unlock()
 
 	if !exists || entry == nil {
 		return
@@ -613,24 +610,22 @@ func (p *ProxyPool) processHealthCheckResult(result *HealthCheckResult) {
 		}
 	} else {
 		entry.Healthy = false
-		prevStatus := entry.Status
+		entry.Status = ProxyStatusUnhealthy
 		entry.ConsecutiveFailures++
 
-		// 检查是否需要隔离（仅当之前未被隔离时）
-		if prevStatus != ProxyStatusIsolated && entry.ConsecutiveFailures >= p.isolationThreshold {
+		// 检查是否需要隔离
+		if entry.Status != ProxyStatusIsolated && entry.ConsecutiveFailures >= p.isolationThreshold {
 			entry.Status = ProxyStatusIsolated
 			entry.IsolatedAt = time.Now()
 			if p.onIsolation != nil {
 				p.onIsolation(entry)
 			}
-		} else if prevStatus != ProxyStatusIsolated {
-			entry.Status = ProxyStatusUnhealthy
 		}
-		// 已隔离的代理保持隔离状态，不重置 IsolatedAt
 	}
+	entry.mu.Unlock()
 
-	// 更新统计（指针在 RLock 期间获取，指向稳定对象）
-	if stats != nil {
+	// 更新统计
+	if stats, ok := p.stats[result.URL]; ok {
 		stats.LastCheck = result.Timestamp
 		stats.Latency = result.Latency
 		stats.LatencyMs = float64(result.Latency.Milliseconds())
@@ -638,8 +633,6 @@ func (p *ProxyPool) processHealthCheckResult(result *HealthCheckResult) {
 		stats.Status = p.statusString(entry.Status)
 		stats.ConsecutiveFailures = entry.ConsecutiveFailures
 	}
-
-	entry.mu.Unlock()
 
 	p.rebuildHealthyListIfNeeded()
 
@@ -709,7 +702,6 @@ func (p *ProxyPool) GetStats() map[string]*ProxyStats {
 		// 复制统计信息
 		entry, _ := p.findEntry(url)
 		if entry != nil {
-			entry.mu.RLock()
 			result[url] = &ProxyStats{
 				URL:                 stats.URL,
 				Healthy:             entry.Healthy,
@@ -724,7 +716,6 @@ func (p *ProxyPool) GetStats() map[string]*ProxyStats {
 				Status:              p.statusString(entry.Status),
 				ConsecutiveFailures: entry.ConsecutiveFailures,
 			}
-			entry.mu.RUnlock()
 		} else {
 			result[url] = stats
 		}
@@ -743,10 +734,7 @@ func (p *ProxyPool) GetPoolStatus() *ProxyPoolStatus {
 	unhealthy := 0
 
 	for _, entry := range p.proxies {
-		entry.mu.RLock()
-		status := entry.Status
-		entry.mu.RUnlock()
-		switch status {
+		switch entry.Status {
 		case ProxyStatusIsolated:
 			isolated++
 		case ProxyStatusUnhealthy:

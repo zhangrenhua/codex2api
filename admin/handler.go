@@ -73,6 +73,77 @@ type chartCacheEntry struct {
 	expiresAt time.Time
 }
 
+const (
+	adminUsageStatsCacheNamespace = "admin:usage-stats"
+	adminChartCacheNamespace      = "admin:chart-data"
+	adminAPIKeyCacheNamespace     = "api-key"
+	adminAPIKeyCountNamespace     = "api-key-count"
+	adminUsageStatsCacheTTL       = 5 * time.Second
+	adminChartCacheTTL            = 10 * time.Second
+)
+
+func (h *Handler) getRuntimeJSON(ctx context.Context, namespace, key string, dest interface{}) bool {
+	if h == nil || h.cache == nil || dest == nil {
+		return false
+	}
+	raw, ok, err := h.cache.GetRuntime(ctx, namespace, key)
+	if err != nil {
+		log.Printf("读取运行态缓存失败: namespace=%s err=%v", namespace, err)
+		return false
+	}
+	if !ok || len(raw) == 0 {
+		return false
+	}
+	if err := json.Unmarshal(raw, dest); err != nil {
+		log.Printf("解析运行态缓存失败: namespace=%s err=%v", namespace, err)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) setRuntimeJSON(ctx context.Context, namespace, key string, value interface{}, ttl time.Duration) {
+	if h == nil || h.cache == nil || value == nil {
+		return
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		log.Printf("编码运行态缓存失败: namespace=%s err=%v", namespace, err)
+		return
+	}
+	if err := h.cache.SetRuntime(ctx, namespace, key, payload, ttl); err != nil {
+		log.Printf("写入运行态缓存失败: namespace=%s err=%v", namespace, err)
+	}
+}
+
+func (h *Handler) deleteRuntimeCache(ctx context.Context, namespace, key string) {
+	if h == nil || h.cache == nil {
+		return
+	}
+	if err := h.cache.DeleteRuntime(ctx, namespace, key); err != nil {
+		log.Printf("删除运行态缓存失败: namespace=%s err=%v", namespace, err)
+	}
+}
+
+func (h *Handler) invalidateAPIKeyRuntimeCaches(ctx context.Context, apiKey string) {
+	h.deleteRuntimeCache(ctx, adminAPIKeyCountNamespace, "all")
+	if strings.TrimSpace(apiKey) != "" {
+		h.deleteRuntimeCache(ctx, adminAPIKeyCacheNamespace, apiKey)
+	}
+}
+
+func (h *Handler) getUsageStatsCached(ctx context.Context) (*database.UsageStats, error) {
+	var cached database.UsageStats
+	if h.getRuntimeJSON(ctx, adminUsageStatsCacheNamespace, "global", &cached) {
+		return &cached, nil
+	}
+	stats, err := h.db.GetUsageStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h.setRuntimeJSON(ctx, adminUsageStatsCacheNamespace, "global", stats, adminUsageStatsCacheTTL)
+	return stats, nil
+}
+
 // NewHandler 创建管理后台处理器
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
 	handler := &Handler{
@@ -89,6 +160,9 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		adminSecretEnv: adminSecretEnv,
 		imageProxy:     proxy.NewHandler(store, db, nil, nil),
 		chartCacheData: make(map[string]*chartCacheEntry),
+	}
+	if handler.imageProxy != nil {
+		handler.imageProxy.SetRuntimeCache(tc)
 	}
 	handler.refreshAccount = handler.refreshSingleAccount
 	if db != nil {
@@ -283,7 +357,7 @@ func (h *Handler) GetStats(c *gin.Context) {
 		}
 	}
 
-	usageStats, _ := h.db.GetUsageStats(ctx)
+	usageStats, _ := h.getUsageStatsCached(ctx)
 	todayReqs := int64(0)
 	if usageStats != nil {
 		todayReqs = usageStats.TodayRequests
@@ -376,6 +450,7 @@ type schedulerBreakdownResponse struct {
 	SuccessBonus        float64 `json:"success_bonus"`
 	UsagePenalty7d      float64 `json:"usage_penalty_7d"`
 	UsageUrgencyBonus5h float64 `json:"usage_urgency_bonus_5h"`
+	UsageUrgencyBonus7d float64 `json:"usage_urgency_bonus_7d"`
 	LatencyPenalty      float64 `json:"latency_penalty"`
 	SuccessRatePenalty  float64 `json:"success_rate_penalty"`
 }
@@ -464,6 +539,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 				SuccessBonus:        debug.Breakdown.SuccessBonus,
 				UsagePenalty7d:      debug.Breakdown.UsagePenalty7d,
 				UsageUrgencyBonus5h: debug.Breakdown.UsageUrgencyBonus5h,
+				UsageUrgencyBonus7d: debug.Breakdown.UsageUrgencyBonus7d,
 				LatencyPenalty:      debug.Breakdown.LatencyPenalty,
 				SuccessRatePenalty:  debug.Breakdown.SuccessRatePenalty,
 			}
@@ -1410,30 +1486,40 @@ func fetchOpenAIResponsesModelIDs(ctx context.Context, baseURL, apiKey, proxyURL
 
 // importToken 导入时的统一 token 载体
 type importToken struct {
-	refreshToken string
-	sessionToken string
-	accessToken  string // AT-only 兼容路径
-	name         string
-	email        string
-	idToken      string
-	accountID    string
-	planType     string
-	expiresAt    string
+	refreshToken        string
+	sessionToken        string
+	accessToken         string // AT-only 兼容路径
+	name                string
+	email               string
+	idToken             string
+	accountID           string
+	planType            string
+	expiresAt           string
+	codex7DUsedPercent  string
+	codex7DResetAt      string
+	codex5HUsedPercent  string
+	codex5HResetAt      string
+	codexUsageUpdatedAt string
 }
 
 // jsonAccountEntry CLIProxyAPI 凭证 JSON 条目
 type jsonAccountEntry struct {
-	RefreshToken      string                 `json:"refresh_token"`
-	SessionToken      string                 `json:"session_token"`
-	SessionTokenCamel string                 `json:"sessionToken"`
-	AccessToken       string                 `json:"access_token"`
-	IDToken           string                 `json:"id_token"`
-	AccountID         string                 `json:"account_id"`
-	Email             string                 `json:"email"`
-	Name              string                 `json:"name"`
-	PlanType          string                 `json:"plan_type"`
-	Expired           importJSONScalarString `json:"expired"`
-	ExpiresAt         importJSONScalarString `json:"expires_at"`
+	RefreshToken        string                 `json:"refresh_token"`
+	SessionToken        string                 `json:"session_token"`
+	SessionTokenCamel   string                 `json:"sessionToken"`
+	AccessToken         string                 `json:"access_token"`
+	IDToken             string                 `json:"id_token"`
+	AccountID           string                 `json:"account_id"`
+	Email               string                 `json:"email"`
+	Name                string                 `json:"name"`
+	PlanType            string                 `json:"plan_type"`
+	Codex7DUsedPercent  importJSONScalarString `json:"codex_7d_used_percent"`
+	Codex7DResetAt      string                 `json:"codex_7d_reset_at"`
+	Codex5HUsedPercent  importJSONScalarString `json:"codex_5h_used_percent"`
+	Codex5HResetAt      string                 `json:"codex_5h_reset_at"`
+	CodexUsageUpdatedAt string                 `json:"codex_usage_updated_at"`
+	Expired             importJSONScalarString `json:"expired"`
+	ExpiresAt           importJSONScalarString `json:"expires_at"`
 }
 
 type sub2apiImportPayload struct {
@@ -1446,16 +1532,21 @@ type sub2apiAccountEntry struct {
 }
 
 type sub2apiAccountCredentials struct {
-	RefreshToken      string                 `json:"refresh_token"`
-	SessionToken      string                 `json:"session_token"`
-	SessionTokenCamel string                 `json:"sessionToken"`
-	AccessToken       string                 `json:"access_token"`
-	IDToken           string                 `json:"id_token"`
-	AccountID         string                 `json:"account_id"`
-	Email             string                 `json:"email"`
-	PlanType          string                 `json:"plan_type"`
-	ExpiresAt         importJSONScalarString `json:"expires_at"`
-	Expired           importJSONScalarString `json:"expired"`
+	RefreshToken        string                 `json:"refresh_token"`
+	SessionToken        string                 `json:"session_token"`
+	SessionTokenCamel   string                 `json:"sessionToken"`
+	AccessToken         string                 `json:"access_token"`
+	IDToken             string                 `json:"id_token"`
+	AccountID           string                 `json:"account_id"`
+	Email               string                 `json:"email"`
+	PlanType            string                 `json:"plan_type"`
+	Codex7DUsedPercent  importJSONScalarString `json:"codex_7d_used_percent"`
+	Codex7DResetAt      string                 `json:"codex_7d_reset_at"`
+	Codex5HUsedPercent  importJSONScalarString `json:"codex_5h_used_percent"`
+	Codex5HResetAt      string                 `json:"codex_5h_reset_at"`
+	CodexUsageUpdatedAt string                 `json:"codex_usage_updated_at"`
+	ExpiresAt           importJSONScalarString `json:"expires_at"`
+	Expired             importJSONScalarString `json:"expired"`
 }
 
 type importJSONScalarString string
@@ -1536,15 +1627,20 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 
 		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
-				refreshToken: rt,
-				sessionToken: st,
-				accessToken:  at,
-				name:         name,
-				email:        email,
-				idToken:      strings.TrimSpace(entry.IDToken),
-				accountID:    strings.TrimSpace(entry.AccountID),
-				planType:     strings.TrimSpace(entry.PlanType),
-				expiresAt:    firstNonEmpty(entry.ExpiresAt.String(), entry.Expired.String()),
+				refreshToken:        rt,
+				sessionToken:        st,
+				accessToken:         at,
+				name:                name,
+				email:               email,
+				idToken:             strings.TrimSpace(entry.IDToken),
+				accountID:           strings.TrimSpace(entry.AccountID),
+				planType:            strings.TrimSpace(entry.PlanType),
+				expiresAt:           firstNonEmpty(entry.ExpiresAt.String(), entry.Expired.String()),
+				codex7DUsedPercent:  strings.TrimSpace(entry.Codex7DUsedPercent.String()),
+				codex7DResetAt:      strings.TrimSpace(entry.Codex7DResetAt),
+				codex5HUsedPercent:  strings.TrimSpace(entry.Codex5HUsedPercent.String()),
+				codex5HResetAt:      strings.TrimSpace(entry.Codex5HResetAt),
+				codexUsageUpdatedAt: strings.TrimSpace(entry.CodexUsageUpdatedAt),
 			})
 		}
 	}
@@ -1571,15 +1667,20 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 
 		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
-				refreshToken: rt,
-				sessionToken: st,
-				accessToken:  at,
-				name:         name,
-				email:        email,
-				idToken:      strings.TrimSpace(account.Credentials.IDToken),
-				accountID:    strings.TrimSpace(account.Credentials.AccountID),
-				planType:     strings.TrimSpace(account.Credentials.PlanType),
-				expiresAt:    firstNonEmpty(account.Credentials.ExpiresAt.String(), account.Credentials.Expired.String()),
+				refreshToken:        rt,
+				sessionToken:        st,
+				accessToken:         at,
+				name:                name,
+				email:               email,
+				idToken:             strings.TrimSpace(account.Credentials.IDToken),
+				accountID:           strings.TrimSpace(account.Credentials.AccountID),
+				planType:            strings.TrimSpace(account.Credentials.PlanType),
+				expiresAt:           firstNonEmpty(account.Credentials.ExpiresAt.String(), account.Credentials.Expired.String()),
+				codex7DUsedPercent:  strings.TrimSpace(account.Credentials.Codex7DUsedPercent.String()),
+				codex7DResetAt:      strings.TrimSpace(account.Credentials.Codex7DResetAt),
+				codex5HUsedPercent:  strings.TrimSpace(account.Credentials.Codex5HUsedPercent.String()),
+				codex5HResetAt:      strings.TrimSpace(account.Credentials.Codex5HResetAt),
+				codexUsageUpdatedAt: strings.TrimSpace(account.Credentials.CodexUsageUpdatedAt),
 			})
 		}
 	}
@@ -1924,13 +2025,18 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
 				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-					sessionToken: tok.sessionToken,
-					accessToken:  tok.accessToken,
-					idToken:      tok.idToken,
-					accountID:    tok.accountID,
-					email:        tok.email,
-					planType:     tok.planType,
-					expiresAtRaw: tok.expiresAt,
+					sessionToken:        tok.sessionToken,
+					accessToken:         tok.accessToken,
+					idToken:             tok.idToken,
+					accountID:           tok.accountID,
+					email:               tok.email,
+					planType:            tok.planType,
+					expiresAtRaw:        tok.expiresAt,
+					codex7DUsedPercent:  tok.codex7DUsedPercent,
+					codex7DResetAt:      tok.codex7DResetAt,
+					codex5HUsedPercent:  tok.codex5HUsedPercent,
+					codex5HResetAt:      tok.codex5HResetAt,
+					codexUsageUpdatedAt: tok.codexUsageUpdatedAt,
 				})
 				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
 				if len(tokenCredentialMap(seed)) > 0 {
@@ -1952,13 +2058,18 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					id, err = h.db.InsertAccount(insertCtx, name, tok.refreshToken, proxyURL)
 				} else {
 					seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-						sessionToken: tok.sessionToken,
-						accessToken:  tok.accessToken,
-						idToken:      tok.idToken,
-						accountID:    tok.accountID,
-						email:        tok.email,
-						planType:     tok.planType,
-						expiresAtRaw: tok.expiresAt,
+						sessionToken:        tok.sessionToken,
+						accessToken:         tok.accessToken,
+						idToken:             tok.idToken,
+						accountID:           tok.accountID,
+						email:               tok.email,
+						planType:            tok.planType,
+						expiresAtRaw:        tok.expiresAt,
+						codex7DUsedPercent:  tok.codex7DUsedPercent,
+						codex7DResetAt:      tok.codex7DResetAt,
+						codex5HUsedPercent:  tok.codex5HUsedPercent,
+						codex5HResetAt:      tok.codex5HResetAt,
+						codexUsageUpdatedAt: tok.codexUsageUpdatedAt,
 					})
 					id, err = h.db.InsertAccountWithCredentials(insertCtx, name, tokenCredentialMap(seed), proxyURL)
 				}
@@ -1976,14 +2087,19 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				h.db.InsertAccountEventAsync(id, "added", "import")
 
 				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-					refreshToken: tok.refreshToken,
-					sessionToken: tok.sessionToken,
-					accessToken:  tok.accessToken,
-					idToken:      tok.idToken,
-					accountID:    tok.accountID,
-					email:        tok.email,
-					planType:     tok.planType,
-					expiresAtRaw: tok.expiresAt,
+					refreshToken:        tok.refreshToken,
+					sessionToken:        tok.sessionToken,
+					accessToken:         tok.accessToken,
+					idToken:             tok.idToken,
+					accountID:           tok.accountID,
+					email:               tok.email,
+					planType:            tok.planType,
+					expiresAtRaw:        tok.expiresAt,
+					codex7DUsedPercent:  tok.codex7DUsedPercent,
+					codex7DResetAt:      tok.codex7DResetAt,
+					codex5HUsedPercent:  tok.codex5HUsedPercent,
+					codex5HResetAt:      tok.codex5HResetAt,
+					codexUsageUpdatedAt: tok.codexUsageUpdatedAt,
 				})
 				if len(tokenCredentialMap(seed)) > 0 {
 					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -2269,7 +2385,7 @@ func (h *Handler) GetUsageStats(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	stats, err := h.db.GetUsageStats(ctx)
+	stats, err := h.getUsageStatsCached(ctx)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -2307,17 +2423,31 @@ func (h *Handler) GetChartData(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
+	var cached database.ChartAggregation
+	if h.getRuntimeJSON(ctx, adminChartCacheNamespace, cacheKey, &cached) {
+		result := &cached
+		h.chartCacheMu.Lock()
+		h.chartCacheData[cacheKey] = &chartCacheEntry{
+			data:      result,
+			expiresAt: time.Now().Add(adminChartCacheTTL),
+		}
+		h.chartCacheMu.Unlock()
+		c.JSON(http.StatusOK, result)
+		return
+	}
+
 	result, err := h.db.GetChartAggregation(ctx, startTime, endTime, bucketMinutes)
 	if err != nil {
 		writeInternalError(c, err)
 		return
 	}
+	h.setRuntimeJSON(ctx, adminChartCacheNamespace, cacheKey, result, adminChartCacheTTL)
 
 	// 写入缓存
 	h.chartCacheMu.Lock()
 	h.chartCacheData[cacheKey] = &chartCacheEntry{
 		data:      result,
-		expiresAt: time.Now().Add(10 * time.Second),
+		expiresAt: time.Now().Add(adminChartCacheTTL),
 	}
 	// 清理过期条目（延迟清理，避免内存泄漏）
 	for k, v := range h.chartCacheData {
@@ -2567,6 +2697,10 @@ func (h *Handler) ClearUsageLogs(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	h.deleteRuntimeCache(ctx, adminUsageStatsCacheNamespace, "global")
+	h.chartCacheMu.Lock()
+	h.chartCacheData = make(map[string]*chartCacheEntry)
+	h.chartCacheMu.Unlock()
 	c.JSON(http.StatusOK, gin.H{"message": "日志已清空"})
 }
 
@@ -2649,6 +2783,7 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
 		return
 	}
+	h.invalidateAPIKeyRuntimeCaches(ctx, key)
 
 	// 记录安全审计日志
 	security.SecurityAuditLog("API_KEY_CREATED", fmt.Sprintf("id=%d name=%s ip=%s", id, security.SanitizeLog(req.Name), c.ClientIP()))
@@ -2671,10 +2806,15 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	keyToInvalidate := ""
+	if row, err := h.db.GetAPIKeyByID(ctx, id); err == nil && row != nil {
+		keyToInvalidate = row.Key
+	}
 	if err := h.db.DeleteAPIKey(ctx, id); err != nil {
 		writeError(c, http.StatusInternalServerError, "删除失败: "+err.Error())
 		return
 	}
+	h.invalidateAPIKeyRuntimeCaches(ctx, keyToInvalidate)
 	writeMessage(c, http.StatusOK, "已删除")
 }
 
@@ -2685,8 +2825,6 @@ type settingsResponse struct {
 	SiteLogo                         string `json:"site_logo"`
 	MaxConcurrency                   int    `json:"max_concurrency"`
 	GlobalRPM                        int    `json:"global_rpm"`
-	AccountRPM                       int    `json:"account_rpm"`
-	ModelRPM                         int    `json:"model_rpm"`
 	TestModel                        string `json:"test_model"`
 	TestConcurrency                  int    `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes int    `json:"background_refresh_interval_minutes"`
@@ -2746,8 +2884,6 @@ type updateSettingsReq struct {
 	SiteLogo                         *string `json:"site_logo"`
 	MaxConcurrency                   *int    `json:"max_concurrency"`
 	GlobalRPM                        *int    `json:"global_rpm"`
-	AccountRPM                       *int    `json:"account_rpm"`
-	ModelRPM                         *int    `json:"model_rpm"`
 	TestModel                        *string `json:"test_model"`
 	TestConcurrency                  *int    `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes *int    `json:"background_refresh_interval_minutes"`
@@ -2887,8 +3023,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SiteLogo:                         branding.SiteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
-		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
-		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -3006,24 +3140,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		h.rateLimiter.UpdateRPM(v)
 		log.Printf("设置已更新: global_rpm = %d", v)
-	}
-
-	if req.AccountRPM != nil {
-		v := *req.AccountRPM
-		if v < 0 {
-			v = 0
-		}
-		h.rateLimiter.UpdateAccountRPM(v)
-		log.Printf("设置已更新: account_rpm = %d", v)
-	}
-
-	if req.ModelRPM != nil {
-		v := *req.ModelRPM
-		if v < 0 {
-			v = 0
-		}
-		h.rateLimiter.UpdateModelRPM(v)
-		log.Printf("设置已更新: model_rpm = %d", v)
 	}
 
 	if req.TestModel != nil && *req.TestModel != "" {
@@ -3378,8 +3494,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SiteLogo:                         siteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
-		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
-		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -3442,8 +3556,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SiteLogo:                         siteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
-		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
-		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -3548,14 +3660,20 @@ func (h *Handler) TestImageStorageConnection(c *gin.Context) {
 // ==================== 导出 & 迁移 ====================
 
 type cpaExportEntry struct {
-	Type         string `json:"type"`
-	Email        string `json:"email"`
-	Expired      string `json:"expired"`
-	IDToken      string `json:"id_token"`
-	AccountID    string `json:"account_id"`
-	AccessToken  string `json:"access_token"`
-	LastRefresh  string `json:"last_refresh"`
-	RefreshToken string `json:"refresh_token"`
+	Type                string `json:"type"`
+	Email               string `json:"email"`
+	PlanType            string `json:"plan_type,omitempty"`
+	Codex7DUsedPercent  string `json:"codex_7d_used_percent,omitempty"`
+	Codex7DResetAt      string `json:"codex_7d_reset_at,omitempty"`
+	Codex5HUsedPercent  string `json:"codex_5h_used_percent,omitempty"`
+	Codex5HResetAt      string `json:"codex_5h_reset_at,omitempty"`
+	CodexUsageUpdatedAt string `json:"codex_usage_updated_at,omitempty"`
+	Expired             string `json:"expired"`
+	IDToken             string `json:"id_token"`
+	AccountID           string `json:"account_id"`
+	AccessToken         string `json:"access_token"`
+	LastRefresh         string `json:"last_refresh"`
+	RefreshToken        string `json:"refresh_token"`
 }
 
 type accountAuthJSONTokens struct {
@@ -3696,14 +3814,20 @@ func (h *Handler) ExportAccounts(c *gin.Context) {
 			continue
 		}
 		entries = append(entries, cpaExportEntry{
-			Type:         "codex",
-			Email:        row.GetCredential("email"),
-			Expired:      row.GetCredential("expires_at"),
-			IDToken:      row.GetCredential("id_token"),
-			AccountID:    row.GetCredential("account_id"),
-			AccessToken:  row.GetCredential("access_token"),
-			LastRefresh:  row.UpdatedAt.Format(time.RFC3339),
-			RefreshToken: rt,
+			Type:                "codex",
+			Email:               row.GetCredential("email"),
+			PlanType:            row.GetCredential("plan_type"),
+			Codex7DUsedPercent:  row.GetCredential("codex_7d_used_percent"),
+			Codex7DResetAt:      row.GetCredential("codex_7d_reset_at"),
+			Codex5HUsedPercent:  row.GetCredential("codex_5h_used_percent"),
+			Codex5HResetAt:      row.GetCredential("codex_5h_reset_at"),
+			CodexUsageUpdatedAt: row.GetCredential("codex_usage_updated_at"),
+			Expired:             row.GetCredential("expires_at"),
+			IDToken:             row.GetCredential("id_token"),
+			AccountID:           row.GetCredential("account_id"),
+			AccessToken:         row.GetCredential("access_token"),
+			LastRefresh:         row.UpdatedAt.Format(time.RFC3339),
+			RefreshToken:        rt,
 		})
 	}
 
@@ -3784,13 +3908,19 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 			name = "migrate"
 		}
 		tokens = append(tokens, importToken{
-			refreshToken: rt,
-			accessToken:  strings.TrimSpace(entry.AccessToken),
-			name:         name,
-			email:        strings.TrimSpace(entry.Email),
-			idToken:      strings.TrimSpace(entry.IDToken),
-			accountID:    strings.TrimSpace(entry.AccountID),
-			expiresAt:    strings.TrimSpace(entry.Expired),
+			refreshToken:        rt,
+			accessToken:         strings.TrimSpace(entry.AccessToken),
+			name:                name,
+			email:               strings.TrimSpace(entry.Email),
+			idToken:             strings.TrimSpace(entry.IDToken),
+			accountID:           strings.TrimSpace(entry.AccountID),
+			planType:            strings.TrimSpace(entry.PlanType),
+			expiresAt:           strings.TrimSpace(entry.Expired),
+			codex7DUsedPercent:  strings.TrimSpace(entry.Codex7DUsedPercent),
+			codex7DResetAt:      strings.TrimSpace(entry.Codex7DResetAt),
+			codex5HUsedPercent:  strings.TrimSpace(entry.Codex5HUsedPercent),
+			codex5HResetAt:      strings.TrimSpace(entry.Codex5HResetAt),
+			codexUsageUpdatedAt: strings.TrimSpace(entry.CodexUsageUpdatedAt),
 		})
 	}
 

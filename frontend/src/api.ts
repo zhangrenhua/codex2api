@@ -386,11 +386,6 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/clean-rate-limited', { method: 'POST' }),
   cleanError: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-error', { method: 'POST' }),
-  purgeDeleted: (cascade: boolean = true) =>
-    request<{ message: string; accounts: number; logs: number; events: number; cascade: boolean }>(
-      `/accounts/purge-deleted?cascade=${cascade ? 'true' : 'false'}`,
-      { method: 'POST' },
-    ),
   exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[] }) => {
     const sp = new URLSearchParams({ filter: params.filter })
     if (params.ids && params.ids.length > 0) sp.set('ids', params.ids.join(','))

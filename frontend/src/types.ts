@@ -52,6 +52,7 @@ export interface AccountRow {
     success_bonus: number
     usage_penalty_7d: number
     usage_urgency_bonus_5h?: number
+    usage_urgency_bonus_7d?: number
     latency_penalty: number
     success_rate_penalty?: number
   }
@@ -267,8 +268,6 @@ export interface SystemSettings {
   site_logo: string
   max_concurrency: number
   global_rpm: number
-  account_rpm: number
-  model_rpm: number
   test_model: string
   test_concurrency: number
   background_refresh_interval_minutes: number

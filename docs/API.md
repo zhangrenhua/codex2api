@@ -611,7 +611,7 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file | file | 是 | 上传文件（JSON 格式支持多文件） |
+| file | file | 是 | 上传文件（最大 2MB，JSON 格式支持多文件） |
 | format | string | 否 | 文件格式：`txt`（默认）、`json`、`at_txt` |
 | proxy_url | string | 否 | 代理 URL |
 

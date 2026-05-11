@@ -58,6 +58,9 @@ func TestLoadDefaultsToPostgresAndRedis(t *testing.T) {
 	if got := cfg.MaxRequestBodySize; got != 32*1024*1024 {
 		t.Fatalf("MaxRequestBodySize = %d, want %d", got, 32*1024*1024)
 	}
+	if got := cfg.MaxRequestBodySize; got != 32*1024*1024 {
+		t.Fatalf("MaxRequestBodySize = %d, want %d", got, 32*1024*1024)
+	}
 }
 
 func TestLoadAllowsExplicitSQLiteAndMemory(t *testing.T) {

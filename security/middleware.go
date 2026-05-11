@@ -3,7 +3,6 @@ package security
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -104,7 +103,14 @@ func GenerateSecureToken(length int) (string, error) {
 
 // SecureCompare compares two strings in constant time to prevent timing attacks
 func SecureCompare(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	if len(a) != len(b) {
+		return false
+	}
+	var result byte
+	for i := 0; i < len(a); i++ {
+		result |= a[i] ^ b[i]
+	}
+	return result == 0
 }
 
 // SanitizeLog sanitizes data for logging

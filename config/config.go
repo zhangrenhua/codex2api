@@ -108,7 +108,7 @@ func Load(envPath string) (*Config, error) {
 	_ = godotenv.Load(envPath)
 
 	cfg := &Config{
-		Port:               3000,
+		Port:               8080,
 		MaxRequestBodySize: 32 * 1024 * 1024,
 	}
 
