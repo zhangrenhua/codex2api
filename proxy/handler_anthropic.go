@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,7 +11,6 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -98,48 +95,59 @@ func (h *Handler) Messages(c *gin.Context) {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
+		return
+	}
 
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 
 	// 2. 翻译请求: Anthropic → Codex
 	modelMappingJSON := h.store.GetModelMapping()
-	codexBody, originalModel, err := TranslateAnthropicToCodex(rawBody, modelMappingJSON)
+	codexBody, originalModel, err := TranslateAnthropicToCodexWithModels(rawBody, modelMappingJSON, h.supportedModelIDs(c.Request.Context()))
 	if err != nil {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request translation failed: "+err.Error())
 		return
 	}
+	effectiveModel := effectiveRequestModel(codexBody, model)
+	if isImageOnlyModel(effectiveModel) {
+		sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", fmt.Sprintf("model %s is only supported on /v1/images/generations and /v1/images/edits", effectiveModel))
+		return
+	}
+	accountFilter := accountFilterForModel(effectiveModel)
 
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
+	apiKeyID := requestAPIKeyID(c)
+	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
-	var lastErr error
+	maxRateLimitRetries := h.getMaxRateLimitRetries()
+	generalRetries := 0
+	rateLimitRetries := 0
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
+	for attempt := 0; ; attempt++ {
+		account, stickyProxyURL := h.nextAccountForSessionWithFilter(affinityKey, apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), affinityKey, 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "All accounts rate limited")
 					return
 				}
-				sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "No available accounts, please retry later")
+				sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))
 				return
 			}
 		}
 
 		start := time.Now()
-		proxyURL := stickyProxyURL
-		if proxyURL == "" {
-			proxyURL = h.store.NextProxy()
-		}
-		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
+		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
+		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		useWebsocket := h.shouldUseWebsocketForHTTP()
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
@@ -159,7 +167,8 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 
 		downstreamHeaders := c.Request.Header.Clone()
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, sessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionID)
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
@@ -167,7 +176,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(sessionID, account.ID())
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			if !IsRetryableError(reqErr) && classifyTransportFailure(reqErr) == "" {
@@ -176,8 +185,11 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			log.Printf("上游请求失败 (attempt %d, /v1/messages): %v", attempt+1, reqErr)
-			lastErr = reqErr
-			continue
+			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
+				continue
+			}
+			sendAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed")
+			return
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -190,25 +202,32 @@ func (h *Handler) Messages(c *gin.Context) {
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(sessionID, account.ID())
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			h.logUsageForRequest(c, &database.UsageLogInput{
-				AccountID:        account.ID(),
-				Endpoint:         "/v1/messages",
-				Model:            model,
-				StatusCode:       resp.StatusCode,
-				DurationMs:       durationMs,
-				ReasoningEffort:  reasoningEffort,
-				InboundEndpoint:  "/v1/messages",
-				UpstreamEndpoint: "/v1/responses",
-				Stream:           isStream,
+				AccountID:         account.ID(),
+				Endpoint:          "/v1/messages",
+				Model:             model,
+				EffectiveModel:    effectiveModel,
+				StatusCode:        resp.StatusCode,
+				DurationMs:        durationMs,
+				ReasoningEffort:   reasoningEffort,
+				InboundEndpoint:   "/v1/messages",
+				UpstreamEndpoint:  "/v1/responses",
+				Stream:            isStream,
+				IsRetryAttempt:    shouldRetry,
+				AttemptIndex:      attempt + 1,
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
+				ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
 			})
-			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 
-			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
+			if shouldRetry {
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				continue
@@ -229,7 +248,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()
 		c.Set("x-account-proxy", proxyURL)
-		c.Set("x-model", model)
+		c.Set("x-model", effectiveModel)
 		c.Set("x-reasoning-effort", reasoningEffort)
 
 		var firstTokenMs int
@@ -239,7 +258,6 @@ func (h *Handler) Messages(c *gin.Context) {
 		deltaCharCount := 0
 		var readErr error
 		var writeErr error
-		var failedData []byte // 捕获 response.failed 事件数据，用于流内冷却
 		wroteAnyBody := false
 
 		if isStream {
@@ -258,15 +276,14 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			translator := newAnthropicStreamTranslator(originalModel)
+			streamWriter := newStreamFlushWriter(c.Writer, flusher)
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
 				// TTFT 跟踪
-				if !ttftRecorded && (eventType == "response.output_text.delta" ||
-					eventType == "response.reasoning_summary_text.delta" ||
-					eventType == "response.reasoning_text.delta") {
+				if !ttftRecorded && isFirstTokenEvent(eventType) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
 				}
@@ -282,7 +299,6 @@ func (h *Handler) Messages(c *gin.Context) {
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
-					failedData = append([]byte(nil), data...)
 					gotTerminal = true
 				}
 
@@ -290,18 +306,18 @@ func (h *Handler) Messages(c *gin.Context) {
 				events := translator.translateEvent(data)
 				for _, evt := range events {
 					sse := anthropicEventToSSE(evt)
-					if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+					if err := streamWriter.WriteString(sse); err != nil {
 						writeErr = err
 						return false
 					}
 					wroteAnyBody = true
 				}
-				if len(events) > 0 {
-					flusher.Flush()
-				}
 
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
+			if writeErr == nil {
+				writeErr = streamWriter.Flush()
+			}
 
 			// 流结束后补齐事件
 			if writeErr == nil {
@@ -310,191 +326,51 @@ func (h *Handler) Messages(c *gin.Context) {
 				if !gotTerminal {
 					for _, evt := range finalEvents {
 						sse := anthropicEventToSSE(evt)
-						fmt.Fprint(c.Writer, sse)
+						if err := streamWriter.WriteString(sse); err != nil {
+							writeErr = err
+							break
+						}
 					}
-					flusher.Flush()
+					if writeErr == nil {
+						writeErr = streamWriter.Flush()
+					}
 				}
 			}
 		} else {
-			// 非流式：从 delta 事件累积内容，构建完整 Anthropic 响应
+			// 非流式：缓冲所有事件后构建完整 JSON 响应
 			var lastCompletedData []byte
-			var fullText strings.Builder     // delta 累积
-			var doneText strings.Builder     // .done 权威源
-			var gotDoneText bool
-			var thinkingText strings.Builder // delta 累积
-			var doneThinking strings.Builder // .done 权威源
-			var gotDoneThinking bool
-			var toolCalls []anthropicContentBlock
-			// 用于从 delta 事件收集 function_call 参数
-			pendingToolCalls := make(map[string]*anthropicContentBlock) // item_id → block
-			var toolCallOrder []string
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
-				if !ttftRecorded && strings.Contains(eventType, ".delta") {
+				if !ttftRecorded && isFirstTokenEvent(eventType) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
 				}
-				switch eventType {
-				case "response.output_text.delta":
-					delta := parsed.Get("delta").String()
-					deltaCharCount += len(delta)
-					fullText.WriteString(delta)
-				case "response.output_text.done":
-					// 权威文本源：追加（支持多 content part）
-					gotDoneText = true
-					doneText.WriteString(parsed.Get("text").String())
-				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-					thinkingText.WriteString(parsed.Get("delta").String())
-				case "response.reasoning_summary_text.done", "response.reasoning_text.done":
-					gotDoneThinking = true
-					doneThinking.WriteString(parsed.Get("text").String())
-				case "response.output_item.added":
-					if parsed.Get("item.type").String() == "function_call" {
-						itemID := parsed.Get("item.id").String()
-						callID := fromCodexCallID(parsed.Get("item.call_id").String())
-						name := parsed.Get("item.name").String()
-						block := &anthropicContentBlock{
-							Type:  "tool_use",
-							ID:    callID,
-							Name:  name,
-							Input: json.RawMessage("{}"),
-						}
-						pendingToolCalls[itemID] = block
-						toolCallOrder = append(toolCallOrder, itemID)
-					}
-				case "response.function_call_arguments.delta":
+				if eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
 					deltaCharCount += len(parsed.Get("delta").String())
-					itemID := parsed.Get("item_id").String()
-					if block, ok := pendingToolCalls[itemID]; ok {
-						// 累积 arguments JSON
-						existing := string(block.Input)
-						if existing == "{}" {
-							existing = ""
-						}
-						block.Input = json.RawMessage(existing + parsed.Get("delta").String())
-					}
-				case "response.function_call_arguments.done":
-					// 权威参数源：用 .done 事件覆盖 delta 累积
-					itemID := parsed.Get("item_id").String()
-					if block, ok := pendingToolCalls[itemID]; ok {
-						args := parsed.Get("arguments").String()
-						if args != "" {
-							block.Input = json.RawMessage(args)
-						}
-					}
-				case "response.completed":
+				}
+				if eventType == "response.completed" {
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
 					lastCompletedData = data
 					gotTerminal = true
 					return false
-				case "response.failed":
-					failedData = append([]byte(nil), data...)
+				}
+				if eventType == "response.failed" {
 					gotTerminal = true
 					return false
 				}
 				return true
 			})
 
-			// 优先使用 .done 权威源
-			if gotDoneText {
-				fullText.Reset()
-				fullText.WriteString(doneText.String())
-			}
-			if gotDoneThinking {
-				thinkingText.Reset()
-				thinkingText.WriteString(doneThinking.String())
-			}
-
-			// 调试日志：非流式 delta 收集结果
-			if fullText.Len() == 0 && len(pendingToolCalls) == 0 && thinkingText.Len() == 0 {
-				log.Printf("[/v1/messages 非流式] 未收集到任何 delta 内容 (gotTerminal=%v, deltaCharCount=%d)", gotTerminal, deltaCharCount)
-			}
-
-			// 构建 tool calls 列表
-			for _, itemID := range toolCallOrder {
-				block := pendingToolCalls[itemID]
-				if len(block.Input) == 0 {
-					block.Input = json.RawMessage("{}")
-				}
-				toolCalls = append(toolCalls, *block)
-			}
-
-			// 构建 Anthropic 响应
-			var anthropicResult *anthropicResponse
-
-			if fullText.Len() == 0 && thinkingText.Len() == 0 && len(toolCalls) == 0 && lastCompletedData != nil {
-				// delta 未累积到任何内容，回退到从 response.completed 提取完整 output
-				log.Printf("[/v1/messages 非流式] delta 为空，回退到 response.completed 提取 output")
-				anthropicResult = buildAnthropicResponseFromCompleted(lastCompletedData, originalModel)
+			if lastCompletedData != nil {
+				anthropicResp := buildAnthropicResponseFromCompleted(lastCompletedData, originalModel)
+				c.JSON(http.StatusOK, anthropicResp)
 			} else {
-				var content []anthropicContentBlock
-				if thinkingText.Len() > 0 {
-					content = append(content, anthropicContentBlock{
-						Type:     "thinking",
-						Thinking: thinkingText.String(),
-					})
-				}
-				if fullText.Len() > 0 {
-					content = append(content, anthropicContentBlock{
-						Type: "text",
-						Text: fullText.String(),
-					})
-				}
-				content = append(content, toolCalls...)
-
-				// 确定 stop_reason
-				stopReason := "end_turn"
-				if len(toolCalls) > 0 {
-					stopReason = "tool_use"
-				}
-				if lastCompletedData != nil {
-					status := gjson.GetBytes(lastCompletedData, "response.status").String()
-					if status == "incomplete" {
-						reason := gjson.GetBytes(lastCompletedData, "response.incomplete_details.reason").String()
-						if reason == "max_output_tokens" {
-							stopReason = "max_tokens"
-						}
-					}
-				}
-
-				// 提取 usage
-				var anthropicUsg anthropicUsage
-				if lastCompletedData != nil {
-					usg := gjson.GetBytes(lastCompletedData, "response.usage")
-					if usg.Exists() {
-						anthropicUsg = anthropicUsage{
-							InputTokens:          int(usg.Get("input_tokens").Int()),
-							OutputTokens:         int(usg.Get("output_tokens").Int()),
-							CacheReadInputTokens: int(usg.Get("input_tokens_details.cached_tokens").Int()),
-						}
-					}
-				}
-
-				if content == nil {
-					content = []anthropicContentBlock{}
-				}
-
-				convID := uuid.New().String()
-				anthropicResult = &anthropicResponse{
-					ID:             "msg_" + convID[:24],
-					Type:           "message",
-					Role:           "assistant",
-					Model:          originalModel,
-					Content:        content,
-					StopReason:     stopReason,
-					Usage:          anthropicUsg,
-					ConversationID: convID,
-					ConvID:         convID,
-				}
+				sendAnthropicError(c, http.StatusBadGateway, "api_error", "No complete response received from upstream")
 			}
-			c.JSON(http.StatusOK, anthropicResult)
 		}
-
-		// 流内 response.failed 冷却（如 429/401）
-		h.applyStreamFailedCooldown(account, failedData, resp)
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
@@ -502,24 +378,18 @@ func (h *Handler) Messages(c *gin.Context) {
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重试 (attempt %d/%d, account %d, /v1/messages): %s",
 				attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
-			recyclePooledClientForAccount(account)
+			recyclePooledClient(account, proxyURL)
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
 			}
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
-			lastErr = readErr
-			if lastErr == nil {
-				lastErr = errors.New(outcome.failureMessage)
-			}
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			continue
 		}
 
-		streamFailed := len(failedData) > 0
-		if !streamFailed {
-			h.store.BindSessionAffinity(sessionID, account, proxyURL)
-		}
+		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
@@ -542,6 +412,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			AccountID:        account.ID(),
 			Endpoint:         "/v1/messages",
 			Model:            model,
+			EffectiveModel:   effectiveModel,
 			StatusCode:       logStatusCode,
 			DurationMs:       totalDuration,
 			FirstTokenMs:     firstTokenMs,
@@ -549,6 +420,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			InboundEndpoint:  "/v1/messages",
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           isStream,
+		}
+		if logStatusCode != http.StatusOK {
+			logInput.ErrorMessage = usageLogErrorMessage(logStatusCode, []byte(outcome.failureMessage))
 		}
 		if usage != nil {
 			logInput.PromptTokens = usage.PromptTokens
@@ -565,37 +439,15 @@ func (h *Handler) Messages(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
-		if streamFailed {
-			recyclePooledClientForAccount(account)
-			h.store.ReportRequestFailure(account, "stream_failed", time.Duration(totalDuration)*time.Millisecond)
-		} else if outcome.penalize {
-			recyclePooledClientForAccount(account)
+		if outcome.penalize {
+			recyclePooledClient(account, proxyURL)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
+			h.store.ClearModelCooldown(account, effectiveModel)
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
 		return
 	}
-
-	// 所有重试都失败
-	if lastErr != nil {
-		sendAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed: "+lastErr.Error())
-	} else if lastStatusCode != 0 {
-		errType := mapHTTPStatusToAnthropicError(lastStatusCode)
-		sendAnthropicError(c, lastStatusCode, errType, fmt.Sprintf("Upstream returned status %d", lastStatusCode))
-	}
-}
-
-// buildRawJSONArray 将多个原始 JSON 片段拼接为 JSON 数组
-func buildRawJSONArray(items [][]byte) []byte {
-	buf := []byte("[")
-	for i, item := range items {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-		buf = append(buf, item...)
-	}
-	buf = append(buf, ']')
-	return buf
 }

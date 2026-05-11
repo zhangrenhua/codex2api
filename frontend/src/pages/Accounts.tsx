@@ -1,4 +1,4 @@
-import type { ChangeEvent, DragEvent } from 'react'
+import type { ChangeEvent, DragEvent, ReactNode } from 'react'
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { api, getAdminKey } from '../api'
 import Modal from '../components/Modal'
@@ -10,12 +10,14 @@ import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
-import type { AccountRow, AddAccountRequest, AddATAccountRequest } from '../types'
+import type { AccountRow, AddAccountRequest, AddATAccountRequest, AddOpenAIResponsesAccountRequest, UpdateOpenAIResponsesAccountRequest, APIKeyRow } from '../types'
 import { getErrorMessage } from '../utils/error'
+import { formatCompactEmail } from '../lib/utils'
 import { formatRelativeTime, formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -24,9 +26,69 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, FolderOpen, Lock, Unlock, RotateCcw, Pencil } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, FolderOpen, Lock, Unlock, RotateCcw, Pencil, Check, ChevronDown, Copy, Power, PowerOff, Hourglass, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
+
+const ACCOUNT_BATCH_CONCURRENCY = 6
+const ACCOUNT_REFRESH_BATCH_CONCURRENCY = 4
+
+function parseModelTokens(value: string): string[] {
+  const seen = new Set<string>()
+  return value
+    .split(/[\n,\t ]+/)
+    .map(item => item.trim())
+    .filter(item => {
+      if (!item) return false
+      const key = item.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function mergeModelLists(current: string[], incoming: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const item of [...current, ...incoming]) {
+    const value = item.trim()
+    if (!value) continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(value)
+  }
+  return result
+}
+
+function formatAccountName(account: AccountRow): string {
+  if (account.openai_responses_api) {
+    return account.name?.trim() || `ID ${account.id}`
+  }
+  return account.email || account.name || `ID ${account.id}`
+}
+
+async function runAccountBatch(ids: number[], action: (id: number) => Promise<unknown>, concurrency = ACCOUNT_BATCH_CONCURRENCY) {
+  let success = 0
+  let fail = 0
+  let cursor = 0
+  const workerCount = Math.min(concurrency, ids.length)
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (cursor < ids.length) {
+      const id = ids[cursor]
+      cursor += 1
+      try {
+        await action(id)
+        success += 1
+      } catch {
+        fail += 1
+      }
+    }
+  }))
+
+  return { success, fail }
+}
 
 export default function Accounts() {
   const { t } = useTranslation()
@@ -34,9 +96,9 @@ export default function Accounts() {
   const [showAdd, setShowAdd] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'locked'>('all')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'error' | 'disabled' | 'locked'>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'plus' | 'team' | 'free'>('all')
+  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'prolite' | 'plus' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [addForm, setAddForm] = useState<AddAccountRequest>({
@@ -46,20 +108,35 @@ export default function Accounts() {
   const [submitting, setSubmitting] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [refreshingIds, setRefreshingIds] = useState<Set<number>>(new Set())
+  const [authJsonExportingIds, setAuthJsonExportingIds] = useState<Set<number>>(new Set())
+  const [authJsonModal, setAuthJsonModal] = useState<{ account: AccountRow; json: string } | null>(null)
   const [batchLoading, setBatchLoading] = useState(false)
+  const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchTesting, setBatchTesting] = useState(false)
+  const [lockingSubscriptionAccounts, setLockingSubscriptionAccounts] = useState(false)
   const [cleaningBanned, setCleaningBanned] = useState(false)
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [cleaningError, setCleaningError] = useState(false)
-  const [purging, setPurging] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null)
   const [editSubmitting, setEditSubmitting] = useState(false)
+  const [editTab, setEditTab] = useState<'scheduler' | 'account'>('scheduler')
   const [scoreMode, setScoreMode] = useState<'default' | 'custom'>('default')
   const [scoreInput, setScoreInput] = useState('')
   const [concurrencyMode, setConcurrencyMode] = useState<'default' | 'custom'>('default')
   const [concurrencyInput, setConcurrencyInput] = useState('')
+  const [allowedAPIKeySelection, setAllowedAPIKeySelection] = useState<number[]>([])
+  const [editOpenAIForm, setEditOpenAIForm] = useState<UpdateOpenAIResponsesAccountRequest>({
+    name: '',
+    base_url: 'https://api.openai.com',
+    api_key: '',
+    models: [],
+    proxy_url: '',
+  })
+  const [openAIModelDraft, setOpenAIModelDraft] = useState('')
+  const [editOpenAIModelDraft, setEditOpenAIModelDraft] = useState('')
+  const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [showImportPicker, setShowImportPicker] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -71,11 +148,18 @@ export default function Accounts() {
   const [migrateKey, setMigrateKey] = useState('')
   const [migrating, setMigrating] = useState(false)
   const [importProgress, setImportProgress] = useState<{ show: boolean; current: number; total: number; success: number; duplicate: number; failed: number; done: boolean }>({ show: false, current: 0, total: 0, success: 0, duplicate: 0, failed: 0, done: false })
-  const [addMethod, setAddMethod] = useState<'rt' | 'at' | 'oauth'>('rt')
+  const [addMethod, setAddMethod] = useState<'rt' | 'at' | 'openai' | 'oauth'>('rt')
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
     access_token: '',
     proxy_url: '',
   })
+  const [openAIForm, setOpenAIForm] = useState<AddOpenAIResponsesAccountRequest>({
+    base_url: 'https://api.openai.com',
+    api_key: '',
+    models: [],
+    proxy_url: '',
+  })
+  const [openAIModelsLoading, setOpenAIModelsLoading] = useState(false)
   const [oauthStep, setOauthStep] = useState<'generate' | 'exchange'>('generate')
   const [oauthSession, setOauthSession] = useState<{ session_id: string; auth_url: string } | null>(null)
   const [oauthProxyUrl, setOauthProxyUrl] = useState('')
@@ -87,93 +171,170 @@ export default function Accounts() {
   const jsonInputRef = useRef<HTMLInputElement>(null)
   const atFileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
+  const selectAllRef = useRef<HTMLInputElement>(null)
   const { toast, showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadAccounts = useCallback(async () => {
-    const data = await api.getAccounts()
-    return data.accounts ?? []
+    const [accountsResponse, apiKeysResponse] = await Promise.all([api.getAccounts(), api.getAPIKeys()])
+    return {
+      accounts: accountsResponse.accounts ?? [],
+      apiKeys: apiKeysResponse.keys ?? [],
+    }
   }, [])
 
-  const { data: accounts, loading, error, reload, reloadSilently } = useDataLoader<AccountRow[]>({
-    initialData: [],
+  const { data, loading, error, reload, reloadSilently } = useDataLoader<{ accounts: AccountRow[]; apiKeys: APIKeyRow[] }>({
+    initialData: {
+      accounts: [],
+      apiKeys: [],
+    },
     load: loadAccounts,
   })
-  const usageBootstrapReloadedRef = useRef(false)
+  const accounts = data.accounts
+  const apiKeys = data.apiKeys
+  const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map())
 
   useEffect(() => {
-    const hasMissingUsage = accounts.some(
-      (account) => account.plan_type?.toLowerCase() === 'free' && (account.usage_percent_7d === null || account.usage_percent_7d === undefined)
-    )
-    if (!hasMissingUsage || usageBootstrapReloadedRef.current) {
+    const needsUsageReload = (account: AccountRow) => {
+      if (account.status !== 'active' && account.status !== 'ready') {
+        return false
+      }
+
+      const plan = normalizePlanType(account.plan_type)
+      const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
+      const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+
+      if (plan === 'free') {
+        return !has7d
+      }
+      if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
+        return !has5h || !has7d
+      }
+      return !has7d
+    }
+
+    const missingUsageIds = accounts.filter(needsUsageReload).map((account) => account.id)
+    const missingUsageIdSet = new Set(missingUsageIds)
+    for (const id of Array.from(usageReloadAttemptsRef.current.keys())) {
+      if (!missingUsageIdSet.has(id)) {
+        usageReloadAttemptsRef.current.delete(id)
+      }
+    }
+
+    const retryIds = missingUsageIds.filter((id) => (usageReloadAttemptsRef.current.get(id) ?? 0) < 6)
+    if (retryIds.length === 0) {
       return
     }
 
-    usageBootstrapReloadedRef.current = true
+    for (const id of retryIds) {
+      usageReloadAttemptsRef.current.set(id, (usageReloadAttemptsRef.current.get(id) ?? 0) + 1)
+    }
+
     const timer = window.setTimeout(() => {
       void reloadSilently()
-    }, 4000)
+    }, 2500)
 
     return () => window.clearTimeout(timer)
   }, [accounts, reloadSilently])
 
-  const totalAccounts = accounts.length
-  const normalAccounts = accounts.filter((account) => account.status === 'active' || account.status === 'ready').length
-  const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited' || account.status === 'usage_exhausted').length
-  const bannedAccounts = accounts.filter((account) => account.status === 'unauthorized').length
-  const lockedAccounts = accounts.filter((account) => account.locked).length
-  const healthyAccounts = accounts.filter((account) => account.health_tier === 'healthy').length
-  const warmAccounts = accounts.filter((account) => account.health_tier === 'warm').length
-  const riskyAccounts = accounts.filter((account) => account.health_tier === 'risky').length
+  const accountSummary = useMemo(() => {
+    const rateLimitedWindowStats = getRateLimitedWindowStats(accounts)
+    return {
+      totalAccounts: accounts.length,
+      normalAccounts: accounts.filter((account) => account.status === 'active' || account.status === 'ready').length,
+      rateLimitedAccounts: rateLimitedWindowStats.total,
+      rateLimited5hAccounts: rateLimitedWindowStats.fiveHour,
+      rateLimited7dAccounts: rateLimitedWindowStats.sevenDay,
+      bannedAccounts: accounts.filter((account) => account.status === 'unauthorized').length,
+      errorAccounts: accounts.filter((account) => account.status === 'error').length,
+      disabledAccounts: accounts.filter((account) => account.enabled === false).length,
+      lockedAccounts: accounts.filter((account) => account.locked).length,
+      subscriptionAccountsToLock: accounts.filter((account) => isSubscriptionPlan(account.plan_type) && !account.locked),
+      healthyAccounts: accounts.filter((account) => account.health_tier === 'healthy').length,
+      warmAccounts: accounts.filter((account) => account.health_tier === 'warm').length,
+      riskyAccounts: accounts.filter((account) => account.health_tier === 'risky').length,
+    }
+  }, [accounts])
+  const {
+    totalAccounts,
+    normalAccounts,
+    rateLimitedAccounts,
+    rateLimited5hAccounts,
+    rateLimited7dAccounts,
+    bannedAccounts,
+    errorAccounts,
+    disabledAccounts,
+    lockedAccounts,
+    subscriptionAccountsToLock,
+    healthyAccounts,
+    warmAccounts,
+    riskyAccounts,
+  } = accountSummary
 
-  const filteredAccounts = accounts.filter((account) => {
-    // 状态过滤
-    switch (statusFilter) {
-      case 'normal':
-        if (account.status !== 'active' && account.status !== 'ready') return false
-        break
-      case 'rate_limited':
-        if (account.status !== 'rate_limited' && account.status !== 'usage_exhausted') return false
-        break
-      case 'banned':
-        if (account.status !== 'unauthorized') return false
-        break
-      case 'locked':
-        if (!account.locked) return false
-        break
-    }
-    // 套餐过滤
-    if (planFilter !== 'all') {
-      const plan = (account.plan_type || '').toLowerCase()
-      if (plan !== planFilter) return false
-    }
-    // 搜索过滤
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase()
-      const email = (account.email || '').toLowerCase()
-      const name = (account.name || '').toLowerCase()
-      if (!email.includes(q) && !name.includes(q)) return false
-    }
-    return true
-  })
+  const filteredAccounts = useMemo(() => {
+    const query = searchQuery.toLowerCase()
+    return accounts.filter((account) => {
+      switch (statusFilter) {
+        case 'normal':
+          if (account.status !== 'active' && account.status !== 'ready') return false
+          break
+        case 'rate_limited':
+          if (!isRateLimitedAccount(account)) return false
+          break
+        case 'banned':
+          if (account.status !== 'unauthorized') return false
+          break
+        case 'error':
+          if (account.status !== 'error') return false
+          break
+        case 'disabled':
+          if (account.enabled !== false) return false
+          break
+        case 'locked':
+          if (!account.locked) return false
+          break
+      }
+      if (planFilter !== 'all') {
+        const plan = (account.plan_type || '').toLowerCase().trim()
+        if (plan !== planFilter) return false
+      }
+      if (query) {
+        const email = (account.email || '').toLowerCase()
+        const name = (account.name || '').toLowerCase()
+        if (!email.includes(query) && !name.includes(query)) return false
+      }
+      return true
+    })
+  }, [accounts, planFilter, searchQuery, statusFilter])
 
-  const sortedAccounts = [...filteredAccounts].sort((a, b) => {
-    if (!sortKey) return 0
-    let diff = 0
-    if (sortKey === 'requests') {
-      diff = ((a.success_requests ?? 0) + (a.error_requests ?? 0)) - ((b.success_requests ?? 0) + (b.error_requests ?? 0))
-    } else if (sortKey === 'usage') {
-      diff = (a.usage_percent_7d ?? -1) - (b.usage_percent_7d ?? -1)
-    } else if (sortKey === 'importTime') {
-      diff = new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
-    }
-    return sortDir === 'asc' ? diff : -diff
-  })
+  const sortedAccounts = useMemo(() => {
+    if (!sortKey) return filteredAccounts
+    return [...filteredAccounts].sort((a, b) => {
+      let diff = 0
+      if (sortKey === 'requests') {
+        diff = ((a.success_requests ?? 0) + (a.error_requests ?? 0)) - ((b.success_requests ?? 0) + (b.error_requests ?? 0))
+      } else if (sortKey === 'usage') {
+        diff = (a.usage_percent_7d ?? -1) - (b.usage_percent_7d ?? -1)
+      } else if (sortKey === 'importTime') {
+        diff = new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+      }
+      return sortDir === 'asc' ? diff : -diff
+    })
+  }, [filteredAccounts, sortDir, sortKey])
 
   const totalPages = Math.max(1, Math.ceil(sortedAccounts.length / pageSize))
   const currentPage = Math.min(page, totalPages)
-  const pagedAccounts = sortedAccounts.slice((currentPage - 1) * pageSize, currentPage * pageSize)
-  const allPageSelected = pagedAccounts.length > 0 && pagedAccounts.every((a) => selected.has(a.id))
+  const pagedAccounts = useMemo(
+    () => sortedAccounts.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [currentPage, pageSize, sortedAccounts],
+  )
+  const pagedAccountIds = useMemo(() => pagedAccounts.map((account) => account.id), [pagedAccounts])
+  const pageSelectedCount = useMemo(
+    () => pagedAccountIds.reduce((count, id) => count + (selected.has(id) ? 1 : 0), 0),
+    [pagedAccountIds, selected],
+  )
+  const allPageSelected = pagedAccountIds.length > 0 && pageSelectedCount === pagedAccountIds.length
+  const somePageSelected = pageSelectedCount > 0 && !allPageSelected
 
   useEffect(() => {
     if (page > totalPages) {
@@ -181,30 +342,48 @@ export default function Accounts() {
     }
   }, [page, totalPages])
 
-  const toggleSelect = (id: number) => {
+  useEffect(() => {
+    if (!accounts.some((account) => account.status === 'refreshing')) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void reloadSilently()
+    }, 2000)
+
+    return () => window.clearTimeout(timer)
+  }, [accounts, reloadSilently])
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = somePageSelected
+    }
+  }, [somePageSelected])
+
+  const toggleSelect = useCallback((id: number) => {
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
 
-  const toggleSelectAll = () => {
+  const toggleSelectAll = useCallback(() => {
     if (allPageSelected) {
       setSelected((prev) => {
         const next = new Set(prev)
-        for (const a of pagedAccounts) next.delete(a.id)
+        for (const id of pagedAccountIds) next.delete(id)
         return next
       })
     } else {
       setSelected((prev) => {
         const next = new Set(prev)
-        for (const a of pagedAccounts) next.add(a.id)
+        for (const id of pagedAccountIds) next.add(id)
         return next
       })
     }
-  }
+  }, [allPageSelected, pagedAccountIds])
 
   const handleAdd = async () => {
     if (!addForm.refresh_token.trim()) return
@@ -235,6 +414,107 @@ export default function Accounts() {
       showToast(t('accounts.addFailed', { error: getErrorMessage(error) }), 'error')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const addOpenAIModelValues = useCallback((raw: string) => {
+    const nextModels = parseModelTokens(raw)
+    if (nextModels.length === 0) return
+    setOpenAIForm((form) => ({ ...form, models: mergeModelLists(form.models, nextModels) }))
+    setOpenAIModelDraft('')
+  }, [])
+
+  const removeOpenAIModel = useCallback((model: string) => {
+    setOpenAIForm((form) => ({ ...form, models: form.models.filter(item => item !== model) }))
+  }, [])
+
+  const addEditOpenAIModelValues = useCallback((raw: string) => {
+    const nextModels = parseModelTokens(raw)
+    if (nextModels.length === 0) return
+    setEditOpenAIForm((form) => ({ ...form, models: mergeModelLists(form.models, nextModels) }))
+    setEditOpenAIModelDraft('')
+  }, [])
+
+  const removeEditOpenAIModel = useCallback((model: string) => {
+    setEditOpenAIForm((form) => ({ ...form, models: form.models.filter(item => item !== model) }))
+  }, [])
+
+  const handleFetchOpenAIModels = async () => {
+    if (!openAIForm.api_key.trim()) return
+    setOpenAIModelsLoading(true)
+    try {
+      const result = await api.fetchOpenAIResponsesModels({
+        base_url: openAIForm.base_url,
+        api_key: openAIForm.api_key,
+        proxy_url: openAIForm.proxy_url,
+      })
+      const models = result.models ?? []
+      setOpenAIForm((form) => ({ ...form, base_url: result.base_url || form.base_url, models }))
+      showToast(t('accounts.openaiModelsFetchSuccess', { count: models.length }))
+    } catch (error) {
+      showToast(t('accounts.openaiModelsFetchFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setOpenAIModelsLoading(false)
+    }
+  }
+
+  const handleAddOpenAIResponses = async () => {
+    const models = openAIForm.models
+    if (!openAIForm.api_key.trim() || models.length === 0) return
+    setSubmitting(true)
+    try {
+      await api.addOpenAIResponsesAccount({ ...openAIForm, models })
+      showToast(t('accounts.addSuccess'))
+      setShowAdd(false)
+      setOpenAIForm({ base_url: 'https://api.openai.com', api_key: '', models: [], proxy_url: '' })
+      setOpenAIModelDraft('')
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.addFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleFetchEditOpenAIModels = async () => {
+    if (!editingAccount?.openai_responses_api) return
+    setEditOpenAIModelsLoading(true)
+    try {
+      const result = await api.fetchOpenAIResponsesModels({
+        account_id: editingAccount.id,
+        base_url: editOpenAIForm.base_url,
+        api_key: editOpenAIForm.api_key ?? '',
+        proxy_url: editOpenAIForm.proxy_url,
+      })
+      const models = result.models ?? []
+      setEditOpenAIForm((form) => ({ ...form, base_url: result.base_url || form.base_url, models }))
+      showToast(t('accounts.openaiModelsFetchSuccess', { count: models.length }))
+    } catch (error) {
+      showToast(t('accounts.openaiModelsFetchFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setEditOpenAIModelsLoading(false)
+    }
+  }
+
+  const handleSaveOpenAIAccountSettings = async () => {
+    if (!editingAccount?.openai_responses_api) return
+    if (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0) {
+      showToast(t('accounts.openaiAccountInvalid'), 'error')
+      return
+    }
+    setEditSubmitting(true)
+    try {
+      await api.updateOpenAIResponsesAccount(editingAccount.id, {
+        ...editOpenAIForm,
+        api_key: editOpenAIForm.api_key?.trim() || undefined,
+      })
+      showToast(t('accounts.openaiAccountSaveSuccess'))
+      await reload()
+      closeSchedulerEditor(true)
+    } catch (error) {
+      showToast(t('accounts.openaiAccountSaveFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setEditSubmitting(false)
     }
   }
 
@@ -424,8 +704,9 @@ export default function Accounts() {
       const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
 
       if (jsonFiles.length > 0) {
-        await importFiles([...jsonFiles, ...txtFiles], 'json')
-      } else if (txtFiles.length > 0) {
+        await importFiles(jsonFiles, 'json')
+      }
+      if (txtFiles.length > 0) {
         await importFiles(txtFiles, 'txt')
       }
       return
@@ -448,21 +729,22 @@ export default function Accounts() {
     }
 
     if (jsonFiles.length > 0) {
-      await importFiles([...jsonFiles, ...txtFiles], 'json')
-    } else if (txtFiles.length > 0) {
+      await importFiles(jsonFiles, 'json')
+    }
+    if (txtFiles.length > 0) {
       await importFiles(txtFiles, 'txt')
     }
   }
 
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    if (!file.name.endsWith('.txt')) {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length === 0) return
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.txt'))) {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
     setShowImportPicker(false)
-    await importFiles([file], 'txt')
+    await importFiles(files, 'txt')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -475,14 +757,14 @@ export default function Accounts() {
   }
 
   const handleAtFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    if (!file.name.endsWith('.txt')) {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length === 0) return
+    if (files.some((file) => !file.name.toLowerCase().endsWith('.txt'))) {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
     setShowImportPicker(false)
-    await importFiles([file], 'at_txt')
+    await importFiles(files, 'at_txt')
     if (atFileInputRef.current) atFileInputRef.current.value = ''
   }
 
@@ -506,8 +788,9 @@ export default function Accounts() {
     const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
 
     if (jsonFiles.length > 0) {
-      await importFiles([...jsonFiles, ...txtFiles], 'json')
-    } else if (txtFiles.length > 0) {
+      await importFiles(jsonFiles, 'json')
+    }
+    if (txtFiles.length > 0) {
       await importFiles(txtFiles, 'txt')
     }
 
@@ -545,6 +828,41 @@ export default function Accounts() {
     } finally {
       setExporting(false)
     }
+  }
+
+  const handleGenerateAuthJSON = async (account: AccountRow) => {
+    setAuthJsonExportingIds((prev) => new Set(prev).add(account.id))
+    try {
+      const blob = await api.downloadAccountAuthJSON(account.id)
+      const json = formatJSONText(await blob.text())
+      setAuthJsonModal({ account, json })
+      showToast(t('accounts.authJsonGenerated'))
+    } catch (error) {
+      showToast(t('accounts.authJsonFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setAuthJsonExportingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(account.id)
+        return next
+      })
+    }
+  }
+
+  const handleCopyAuthJSON = async () => {
+    if (!authJsonModal) return
+    try {
+      await copyTextToClipboard(authJsonModal.json)
+      showToast(t('accounts.authJsonCopied'))
+    } catch (error) {
+      showToast(t('accounts.authJsonCopyFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
+  const handleExportAuthJSON = () => {
+    if (!authJsonModal) return
+    const blob = new Blob([`${authJsonModal.json}\n`], { type: 'application/json' })
+    downloadBlob(blob, 'auth.json')
+    showToast(t('accounts.authJsonExported'))
   }
 
   const handleMigrate = async () => {
@@ -622,68 +940,102 @@ export default function Accounts() {
     }
   }
 
+  const handleLockSubscriptionAccounts = async () => {
+    const candidates = subscriptionAccountsToLock
+    if (candidates.length === 0) {
+      showToast(t('accounts.noSubscriptionAccountsToLock'))
+      return
+    }
+
+    setBatchLoading(true)
+    setLockingSubscriptionAccounts(true)
+    try {
+      const { success, fail } = await runAccountBatch(
+        candidates.map((account) => account.id),
+        (id) => api.toggleAccountLock(id, true),
+      )
+      showToast(t('accounts.lockSubscriptionAccountsDone', { success, fail }))
+      void reload()
+    } finally {
+      setBatchLoading(false)
+      setLockingSubscriptionAccounts(false)
+    }
+  }
+
+  const handleToggleEnabled = async (account: AccountRow) => {
+    const nextEnabled = account.enabled === false
+    try {
+      await api.toggleAccountEnabled(account.id, nextEnabled)
+      showToast(nextEnabled ? t('accounts.enableSuccess') : t('accounts.disableSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.enableFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
   const handleBatchDelete = async () => {
-    if (selected.size === 0) return
+    const ids = Array.from(selected)
+    if (ids.length === 0) return
     const confirmed = await confirm({
       title: t('accounts.batchDeleteTitle'),
-      description: t('accounts.batchDeleteDesc', { count: selected.size }),
+      description: t('accounts.batchDeleteDesc', { count: ids.length }),
       confirmText: t('accounts.deleteConfirm'),
       tone: 'destructive',
       confirmVariant: 'destructive',
     })
     if (!confirmed) return
     setBatchLoading(true)
-    let success = 0
-    let fail = 0
-    for (const id of selected) {
-      try {
-        await api.deleteAccount(id)
-        success++
-      } catch {
-        fail++
-      }
+    try {
+      const { success, fail } = await runAccountBatch(ids, api.deleteAccount)
+      showToast(t('accounts.batchDeleteDone', { success, fail }))
+      setSelected(new Set())
+      void reload()
+    } finally {
+      setBatchLoading(false)
     }
-    showToast(t('accounts.batchDeleteDone', { success, fail }))
-    setSelected(new Set())
-    setBatchLoading(false)
-    void reload()
   }
 
-  const handleBatchRefresh = async () => {
-    if (selected.size === 0) return
+  const handleBatchRefresh = async (ids?: number[]) => {
+    const targetIds = ids ?? Array.from(selected)
+    if (targetIds.length === 0) return
     setBatchLoading(true)
-    let success = 0
-    let fail = 0
-    for (const id of selected) {
-      try {
-        await api.refreshAccount(id)
-        success++
-      } catch {
-        fail++
-      }
+    setBatchRefreshing(true)
+    try {
+      const { success, fail } = await runAccountBatch(targetIds, api.refreshAccount, ACCOUNT_REFRESH_BATCH_CONCURRENCY)
+      showToast(t('accounts.batchRefreshDone', { success, fail }))
+      void reload()
+    } finally {
+      setBatchLoading(false)
+      setBatchRefreshing(false)
     }
-    showToast(t('accounts.batchRefreshDone', { success, fail }))
-    setBatchLoading(false)
-    void reload()
   }
 
   const handleBatchLock = async (locked: boolean) => {
-    if (selected.size === 0) return
+    const ids = Array.from(selected)
+    if (ids.length === 0) return
     setBatchLoading(true)
-    let success = 0
-    let fail = 0
-    for (const id of selected) {
-      try {
-        await api.toggleAccountLock(id, locked)
-        success++
-      } catch {
-        fail++
-      }
+    try {
+      const { success, fail } = await runAccountBatch(ids, (id) => api.toggleAccountLock(id, locked))
+      showToast(t(locked ? 'accounts.batchLockDone' : 'accounts.batchUnlockDone', { success, fail }))
+      setSelected(new Set())
+      void reload()
+    } finally {
+      setBatchLoading(false)
     }
-    showToast(t(locked ? 'accounts.batchLockDone' : 'accounts.batchUnlockDone', { success, fail }))
-    setBatchLoading(false)
-    setSelected(new Set())
-    void reload()
+  }
+
+  const handleBatchEnabled = async (enabled: boolean) => {
+    const ids = Array.from(selected)
+    if (ids.length === 0) return
+    setBatchLoading(true)
+    try {
+      const { success, fail } = await runAccountBatch(ids, (id) => api.toggleAccountEnabled(id, enabled))
+      showToast(t(enabled ? 'accounts.batchEnableDone' : 'accounts.batchDisableDone', { success, fail }))
+      setSelected(new Set())
+      void reload()
+    } finally {
+      setBatchLoading(false)
+    }
   }
 
   const handleResetStatus = async (account: AccountRow) => {
@@ -697,10 +1049,11 @@ export default function Accounts() {
   }
 
   const handleBatchResetStatus = async () => {
-    if (selected.size === 0) return
+    const ids = Array.from(selected)
+    if (ids.length === 0) return
     setBatchLoading(true)
     try {
-      const result = await api.batchResetStatus(Array.from(selected))
+      const result = await api.batchResetStatus(ids)
       showToast(t('accounts.batchResetStatusDone', { success: result.success, fail: result.failed }))
       setSelected(new Set())
       void reload()
@@ -711,10 +1064,11 @@ export default function Accounts() {
     }
   }
 
-  const handleBatchTest = async () => {
+  const handleBatchTest = async (ids?: number[]) => {
+    if (ids && ids.length === 0) return
     setBatchTesting(true)
     try {
-      const result = await api.batchTestAccounts()
+      const result = await api.batchTestAccounts(ids)
       showToast(t('accounts.batchTestDone', {
         success: result.success,
         banned: result.banned,
@@ -789,48 +1143,46 @@ export default function Accounts() {
     }
   }
 
-  const handlePurgeDeleted = async () => {
-    const confirmed = await confirm({
-      title: t('accounts.purgeDeletedTitle'),
-      description: t('accounts.purgeDeletedDesc'),
-      confirmText: t('accounts.purgeDeletedConfirm'),
-      tone: 'destructive',
-      confirmVariant: 'destructive',
-    })
-    if (!confirmed) return
-    setPurging(true)
-    try {
-      const res = await api.purgeDeleted(true)
-      showToast(t('accounts.purgeDeletedSuccess', { accounts: res.accounts, logs: res.logs, events: res.events }))
-      void reload()
-    } catch (error) {
-      showToast(t('accounts.purgeDeletedFailed', { error: getErrorMessage(error) }), 'error')
-    } finally {
-      setPurging(false)
-    }
-  }
-
   const openSchedulerEditor = (account: AccountRow) => {
     setEditingAccount(account)
+    setEditTab('scheduler')
     setScoreMode(account.score_bias_override === null || account.score_bias_override === undefined ? 'default' : 'custom')
     setScoreInput(account.score_bias_override === null || account.score_bias_override === undefined ? '' : String(account.score_bias_override))
     setConcurrencyMode(account.base_concurrency_override === null || account.base_concurrency_override === undefined ? 'default' : 'custom')
     setConcurrencyInput(account.base_concurrency_override === null || account.base_concurrency_override === undefined ? '' : String(account.base_concurrency_override))
+    setAllowedAPIKeySelection(filterExistingAPIKeyIDs(account.allowed_api_key_ids ?? [], apiKeys))
+    setEditOpenAIForm({
+      name: account.name ?? '',
+      base_url: account.base_url || 'https://api.openai.com',
+      api_key: '',
+      models: account.models ?? [],
+      proxy_url: account.proxy_url ?? '',
+    })
+    setEditOpenAIModelDraft('')
   }
 
   const closeSchedulerEditor = (force = false) => {
     if (editSubmitting && !force) return
     setEditingAccount(null)
+    setEditTab('scheduler')
     setScoreMode('default')
     setScoreInput('')
     setConcurrencyMode('default')
     setConcurrencyInput('')
+    setAllowedAPIKeySelection([])
+    setEditOpenAIForm({ name: '', base_url: 'https://api.openai.com', api_key: '', models: [], proxy_url: '' })
+    setEditOpenAIModelDraft('')
   }
 
   const parsedScoreBias = scoreMode === 'custom' ? parseIntegerInput(scoreInput) : null
   const parsedBaseConcurrency = concurrencyMode === 'custom' ? parseIntegerInput(concurrencyInput) : null
   const scoreInputInvalid = scoreMode === 'custom' && (parsedScoreBias === null || parsedScoreBias < -200 || parsedScoreBias > 200)
   const concurrencyInputInvalid = concurrencyMode === 'custom' && (parsedBaseConcurrency === null || parsedBaseConcurrency < 1 || parsedBaseConcurrency > 50)
+  const openAIAccountInputInvalid = Boolean(
+    editingAccount?.openai_responses_api &&
+    editTab === 'account' &&
+    (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0)
+  )
 
   const editPreview = useMemo(() => {
     if (!editingAccount) return null
@@ -865,6 +1217,7 @@ export default function Accounts() {
       const payload = {
         score_bias_override: scoreMode === 'custom' ? parsedScoreBias : null,
         base_concurrency_override: concurrencyMode === 'custom' ? parsedBaseConcurrency : null,
+        allowed_api_key_ids: allowedAPIKeySelection,
       }
       await api.updateAccountScheduler(editingAccount.id, payload)
       showToast(t('accounts.schedulerSaveSuccess'))
@@ -877,6 +1230,14 @@ export default function Accounts() {
     }
   }
 
+  const handleSaveAccountEditor = async () => {
+    if (editingAccount?.openai_responses_api && editTab === 'account') {
+      await handleSaveOpenAIAccountSettings()
+      return
+    }
+    await handleSaveScheduler()
+  }
+
   return (
     <div
       className="relative"
@@ -886,7 +1247,7 @@ export default function Accounts() {
       onDrop={(e) => void handleDrop(e)}
     >
       {dragging && (
-        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/5 backdrop-blur-sm">
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/5 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-2 text-primary">
             <Upload className="size-10" />
             <span className="text-lg font-semibold">{t('accounts.dropToImport')}</span>
@@ -909,51 +1270,98 @@ export default function Accounts() {
           description={t('accounts.description')}
           onRefresh={() => void reload()}
           actions={(
-            <div className="flex flex-col items-end gap-1.5">
-              <div className="flex items-center gap-1.5">
-                <Button variant="outline" size="sm" disabled={batchTesting} onClick={() => void handleBatchTest()}>
-                  <FlaskConical className="size-3" />
-                  {batchTesting ? t('accounts.batchTesting') : t('accounts.batchTest')}
-                </Button>
-                <Button variant="outline" size="sm" disabled={cleaningBanned} onClick={() => void handleCleanBanned()}>
-                  <Ban className="size-3" />
-                  {cleaningBanned ? t('accounts.cleaning') : t('accounts.cleanBanned')}
-                </Button>
-                <Button variant="outline" size="sm" disabled={cleaningRateLimited} onClick={() => void handleCleanRateLimited()}>
-                  <Timer className="size-3" />
-                  {cleaningRateLimited ? t('accounts.cleaning') : t('accounts.cleanRateLimited')}
-                </Button>
-                <Button variant="outline" size="sm" disabled={cleaningError} onClick={() => void handleCleanError()}>
-                  <AlertTriangle className="size-3" />
-                  {cleaningError ? t('accounts.cleaning') : t('accounts.cleanError')}
-                </Button>
-                <Button variant="destructive" size="sm" disabled={purging} onClick={() => void handlePurgeDeleted()}>
-                  <Trash2 className="size-3" />
-                  {purging ? t('accounts.purgingDeleted') : t('accounts.purgeDeleted')}
-                </Button>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Button onClick={() => setShowAdd(true)}>
-                  <Plus className="size-3.5" />
-                  {t('accounts.addAccount')}
-                </Button>
-                <Button variant="outline" disabled={importing} onClick={() => setShowImportPicker(true)}>
-                  <Upload className="size-3.5" />
-                  {importing ? t('accounts.importing') : t('accounts.importFile')}
-                </Button>
-                <Button variant="outline" disabled={exporting} onClick={() => setShowExportPicker(true)}>
-                  <Download className="size-3.5" />
-                  {exporting ? t('accounts.exporting') : t('accounts.export')}
-                </Button>
-                <Button variant="outline" disabled={migrating} onClick={() => setShowMigrate(true)}>
-                  <ArrowDownToLine className="size-3.5" />
-                  {migrating ? t('accounts.migrating') : t('accounts.migrateImport')}
-                </Button>
-              </div>
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <HeaderActionMenu
+                label={t('accounts.maintenanceActions')}
+                icon={<Zap className="size-3.5" />}
+                items={[
+                  {
+                    key: 'refresh-tokens',
+                    label: t('accounts.refreshTokens'),
+                    icon: <RefreshCw className={`size-3.5 ${batchRefreshing ? 'animate-spin' : ''}`} />,
+                    disabled: batchLoading || batchTesting || accounts.length === 0,
+                    onSelect: () => void handleBatchRefresh(accounts.map((account) => account.id)),
+                  },
+                  {
+                    key: 'test-connection',
+                    label: batchTesting ? t('accounts.batchTesting') : t('accounts.testConnection'),
+                    icon: <FlaskConical className="size-3.5" />,
+                    disabled: batchLoading || batchTesting || accounts.length === 0,
+                    onSelect: () => void handleBatchTest(),
+                  },
+                  {
+                    key: 'lock-subscription',
+                    label: lockingSubscriptionAccounts ? t('accounts.lockingSubscriptionAccounts') : t('accounts.lockSubscriptionAccounts'),
+                    icon: <Lock className="size-3.5" />,
+                    disabled: batchLoading || batchTesting || lockingSubscriptionAccounts || accounts.length === 0,
+                    title: t('accounts.lockSubscriptionAccountsHint', { count: subscriptionAccountsToLock.length }),
+                    onSelect: () => void handleLockSubscriptionAccounts(),
+                  },
+                ]}
+              />
+              <HeaderActionMenu
+                label={t('accounts.cleanupActions')}
+                icon={<Trash2 className="size-3.5" />}
+                items={[
+                  {
+                    key: 'clean-banned',
+                    label: cleaningBanned ? t('accounts.cleaning') : t('accounts.cleanBanned'),
+                    icon: <Ban className="size-3.5" />,
+                    disabled: cleaningBanned,
+                    onSelect: () => void handleCleanBanned(),
+                  },
+                  {
+                    key: 'clean-rate-limited',
+                    label: cleaningRateLimited ? t('accounts.cleaning') : t('accounts.cleanRateLimited'),
+                    icon: <Timer className="size-3.5" />,
+                    disabled: cleaningRateLimited,
+                    onSelect: () => void handleCleanRateLimited(),
+                  },
+                  {
+                    key: 'clean-error',
+                    label: cleaningError ? t('accounts.cleaning') : t('accounts.cleanError'),
+                    icon: <AlertTriangle className="size-3.5" />,
+                    disabled: cleaningError,
+                    onSelect: () => void handleCleanError(),
+                  },
+                ]}
+              />
+              <HeaderActionMenu
+                label={t('accounts.dataActions')}
+                icon={<FolderOpen className="size-3.5" />}
+                items={[
+                  {
+                    key: 'import',
+                    label: importing ? t('accounts.importing') : t('accounts.importFile'),
+                    icon: <Upload className="size-3.5" />,
+                    disabled: importing,
+                    onSelect: () => setShowImportPicker(true),
+                  },
+                  {
+                    key: 'export',
+                    label: exporting ? t('accounts.exporting') : t('accounts.export'),
+                    icon: <Download className="size-3.5" />,
+                    disabled: exporting,
+                    onSelect: () => setShowExportPicker(true),
+                  },
+                  {
+                    key: 'migrate',
+                    label: migrating ? t('accounts.migrating') : t('accounts.migrateImport'),
+                    icon: <ArrowDownToLine className="size-3.5" />,
+                    disabled: migrating,
+                    onSelect: () => setShowMigrate(true),
+                  },
+                ]}
+              />
+              <Button onClick={() => setShowAdd(true)}>
+                <Plus className="size-3.5" />
+                {t('accounts.addAccount')}
+              </Button>
               <input
                 ref={fileInputRef}
                 type="file"
                 accept=".txt"
+                multiple
                 className="hidden"
                 onChange={(e) => void handleFileImport(e)}
               />
@@ -969,6 +1377,7 @@ export default function Accounts() {
                 ref={atFileInputRef}
                 type="file"
                 accept=".txt"
+                multiple
                 className="hidden"
                 onChange={(e) => void handleAtFileImport(e)}
               />
@@ -983,31 +1392,41 @@ export default function Accounts() {
           )}
         />
 
-        <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-5">
           <CompactStat label={t('accounts.totalAccounts')} chipLabel={t('accounts.filterAll')} value={totalAccounts} tone="neutral" />
           <CompactStat label={t('accounts.normalAccounts')} chipLabel={t('accounts.filterNormal')} value={normalAccounts} tone="success" />
-          <CompactStat label={t('accounts.rateLimited')} chipLabel={t('accounts.filterRateLimited')} value={rateLimitedAccounts} tone="warning" />
+          <CompactStat
+            label={t('accounts.rateLimited')}
+            chipLabel={t('accounts.filterRateLimited')}
+            value={rateLimitedAccounts}
+            tone="warning"
+            details={[
+              { label: '5h', value: rateLimited5hAccounts },
+              { label: '7d', value: rateLimited7dAccounts },
+            ]}
+          />
           <CompactStat label={t('accounts.bannedAccounts')} chipLabel={t('accounts.filterBanned')} value={bannedAccounts} tone="danger" />
+          <CompactStat label={t('accounts.errorAccounts')} chipLabel={t('accounts.filterError')} value={errorAccounts} tone="danger" />
         </div>
 
-        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-white/55 px-4 py-3 text-[12px] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+        <div className="toolbar-surface mb-3 flex flex-wrap items-center gap-2">
           <span className="font-semibold text-foreground">{t('accounts.filter')}</span>
-          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
+          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['error', t('accounts.filterError')], ['disabled', t('accounts.filterDisabled')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => { setStatusFilter(key); setPage(1) }}
-              className={`rounded-full px-3 py-1 font-semibold transition-colors ${
+              className={`rounded-md px-2.5 py-1 font-semibold transition-colors ${
                 statusFilter === key
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted/50 text-muted-foreground hover:bg-muted'
               }`}
             >
-              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : key === 'banned' ? bannedAccounts : lockedAccounts}
+              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : key === 'banned' ? bannedAccounts : key === 'error' ? errorAccounts : key === 'disabled' ? disabledAccounts : lockedAccounts}
             </button>
           ))}
         </div>
 
-        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-white/55 px-4 py-3 text-[12px] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+        <div className="toolbar-surface mb-3 flex flex-wrap items-center gap-2">
           <span className="font-semibold text-foreground">{t('accounts.schedulerView')}</span>
           <SchedulerChip label={t('accounts.healthy')} value={healthyAccounts} tone="success" />
           <SchedulerChip label={t('accounts.warm')} value={warmAccounts} tone="warning" />
@@ -1015,8 +1434,8 @@ export default function Accounts() {
           <SchedulerChip label={t('status.unauthorized')} value={bannedAccounts} tone="neutral" />
         </div>
 
-        <div className="mb-4 flex items-center gap-2">
-          <div className="relative w-64">
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="relative w-72 max-sm:w-full">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
             <Input
               className="pl-9 h-8 rounded-lg text-[13px]"
@@ -1026,7 +1445,7 @@ export default function Accounts() {
             />
           </div>
           <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
-            {(['all', 'pro', 'plus', 'team', 'free'] as const).map((key) => (
+            {(['all', 'pro', 'prolite', 'plus', 'team', 'free'] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => { setPlanFilter(key); setPage(1) }}
@@ -1036,29 +1455,42 @@ export default function Accounts() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {key === 'all' ? t('accounts.filterAll') : key.charAt(0).toUpperCase() + key.slice(1)}
+                {key === 'all'
+                  ? t('accounts.filterAll')
+                  : key === 'prolite'
+                    ? 'ProLite'
+                    : key.charAt(0).toUpperCase() + key.slice(1)}
               </button>
             ))}
           </div>
         </div>
 
         {selected.size > 0 && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2.5 mb-4 rounded-2xl bg-primary/10 border border-primary/20 text-sm font-semibold text-primary">
+          <div className="sticky top-2 z-20 mb-4 flex items-center justify-between gap-3 rounded-lg border border-primary/20 bg-card/95 px-3 py-2.5 text-sm font-semibold text-primary shadow-lg backdrop-blur-sm max-lg:flex-col max-lg:items-stretch">
             <span>{t('common.selected', { count: selected.size })}</span>
-            <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchRefresh()}>
-                {t('accounts.batchRefresh')}
+            <div className="flex flex-wrap items-center justify-end gap-1.5 max-lg:justify-start">
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchRefresh()}>
+                <RefreshCw className={`size-3 mr-1 ${batchRefreshing ? 'animate-spin' : ''}`} />{t('accounts.batchRefresh')}
               </Button>
-              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchLock(true)}>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchTest(Array.from(selected))}>
+                <FlaskConical className="size-3 mr-1" />{batchTesting ? t('accounts.batchTesting') : t('accounts.batchTest')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchEnabled(true)}>
+                <Power className="size-3 mr-1" />{t('accounts.enable')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchEnabled(false)}>
+                <PowerOff className="size-3 mr-1" />{t('accounts.disable')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchLock(true)}>
                 <Lock className="size-3 mr-1" />{t('accounts.lock')}
               </Button>
-              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchLock(false)}>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchLock(false)}>
                 <Unlock className="size-3 mr-1" />{t('accounts.unlock')}
               </Button>
-              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchResetStatus()}>
+              <Button variant="outline" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchResetStatus()}>
                 <RotateCcw className="size-3 mr-1" />{t('accounts.batchResetStatus')}
               </Button>
-              <Button variant="destructive" size="sm" disabled={batchLoading} onClick={() => void handleBatchDelete()}>
+              <Button variant="destructive" size="sm" disabled={batchLoading || batchTesting} onClick={() => void handleBatchDelete()}>
                 {t('accounts.batchDelete')}
               </Button>
               <Button variant="outline" size="sm" onClick={() => setSelected(new Set())}>
@@ -1069,7 +1501,7 @@ export default function Accounts() {
         )}
 
         <Card>
-          <CardContent className="p-6">
+          <CardContent className="p-4">
             <StateShell
               variant="section"
               isEmpty={accounts.length === 0}
@@ -1077,19 +1509,20 @@ export default function Accounts() {
               emptyDescription={t('accounts.noDataDesc')}
               action={<Button onClick={() => setShowAdd(true)}>{t('accounts.addAccount')}</Button>}
             >
-              <div className="overflow-auto border border-border rounded-xl">
+              <div className="data-table-shell">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-10">
                         <input
+                          ref={selectAllRef}
                           type="checkbox"
-                          className="size-4 cursor-pointer accent-[hsl(var(--primary))]"
+                          className="size-4 cursor-pointer accent-primary"
                           checked={allPageSelected}
                           onChange={toggleSelectAll}
                         />
                       </TableHead>
-                      <TableHead className="text-[13px] font-semibold">ID</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('accounts.sequence')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.email')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.plan')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.status')}</TableHead>
@@ -1116,55 +1549,85 @@ export default function Accounts() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {pagedAccounts.map((account) => (
-                      <TableRow key={account.id} className={selected.has(account.id) ? 'bg-primary/5' : ''}>
-                        <TableCell>
-                          <input
-                            type="checkbox"
-                            className="size-4 cursor-pointer accent-[hsl(var(--primary))]"
-                            checked={selected.has(account.id)}
-                            onChange={() => toggleSelect(account.id)}
-                          />
-                        </TableCell>
-                        <TableCell className="text-[14px] font-mono text-muted-foreground">{account.id}</TableCell>
-                        <TableCell className="text-[14px] text-muted-foreground">
-                          {account.email || '-'}
-                          {account.at_only && (
-                            <span className="ml-1.5 inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950 dark:text-amber-400 dark:ring-amber-400/20">
-                              AT
-                            </span>
-                          )}
-                          {account.locked && (
-                            <span className="ml-1.5 inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
-                              <Lock className="size-2.5 mr-0.5" />{t('accounts.lock')}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell
-                          className="text-[13px] font-medium"
-                        >
-                          {account.plan_type || '-'}
-                        </TableCell>
-                        <TableCell>
-                          <div className="space-y-1">
-                            <StatusBadge status={account.status} />
-                            {account.cooldown_until && (account.status === 'rate_limited' || account.status === 'error') && (
-                              <CooldownTimer until={account.cooldown_until} />
+                    {pagedAccounts.map((account, index) => {
+                      const isSelected = selected.has(account.id)
+                      return (
+                        <TableRow key={account.id} className={isSelected ? 'bg-primary/5' : ''}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              className="size-4 cursor-pointer accent-primary"
+                              checked={isSelected}
+                              onChange={() => toggleSelect(account.id)}
+                            />
+                          </TableCell>
+                          <TableCell className="text-[14px] font-mono text-muted-foreground" title={`ID ${account.id}`}>
+                            {(currentPage - 1) * pageSize + index + 1}
+                          </TableCell>
+                          <TableCell className="text-[14px] text-muted-foreground">
+                            <span>{account.openai_responses_api ? formatAccountName(account) : formatCompactEmail(account.email)}</span>
+                            {account.at_only && (
+                              <span className="ml-1.5 inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950 dark:text-amber-400 dark:ring-amber-400/20">
+                                AT
+                              </span>
                             )}
-                            <div className="text-[11px] text-muted-foreground">
-                              {t('accounts.healthSummary', {
-                                health: formatHealthTier(account.health_tier, t),
-                                score: Math.round(getDispatchScore(account)),
-                                concurrency: account.dynamic_concurrency_limit ?? '-',
-                              })}
+                            {account.openai_responses_api && (
+                              <span className="ml-1.5 inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-400 dark:ring-emerald-400/20">
+                                Responses API
+                              </span>
+                            )}
+                            {account.enabled === false && (
+                              <span className="ml-1.5 inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
+                                <PowerOff className="size-2.5 mr-0.5" />{t('accounts.disabled')}
+                              </span>
+                            )}
+                            {account.locked && (
+                              <span className="ml-1.5 inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
+                                <Lock className="size-2.5 mr-0.5" />{t('accounts.lock')}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <PlanBadge planType={account.plan_type} />
+                          </TableCell>
+                          <TableCell>
+                            <div className="space-y-1.5">
+                              <div className="flex min-h-6 items-center gap-2 whitespace-nowrap">
+                                <StatusBadge status={account.status} detail={getAccountRateLimitWindow(account) ?? undefined} />
+                                <AccountStatusCountdown account={account} />
+                              </div>
+                              {account.status === 'error' && account.error_message && (
+                                <div className="max-w-[180px] truncate text-[11px] leading-tight text-red-500" title={account.error_message}>
+                                  {account.error_message}
+                                </div>
+                              )}
+                              {(account.model_cooldowns?.length ?? 0) > 0 && (
+                                <div className="text-[11px] leading-tight text-amber-600">
+                                  model {account.model_cooldowns?.[0]?.model}
+                                  {(account.model_cooldowns?.length ?? 0) > 1 ? ` +${(account.model_cooldowns?.length ?? 1) - 1}` : ''}
+                                </div>
+                              )}
+                              <div className="text-[11px] text-muted-foreground">
+                                {t('accounts.healthSummary', {
+                                  health: formatHealthTier(account.health_tier, t),
+                                  score: Math.round(getDispatchScore(account)),
+                                  concurrency: account.dynamic_concurrency_limit ?? '-',
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        </TableCell>
+                          </TableCell>
                         <TableCell>
-                          <div className="flex items-center gap-2 text-[13px]">
-                            <span className="text-emerald-600 font-medium">{account.success_requests ?? 0}</span>
-                            <span className="text-muted-foreground">/</span>
-                            <span className="text-red-500 font-medium">{account.error_requests ?? 0}</span>
+                          <div className="space-y-0.5 text-[13px]">
+                            <div className="flex items-center gap-2">
+                              <span className="text-emerald-600 font-medium">{account.success_requests ?? 0}</span>
+                              <span className="text-muted-foreground">/</span>
+                              <span className="text-red-500 font-medium">{account.error_requests ?? 0}</span>
+                            </div>
+                            {((account.retry_error_requests ?? 0) > 0 || (account.rate_limit_attempts ?? 0) > 0) && (
+                              <div className="text-[11px] text-muted-foreground">
+                                retry {account.retry_error_requests ?? 0} · 429 {account.rate_limit_attempts ?? 0}
+                              </div>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell>
@@ -1205,11 +1668,30 @@ export default function Accounts() {
                               variant="outline"
                               size="icon"
                               className="h-7 w-8 px-0"
-                              disabled={refreshingIds.has(account.id) || account.at_only}
+                              disabled={refreshingIds.has(account.id) || account.at_only || account.openai_responses_api}
                               onClick={() => void handleRefresh(account)}
-                              title={account.at_only ? t('accounts.atRefreshDisabled') : t('accounts.refreshAccessToken')}
+                              title={(account.at_only || account.openai_responses_api) ? t('accounts.atRefreshDisabled') : t('accounts.refreshAccessToken')}
                             >
                               <RefreshCw className={`size-3.5 ${refreshingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              disabled={authJsonExportingIds.has(account.id) || account.at_only || account.openai_responses_api}
+                              onClick={() => void handleGenerateAuthJSON(account)}
+                              title={(account.at_only || account.openai_responses_api) ? t('accounts.authJsonDisabled') : t('accounts.generateAuthJson')}
+                            >
+                              <FileJson className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant={account.enabled === false ? 'default' : 'outline'}
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              onClick={() => void handleToggleEnabled(account)}
+                              title={account.enabled === false ? t('accounts.enableHint') : t('accounts.disableHint')}
+                            >
+                              {account.enabled === false ? <Power className="size-3.5" /> : <PowerOff className="size-3.5" />}
                             </Button>
                             <Button
                               variant={account.locked ? 'default' : 'outline'}
@@ -1241,7 +1723,8 @@ export default function Accounts() {
                           </div>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </div>
@@ -1272,6 +1755,8 @@ export default function Accounts() {
             setOauthSession(null)
             setOauthCallbackUrl('')
             setOauthName('')
+            setOpenAIForm({ base_url: 'https://api.openai.com', api_key: '', models: [], proxy_url: '' })
+            setOpenAIModelDraft('')
           }}
           footer={(
             <>
@@ -1284,6 +1769,8 @@ export default function Accounts() {
                   setOauthSession(null)
                   setOauthCallbackUrl('')
                   setOauthName('')
+                  setOpenAIForm({ base_url: 'https://api.openai.com', api_key: '', models: [], proxy_url: '' })
+                  setOpenAIModelDraft('')
                 }}
               >
                 {t('common.cancel')}
@@ -1294,6 +1781,13 @@ export default function Accounts() {
                 </Button>
               ) : addMethod === 'at' ? (
                 <Button onClick={() => void handleAddAT()} disabled={submitting || !atForm.access_token.trim()}>
+                  {submitting ? t('accounts.adding') : t('accounts.submit')}
+                </Button>
+              ) : addMethod === 'openai' ? (
+                <Button
+                  onClick={() => void handleAddOpenAIResponses()}
+                  disabled={submitting || !openAIForm.api_key.trim() || openAIForm.models.length === 0}
+                >
                   {submitting ? t('accounts.adding') : t('accounts.submit')}
                 </Button>
               ) : oauthStep === 'generate' ? (
@@ -1334,6 +1828,17 @@ export default function Accounts() {
             >
               <Fingerprint className="size-3.5" />
               {t('accounts.addMethodAT')}
+            </button>
+            <button
+              onClick={() => setAddMethod('openai')}
+              className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                addMethod === 'openai'
+                  ? 'bg-background shadow-sm text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <KeyRound className="size-3.5" />
+              {t('accounts.addMethodOpenAI')}
             </button>
             <button
               onClick={() => { setAddMethod('oauth'); setOauthStep('generate'); setOauthSession(null); setOauthCallbackUrl('') }}
@@ -1397,6 +1902,101 @@ export default function Accounts() {
                   value={atForm.proxy_url}
                   onChange={(event: ChangeEvent<HTMLInputElement>) =>
                     setAtForm((form) => ({ ...form, proxy_url: event.target.value }))
+                  }
+                />
+              </div>
+            </div>
+          ) : addMethod === 'openai' ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+                <p className="font-semibold text-foreground mb-1">{t('accounts.openaiResponsesTitle')}</p>
+                <p>{t('accounts.openaiResponsesDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiNameLabel')}</label>
+                <Input
+                  placeholder={t('accounts.openaiNamePlaceholder')}
+                  value={openAIForm.name ?? ''}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setOpenAIForm((form) => ({ ...form, name: event.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiBaseUrl')} *</label>
+                <Input
+                  placeholder="https://api.openai.com"
+                  value={openAIForm.base_url}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setOpenAIForm((form) => ({ ...form, base_url: event.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiApiKey')} *</label>
+                <Input
+                  type="password"
+                  placeholder="sk-proj-..."
+                  value={openAIForm.api_key}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setOpenAIForm((form) => ({ ...form, api_key: event.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-muted-foreground">{t('accounts.openaiModels')} *</label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleFetchOpenAIModels()}
+                    disabled={openAIModelsLoading || !openAIForm.api_key.trim()}
+                  >
+                    <RefreshCw className={`size-3.5 ${openAIModelsLoading ? 'animate-spin' : ''}`} />
+                    {openAIModelsLoading ? t('accounts.openaiModelsFetching') : t('accounts.openaiModelsFetch')}
+                  </Button>
+                </div>
+                <div className="mb-3 flex gap-2">
+                  <Input
+                    placeholder={t('accounts.openaiModelsPlaceholder')}
+                    value={openAIModelDraft}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setOpenAIModelDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        addOpenAIModelValues(openAIModelDraft)
+                      }
+                    }}
+                    onPaste={(event) => {
+                      const pasted = event.clipboardData.getData('text')
+                      if (parseModelTokens(pasted).length > 1) {
+                        event.preventDefault()
+                        addOpenAIModelValues(pasted)
+                      }
+                    }}
+                  />
+                  <Button type="button" variant="outline" onClick={() => addOpenAIModelValues(openAIModelDraft)} disabled={!openAIModelDraft.trim()}>
+                    <Plus className="size-3.5" />
+                    {t('accounts.openaiModelsAdd')}
+                  </Button>
+                </div>
+                <ModelChipGrid
+                  models={openAIForm.models}
+                  onRemove={removeOpenAIModel}
+                  emptyLabel={t('accounts.openaiModelsEmpty')}
+                />
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  {t('accounts.openaiModelsHint', { count: openAIForm.models.length })}
+                </p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.proxyUrl')}</label>
+                <Input
+                  placeholder={t('accounts.proxyUrlPlaceholder')}
+                  value={openAIForm.proxy_url}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setOpenAIForm((form) => ({ ...form, proxy_url: event.target.value }))
                   }
                 />
               </div>
@@ -1594,6 +2194,53 @@ export default function Accounts() {
         </Modal>
 
         <Modal
+          show={Boolean(authJsonModal)}
+          title={t('accounts.authJsonModalTitle')}
+          contentClassName="sm:max-w-[720px]"
+          onClose={() => setAuthJsonModal(null)}
+        >
+          {authJsonModal && (
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 px-4 py-3">
+                <FileJson className="mt-0.5 size-5 shrink-0 text-primary" />
+                <div className="min-w-0 space-y-1">
+                  <div className="text-sm font-semibold text-foreground">
+                    {authJsonModal.account.email || `ID ${authJsonModal.account.id}`}
+                  </div>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {t('accounts.authJsonModalDesc')}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2 text-xs font-semibold text-muted-foreground">{t('accounts.authJsonPreview')}</div>
+                <textarea
+                  readOnly
+                  value={authJsonModal.json}
+                  className="min-h-[260px] w-full resize-y rounded-lg border border-border bg-muted/30 p-3 text-[12px] leading-relaxed text-muted-foreground outline-none focus:border-primary/40 focus:ring-2 focus:ring-primary/10"
+                  style={{ fontFamily: 'var(--font-geist-mono)' }}
+                />
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setAuthJsonModal(null)}>
+                  {t('common.close')}
+                </Button>
+                <Button variant="outline" onClick={() => void handleCopyAuthJSON()}>
+                  <Copy className="size-4" />
+                  {t('accounts.copyAuthJson')}
+                </Button>
+                <Button onClick={handleExportAuthJSON}>
+                  <Download className="size-4" />
+                  {t('accounts.exportAuthJson')}
+                </Button>
+              </div>
+            </div>
+          )}
+        </Modal>
+
+        <Modal
           show={showMigrate}
           title={t('accounts.migrateTitle')}
           contentClassName="sm:max-w-[520px]"
@@ -1651,14 +2298,17 @@ export default function Accounts() {
         <Modal
           show={Boolean(editingAccount)}
           title={t('accounts.schedulerEditTitle')}
-          contentClassName="sm:max-w-[680px]"
+          contentClassName="sm:max-w-[760px]"
           onClose={closeSchedulerEditor}
           footer={(
             <>
               <Button variant="outline" onClick={() => closeSchedulerEditor()} disabled={editSubmitting}>
                 {t('common.cancel')}
               </Button>
-              <Button onClick={() => void handleSaveScheduler()} disabled={editSubmitting || scoreInputInvalid || concurrencyInputInvalid}>
+              <Button
+                onClick={() => void handleSaveAccountEditor()}
+                disabled={editSubmitting || (editTab === 'scheduler' && (scoreInputInvalid || concurrencyInputInvalid)) || openAIAccountInputInvalid}
+              >
                 {editSubmitting ? t('common.saving') : t('common.save')}
               </Button>
             </>
@@ -1667,10 +2317,130 @@ export default function Accounts() {
           {editingAccount && editPreview ? (
             <div className="space-y-5">
               <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-                <div className="font-semibold text-foreground">{editingAccount.email || `ID ${editingAccount.id}`}</div>
+                <div className="font-semibold text-foreground">{formatAccountName(editingAccount)}</div>
                 <div className="mt-1">{t('accounts.schedulerEditDesc', { plan: editingAccount.plan_type || '-' })}</div>
               </div>
 
+              {editingAccount.openai_responses_api && (
+                <div className="flex gap-1 rounded-xl border border-border bg-muted/50 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditTab('scheduler')}
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
+                      editTab === 'scheduler'
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {t('accounts.editTabScheduler')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditTab('account')}
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-all ${
+                      editTab === 'account'
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {t('accounts.editTabAccount')}
+                  </button>
+                </div>
+              )}
+
+              {editTab === 'account' && editingAccount.openai_responses_api ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiNameLabel')}</label>
+                    <Input
+                      placeholder={t('accounts.openaiNamePlaceholder')}
+                      value={editOpenAIForm.name ?? ''}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setEditOpenAIForm((form) => ({ ...form, name: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiBaseUrl')} *</label>
+                    <Input
+                      placeholder="https://api.openai.com"
+                      value={editOpenAIForm.base_url}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setEditOpenAIForm((form) => ({ ...form, base_url: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.openaiApiKey')}</label>
+                    <Input
+                      type="password"
+                      placeholder={t('accounts.openaiApiKeyKeepPlaceholder')}
+                      value={editOpenAIForm.api_key ?? ''}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setEditOpenAIForm((form) => ({ ...form, api_key: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <label className="text-sm font-semibold text-muted-foreground">{t('accounts.openaiModels')} *</label>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleFetchEditOpenAIModels()}
+                        disabled={editOpenAIModelsLoading}
+                      >
+                        <RefreshCw className={`size-3.5 ${editOpenAIModelsLoading ? 'animate-spin' : ''}`} />
+                        {editOpenAIModelsLoading ? t('accounts.openaiModelsFetching') : t('accounts.openaiModelsFetch')}
+                      </Button>
+                    </div>
+                    <div className="mb-3 flex gap-2">
+                      <Input
+                        placeholder={t('accounts.openaiModelsPlaceholder')}
+                        value={editOpenAIModelDraft}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) => setEditOpenAIModelDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            addEditOpenAIModelValues(editOpenAIModelDraft)
+                          }
+                        }}
+                        onPaste={(event) => {
+                          const pasted = event.clipboardData.getData('text')
+                          if (parseModelTokens(pasted).length > 1) {
+                            event.preventDefault()
+                            addEditOpenAIModelValues(pasted)
+                          }
+                        }}
+                      />
+                      <Button type="button" variant="outline" onClick={() => addEditOpenAIModelValues(editOpenAIModelDraft)} disabled={!editOpenAIModelDraft.trim()}>
+                        <Plus className="size-3.5" />
+                        {t('accounts.openaiModelsAdd')}
+                      </Button>
+                    </div>
+                    <ModelChipGrid
+                      models={editOpenAIForm.models}
+                      onRemove={removeEditOpenAIModel}
+                      emptyLabel={t('accounts.openaiModelsEmpty')}
+                    />
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      {t('accounts.openaiModelsHint', { count: editOpenAIForm.models.length })}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.proxyUrl')}</label>
+                    <Input
+                      placeholder={t('accounts.proxyUrlPlaceholder')}
+                      value={editOpenAIForm.proxy_url}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setEditOpenAIForm((form) => ({ ...form, proxy_url: event.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-xl border border-border p-4">
                   <div className="text-sm font-semibold text-foreground">{t('accounts.schedulerScoreLabel')}</div>
@@ -1741,6 +2511,24 @@ export default function Accounts() {
                 </div>
               </div>
 
+              <div className="rounded-xl border border-border p-4">
+                <div className="text-sm font-semibold text-foreground">{t('accounts.allowedAPIKeysLabel')}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{t('accounts.allowedAPIKeysHint')}</div>
+                <div className="mt-3">
+                  <APIKeyMultiSelect
+                    options={apiKeys}
+                    value={allowedAPIKeySelection}
+                    disabled={apiKeys.length === 0}
+                    onChange={setAllowedAPIKeySelection}
+                    allLabel={t('accounts.allowedAPIKeysAll')}
+                    selectedLabel={t('accounts.allowedAPIKeysSelected', { count: allowedAPIKeySelection.length })}
+                    placeholder={t('accounts.allowedAPIKeysPlaceholder')}
+                    emptyLabel={t('accounts.allowedAPIKeysNoOptions')}
+                    emptyHint={t('accounts.allowedAPIKeysNoOptionsHint')}
+                  />
+                </div>
+              </div>
+
               <div className="rounded-xl border border-border bg-white/60 px-4 py-4 dark:bg-white/5">
                 <div className="text-sm font-semibold text-foreground">{t('accounts.schedulerPreviewTitle')}</div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1750,6 +2538,8 @@ export default function Accounts() {
                   <PreviewItem label={t('accounts.schedulerPreviewDynamicConcurrency')} value={String(editPreview.dynamicConcurrency)} />
                 </div>
               </div>
+                </>
+              )}
             </div>
           ) : null}
         </Modal>
@@ -1812,6 +2602,202 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+function formatJSONText(text: string) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '-1000px'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  if (!copied) {
+    throw new Error('copy failed')
+  }
+}
+
+function filterExistingAPIKeyIDs(selected: number[], apiKeys: APIKeyRow[]): number[] {
+  if (!selected.length || !apiKeys.length) {
+    return []
+  }
+  const existing = new Set(apiKeys.map((item) => item.id))
+  return [...new Set(selected.filter((id) => existing.has(id)))].sort((a, b) => a - b)
+}
+
+function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
+  const name = apiKey.name?.trim() || `API Key #${apiKey.id}`
+  return `${name} · ${apiKey.key}`
+}
+
+function APIKeyMultiSelect({
+  options,
+  value,
+  disabled,
+  onChange,
+  allLabel,
+  selectedLabel,
+  placeholder,
+  emptyLabel,
+  emptyHint,
+}: {
+  options: APIKeyRow[]
+  value: number[]
+  disabled: boolean
+  onChange: (value: number[]) => void
+  allLabel: string
+  selectedLabel: string
+  placeholder: string
+  emptyLabel: string
+  emptyHint: string
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [open])
+
+  const summary = value.length === 0 ? allLabel : selectedLabel
+
+  const toggleOption = (id: number) => {
+    if (disabled) return
+    if (value.includes(id)) {
+      onChange(value.filter((item) => item !== id))
+      return
+    }
+    onChange([...value, id].sort((a, b) => a - b))
+  }
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        className={`flex w-full items-center justify-between gap-3 rounded-md border border-input bg-background px-3.5 py-3 text-left shadow-xs transition-[border-color,box-shadow] ${
+          disabled
+            ? 'cursor-not-allowed opacity-70'
+            : 'hover:border-primary/30 hover:bg-accent/40'
+        } ${open ? 'border-primary/35 ring-[3px] ring-primary/10' : ''}`}
+        onClick={() => {
+          if (!disabled) {
+            setOpen((current) => !current)
+          }
+        }}
+      >
+        <div className="min-w-0">
+          <div className="truncate text-[15px] text-foreground">{summary}</div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            {disabled ? emptyHint : placeholder}
+          </div>
+        </div>
+        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-lg border border-border bg-popover shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm">
+          {options.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-muted-foreground">{emptyLabel}</div>
+          ) : (
+            <div className="max-h-72 space-y-1 overflow-auto p-2">
+              {options.map((option) => {
+                const checked = value.includes(option.id)
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
+                      checked ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-accent/70'
+                    }`}
+                    onClick={() => toggleOption(option.id)}
+                  >
+                    <span className={`flex size-4 items-center justify-center rounded border ${checked ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'}`}>
+                      <Check className="size-3" />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm">{formatAPIKeyOptionLabel(option)}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ModelChipGrid({
+  models,
+  onRemove,
+  emptyLabel,
+}: {
+  models: string[]
+  onRemove: (model: string) => void
+  emptyLabel: string
+}) {
+  if (models.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+        {emptyLabel}
+      </div>
+    )
+  }
+  return (
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      {models.map((model) => (
+        <div
+          key={model}
+          className="flex min-h-10 items-center justify-between gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm"
+          title={model}
+        >
+          <span className="min-w-0 truncate font-mono text-[12px] text-foreground">{model}</span>
+          <button
+            type="button"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={() => onRemove(model)}
+            aria-label={`Remove ${model}`}
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function TogglePill({
   active,
   onClick,
@@ -1864,8 +2850,229 @@ function getDispatchScore(account: AccountRow): number {
   return account.dispatch_score ?? account.scheduler_score ?? 0
 }
 
+// OpenAI reports the $100 Pro tier as "prolite" — functionally a Pro plan with
+// a smaller usage cap. Keep behavioral comparisons (usage windows, plan filter,
+// scheduler bias) aligned with the Go side by folding it into "pro".
+function normalizePlanType(planType?: string): string {
+  const raw = (planType || '').toLowerCase().trim()
+  if (raw === 'prolite' || raw === 'pro_lite' || raw === 'pro-lite') return 'pro'
+  return raw
+}
+
+function isFutureTime(value?: string): boolean {
+  if (!value) return false
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) && timestamp > Date.now()
+}
+
+function isUsageWindowExhausted(value?: number | null): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 100
+}
+
+function isActiveUsageWindowExhausted(value?: number | null, resetAt?: string): boolean {
+  return isUsageWindowExhausted(value) && (!resetAt || isFutureTime(resetAt))
+}
+
+function isPremiumUsagePlan(planType?: string): boolean {
+  return ['plus', 'pro', 'team', 'teamplus'].includes(normalizePlanType(planType))
+}
+
+type RateLimitWindow = '5h' | '7d'
+
+function isRateLimitedAccount(account: AccountRow): boolean {
+  return getAccountRateLimitWindow(account) !== null
+}
+
+function getAccountRateLimitWindow(account: AccountRow): RateLimitWindow | null {
+  const status = (account.status || '').toLowerCase()
+  const reason = (account.cooldown_reason || '').toLowerCase()
+  const explicitlyRateLimited = status === 'rate_limited' ||
+    status === 'usage_exhausted' ||
+    status === 'rate_limited_5h' ||
+    status === 'rate_limited_7d' ||
+    reason === 'rate_limited' ||
+    reason === 'rate_limited_5h' ||
+    reason === 'rate_limited_7d'
+  const has7dLimit = isActiveUsageWindowExhausted(account.usage_percent_7d, account.reset_7d_at)
+  const has5hLimit = isPremiumUsagePlan(account.plan_type) &&
+    isActiveUsageWindowExhausted(account.usage_percent_5h, account.reset_5h_at)
+
+  // Prefer the longer 7d window when both windows are exhausted so each account
+  // belongs to exactly one bucket and 5h + 7d stays equal to total limited.
+  if (
+    status === 'usage_exhausted' ||
+    status === 'rate_limited_7d' ||
+    reason === 'rate_limited_7d' ||
+    has7dLimit
+  ) {
+    return '7d'
+  }
+
+  if (
+    status === 'rate_limited_5h' ||
+    reason === 'rate_limited_5h' ||
+    has5hLimit
+  ) {
+    return '5h'
+  }
+
+  return explicitlyRateLimited ? '5h' : null
+}
+
+function getRateLimitedWindowStats(accounts: AccountRow[]): { total: number; fiveHour: number; sevenDay: number } {
+  const stats = accounts.reduce((stats, account) => {
+    const window = getAccountRateLimitWindow(account)
+    if (!window) {
+      return stats
+    }
+    if (window === '7d') {
+      stats.sevenDay += 1
+    } else {
+      stats.fiveHour += 1
+    }
+    return stats
+  }, { fiveHour: 0, sevenDay: 0 })
+
+  return {
+    ...stats,
+    total: stats.fiveHour + stats.sevenDay,
+  }
+}
+
+function isSubscriptionPlan(planType?: string): boolean {
+  const normalized = normalizePlanType(planType)
+  if (!normalized || normalized === 'free') return false
+  if (['plus', 'pro', 'team', 'teamplus', 'enterprise', 'business', 'edu', 'education'].includes(normalized)) {
+    return true
+  }
+  return normalized.includes('plus') ||
+    normalized.startsWith('pro') ||
+    normalized.startsWith('team') ||
+    normalized.includes('enterprise') ||
+    normalized.includes('business')
+}
+
+interface HeaderActionMenuItem {
+  key: string
+  label: string
+  icon: ReactNode
+  disabled?: boolean
+  title?: string
+  onSelect: () => void
+}
+
+function HeaderActionMenu({
+  label,
+  icon,
+  items,
+}: {
+  label: string
+  icon: ReactNode
+  items: HeaderActionMenuItem[]
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleEscape)
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [open])
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {icon}
+        {label}
+        <ChevronDown className={`size-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </Button>
+
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-56 overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm">
+          <div role="menu" className="space-y-0.5">
+            {items.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="menuitem"
+                disabled={item.disabled}
+                title={item.title}
+                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => {
+                  if (item.disabled) return
+                  setOpen(false)
+                  item.onSelect()
+                }}
+              >
+                <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">{item.icon}</span>
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function formatPlanLabel(planType?: string): string {
+  const raw = (planType || '').trim()
+  if (!raw) return '-'
+  const lower = raw.toLowerCase()
+  if (lower === 'prolite' || lower === 'pro_lite' || lower === 'pro-lite') return 'ProLite'
+  return raw
+}
+
+function PlanBadge({ planType }: { planType?: string }) {
+  const label = formatPlanLabel(planType)
+  if (label === '-') return <span className="text-[12px] text-muted-foreground">-</span>
+
+  const style: Record<string, string> = {
+    pro: 'bg-violet-100 text-violet-700 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/30',
+    prolite: 'bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25',
+    plus: 'bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30',
+    team: 'bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30',
+    free: 'bg-zinc-100 text-zinc-500 ring-zinc-400/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-400/15',
+  }
+
+  const normalized = normalizePlanType(planType)
+  const key = normalized === 'pro' && label === 'ProLite' ? 'prolite' : normalized
+  const cls = style[key] || 'bg-slate-100 text-slate-600 ring-slate-400/20 dark:bg-slate-500/15 dark:text-slate-300 dark:ring-slate-400/20'
+
+  return (
+    <span className={`inline-flex items-center rounded-md px-2.5 py-1 text-[13px] font-semibold ring-1 ring-inset ${cls}`}>
+      {label}
+    </span>
+  )
+}
+
 function getDefaultScoreBias(planType?: string): number {
-  switch ((planType || '').toLowerCase()) {
+  switch (normalizePlanType(planType)) {
     case 'pro':
     case 'plus':
     case 'team':
@@ -1933,11 +3140,13 @@ function CompactStat({
   chipLabel,
   value,
   tone,
+  details,
 }: {
   label: string
   chipLabel?: string
   value: number
   tone: 'neutral' | 'success' | 'warning' | 'danger'
+  details?: Array<{ label: string; value: number }>
 }) {
   const toneStyle = {
     neutral: {
@@ -1959,14 +3168,27 @@ function CompactStat({
   }[tone]
 
   return (
-    <div className="flex items-center justify-between rounded-2xl border border-border bg-white/65 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+    <div className="flex min-h-[88px] items-center justify-between gap-3 rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
       <div className="min-w-0">
         <div className="text-[12px] font-semibold text-muted-foreground">{label}</div>
-        <div className="mt-1 text-[24px] font-bold leading-none tracking-tight text-foreground">{value}</div>
+        <div className="mt-1 text-[24px] font-bold leading-none text-foreground">{value}</div>
       </div>
-      <div className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle.chip}`}>
-        <span className={`size-2 rounded-full ${toneStyle.dot}`} />
-        {chipLabel ?? label}
+      <div className="flex min-h-[58px] shrink-0 flex-col items-end gap-1.5">
+        <div className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-semibold ${toneStyle.chip}`}>
+          <span className={`size-2 rounded-full ${toneStyle.dot}`} />
+          {chipLabel ?? label}
+        </div>
+        {details && details.length > 0 && (
+          <div className="flex flex-col items-end gap-0.5 text-[11px] font-semibold leading-4 text-muted-foreground">
+            {details.map((item) => (
+              <div key={item.label} className="grid grid-cols-[2ch_auto_max-content] items-center gap-x-0.5 tabular-nums">
+                <span className="justify-self-start">{item.label}</span>
+                <span className="justify-self-center">：</span>
+                <span className="justify-self-end text-foreground">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -2051,6 +3273,40 @@ function formatTestOutput(text: string) {
   }
 }
 
+const DEFAULT_TEST_MODEL = 'gpt-5.4'
+
+function isConnectionTestModel(model: string) {
+  const value = model.trim().toLowerCase()
+  return value !== '' && !value.includes('image')
+}
+
+function extractTextModels(modelsResp: Awaited<ReturnType<typeof api.getModels>>) {
+  if (modelsResp.items && modelsResp.items.length > 0) {
+    return modelsResp.items
+      .filter((item) => item.enabled && item.category !== 'image' && !item.id.includes('image'))
+      .map((item) => item.id)
+  }
+  return (modelsResp.models ?? []).filter(isConnectionTestModel)
+}
+
+function uniqueTestModels(models: string[], preferredModel?: string, includeDefault = true) {
+  const seen = new Set<string>()
+  const result: string[] = []
+  const candidates = [
+    preferredModel ?? '',
+    ...models,
+    ...(includeDefault ? [DEFAULT_TEST_MODEL] : []),
+  ]
+
+  for (const model of candidates) {
+    const value = model.trim()
+    if (!isConnectionTestModel(value) || seen.has(value)) continue
+    seen.add(value)
+    result.push(value)
+  }
+  return result
+}
+
 function TestConnectionModal({
   account,
   onClose,
@@ -2065,6 +3321,9 @@ function TestConnectionModal({
   const [status, setStatus] = useState<'connecting' | 'streaming' | 'success' | 'error'>('connecting')
   const [errorMsg, setErrorMsg] = useState('')
   const [model, setModel] = useState('')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [modelOptions, setModelOptions] = useState<string[]>([])
+  const [modelOptionsReady, setModelOptionsReady] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const outputEndRef = useRef<HTMLDivElement>(null)
   const settledRef = useRef(false)
@@ -2077,11 +3336,70 @@ function TestConnectionModal({
     onSettledRef.current()
   }, [])
 
+  const isOpenAIResponsesAccount = Boolean(account.openai_responses_api)
+
+  const modelSelectOptions = useMemo(
+    () => uniqueTestModels(modelOptions, selectedModel, !isOpenAIResponsesAccount).map((item) => ({ label: item, value: item })),
+    [isOpenAIResponsesAccount, modelOptions, selectedModel]
+  )
+
   useEffect(() => {
+    let active = true
+
+    const loadModels = async () => {
+      try {
+        const settings = await api.getSettings()
+        if (!active) return
+
+        if (isOpenAIResponsesAccount) {
+          const accountModels = (account.models ?? []).filter(isConnectionTestModel)
+          const preferredModel = accountModels.find(item => item.toLowerCase() === settings.test_model.toLowerCase()) ?? accountModels[0]
+          const nextModels = uniqueTestModels(accountModels, preferredModel, false)
+          setModelOptions(nextModels)
+          setSelectedModel((current) => current || nextModels[0] || '')
+          return
+        }
+
+        const modelsResp = await api.getModels()
+        if (!active) return
+        const upstreamModels = extractTextModels(modelsResp)
+        const preferredModel = isConnectionTestModel(settings.test_model) ? settings.test_model : DEFAULT_TEST_MODEL
+        const nextModels = uniqueTestModels(upstreamModels, preferredModel)
+        setModelOptions(nextModels)
+        setSelectedModel((current) => current || nextModels[0] || DEFAULT_TEST_MODEL)
+      } catch {
+        if (!active) return
+        if (isOpenAIResponsesAccount) {
+          const fallbackModels = uniqueTestModels((account.models ?? []).filter(isConnectionTestModel), undefined, false)
+          setModelOptions(fallbackModels)
+          setSelectedModel((current) => current || fallbackModels[0] || '')
+        } else {
+          const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL)
+          setModelOptions(fallbackModels)
+          setSelectedModel((current) => current || fallbackModels[0])
+        }
+      } finally {
+        if (active) {
+          setModelOptionsReady(true)
+        }
+      }
+    }
+
+    void loadModels()
+
+    return () => {
+      active = false
+    }
+  }, [account.models, isOpenAIResponsesAccount])
+
+  useEffect(() => {
+    if (!modelOptionsReady || !selectedModel) return
+
     // 重置状态（StrictMode 二次 mount 时清理上一次的残留）
     setOutput([])
     setStatus('connecting')
     setErrorMsg('')
+    setModel(selectedModel)
     settledRef.current = false
 
     const controller = new AbortController()
@@ -2091,7 +3409,8 @@ function TestConnectionModal({
       if (controller.signal.aborted) return
 
       try {
-        const res = await fetch(`/api/admin/accounts/${account.id}/test`, {
+        const params = new URLSearchParams({ model: selectedModel })
+        const res = await fetch(`/api/admin/accounts/${account.id}/test?${params.toString()}`, {
           signal: controller.signal,
           headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {},
         })
@@ -2131,7 +3450,7 @@ function TestConnectionModal({
 
               switch (event.type) {
                 case 'test_start':
-                  setModel(event.model || '')
+                  setModel(event.model || selectedModel)
                   setStatus('streaming')
                   break
                 case 'content':
@@ -2194,7 +3513,7 @@ function TestConnectionModal({
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [account.id, markSettled, t])
+  }, [account.id, markSettled, modelOptionsReady, selectedModel, t])
 
   useEffect(() => {
     outputEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -2218,7 +3537,7 @@ function TestConnectionModal({
   return (
     <Modal
       show={true}
-      title={t('accounts.testConnectionTitle', { account: account.email || `ID ${account.id}` })}
+      title={t('accounts.testConnectionTitle', { account: formatAccountName(account) })}
       onClose={() => {
         abortRef.current?.abort()
         onClose()
@@ -2241,16 +3560,20 @@ function TestConnectionModal({
           <span className={`flex items-center gap-1.5 text-sm font-semibold ${statusColor}`}>
             {statusLabel}
           </span>
-          {model && (
-            <span className="max-w-full rounded-md bg-muted px-2 py-0.5 font-mono text-xs break-all text-muted-foreground">
-              {model}
-            </span>
-          )}
+          <Select
+            className="w-52 max-w-full"
+            compact
+            value={selectedModel}
+            onValueChange={setSelectedModel}
+            options={modelSelectOptions}
+            placeholder={model || t('settings.testModel')}
+            disabled={!modelOptionsReady || modelSelectOptions.length === 0}
+          />
         </div>
 
         {(output.length > 0 || status === 'connecting' || status === 'streaming') && (
           <div
-            className="min-h-[80px] max-h-[240px] overflow-auto rounded-xl border border-border bg-muted/30 p-3 text-[20px] leading-[1.8] whitespace-pre-wrap break-all"
+            className="min-h-[80px] max-h-[240px] overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-[13px] leading-relaxed whitespace-pre-wrap break-all"
             style={{ fontFamily: 'var(--font-geist-mono)' }}
           >
             {output.length === 0 && status === 'connecting' && (
@@ -2265,7 +3588,7 @@ function TestConnectionModal({
           <div className="max-h-[40vh] overflow-auto rounded-xl border border-red-200 bg-red-50 p-3.5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
             <div className="mb-2 text-sm font-semibold">{t('accounts.failureDetails')}</div>
             <pre
-              className="text-[20px] leading-[1.8] whitespace-pre-wrap break-all"
+              className="text-[13px] leading-relaxed whitespace-pre-wrap break-all"
               style={{ fontFamily: 'var(--font-geist-mono)' }}
             >
               {formattedErrorMsg}
@@ -2293,6 +3616,17 @@ function formatResetAt(resetAt: string | undefined): string | null {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+function formatCompactUsageNumber(value?: number): string {
+  const n = Number(value || 0)
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`
+  return String(n)
+}
+
+function hasUsageWindowDetail(detail?: AccountRow['usage_5h_detail']): boolean {
+  return Boolean(detail && ((detail.requests ?? 0) > 0 || (detail.tokens ?? 0) > 0))
+}
+
 // 用量进度条颜色
 function usageBarColor(pct: number): string {
   if (pct >= 90) return 'bg-red-500'
@@ -2301,8 +3635,11 @@ function usageBarColor(pct: number): string {
 }
 
 // 单行用量进度条
-function UsageBar({ label, pct, resetAt }: { label: string; pct: number; resetAt?: string }) {
+function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number; resetAt?: string; detail?: AccountRow['usage_5h_detail'] }) {
   const resetText = formatResetAt(resetAt)
+  const detailText = hasUsageWindowDetail(detail)
+    ? `${formatCompactUsageNumber(detail?.requests)} req / ${formatCompactUsageNumber(detail?.tokens)} tok`
+    : ''
   return (
     <div>
       <div className="flex items-center gap-1.5">
@@ -2312,44 +3649,102 @@ function UsageBar({ label, pct, resetAt }: { label: string; pct: number; resetAt
         </div>
         <span className="text-[12px] font-semibold w-[42px] text-right shrink-0">{pct.toFixed(1)}%</span>
       </div>
+      {detailText && <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">{detailText}</div>}
       {resetText && <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">⏱ {resetText}</div>}
+    </div>
+  )
+}
+
+function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow['usage_5h_detail'] }) {
+  if (!detail || !hasUsageWindowDetail(detail)) return null
+
+  const accountBilledText = typeof detail.account_billed === 'number' ? detail.account_billed.toFixed(4) : ''
+  const userBilledText = typeof detail.user_billed === 'number' ? detail.user_billed.toFixed(4) : ''
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <span className="w-5 shrink-0">{label}</span>
+        <span>{formatCompactUsageNumber(detail?.requests)} req / {formatCompactUsageNumber(detail?.tokens)} tok</span>
+      </div>
+      {(accountBilledText || userBilledText) && (
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
+          {accountBilledText && <span>账号: ${accountBilledText}</span>}
+          {userBilledText && <span>用户: ${userBilledText}</span>}
+        </div>
+      )}
     </div>
   )
 }
 
 // 用量列组件
 function UsageCell({ account }: { account: AccountRow }) {
-  const plan = (account.plan_type || '').toLowerCase()
+  const plan = normalizePlanType(account.plan_type)
   const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
   const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+  const has7dDetail = hasUsageWindowDetail(account.usage_7d_detail)
+  const has5hDetail = hasUsageWindowDetail(account.usage_5h_detail)
 
   if (plan === 'free') {
-    if (!has7d) return <span className="text-[12px] text-muted-foreground">-</span>
+    if (!has7d && !has7dDetail) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
+      <div className="w-48">
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }
 
   if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
-    if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">-</span>
+    if (!has5h && !has7d && !has5hDetail && !has7dDetail) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-48 space-y-1.5">
-        {has5h && <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} />}
-        {has7d && <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />}
+      <div className="w-52 space-y-1.5">
+        {has5h ? (
+          <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} detail={account.usage_5h_detail} />
+        ) : (
+          <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
+        )}
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }
 
-  if (has7d) {
+  if (has7d || has7dDetail) {
     return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
+      <div className="w-48">
+        {has7d ? (
+          <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} detail={account.usage_7d_detail} />
+        ) : (
+          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+        )}
       </div>
     )
   }
   return <span className="text-[13px] text-muted-foreground">-</span>
+}
+
+function getAccountStatusCountdownUntil(account: AccountRow): string | undefined {
+  const status = account.status
+  if (account.cooldown_until && (status === 'rate_limited' || status === 'error' || status === 'cooldown')) {
+    return account.cooldown_until
+  }
+  if (status === 'usage_exhausted') {
+    return account.reset_7d_at
+  }
+  return undefined
+}
+
+function AccountStatusCountdown({ account }: { account: AccountRow }) {
+  const until = getAccountStatusCountdownUntil(account)
+  if (!until) return null
+  return <CooldownTimer until={until} />
 }
 
 // 冷却倒计时组件
@@ -2383,5 +3778,10 @@ function CooldownTimer({ until }: { until: string }) {
   }, [until])
 
   if (!remaining) return null
-  return <span className="text-[11px] font-mono text-amber-600">⏳ {remaining}</span>
+  return (
+    <span className="inline-flex h-6 min-w-[112px] shrink-0 items-center justify-center gap-1.5 rounded-full bg-amber-50 px-2 text-[11px] font-mono leading-none tabular-nums text-amber-700 ring-1 ring-inset ring-amber-200/70 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-400/20">
+      <Hourglass className="size-3 shrink-0" aria-hidden="true" />
+      {remaining}
+    </span>
+  )
 }

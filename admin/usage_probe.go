@@ -25,7 +25,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	}
 
 	payload := buildTestPayload(h.store.GetTestModel())
-	resp, err := proxy.ExecuteRequest(ctx, account, payload, "", "", "", nil, nil)
+	resp, err := proxy.ExecuteRequest(ctx, account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 		return nil
 	case http.StatusTooManyRequests:
 		h.store.ReportRequestFailure(account, "client", 0)
-		proxy.Apply429Cooldown(h.store, account, nil, resp)
+		proxy.Apply429Cooldown(h.store, account, nil, resp, h.store.GetTestModel())
 		return nil
 	default:
 		if resp.StatusCode >= 500 {

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoadDefaultsToPostgresAndRedis(t *testing.T) {
 	keys := []string{
@@ -18,8 +21,11 @@ func TestLoadDefaultsToPostgresAndRedis(t *testing.T) {
 		"DATABASE_SSLMODE",
 		"CACHE_DRIVER",
 		"REDIS_ADDR",
+		"REDIS_USERNAME",
 		"REDIS_PASSWORD",
 		"REDIS_DB",
+		"REDIS_TLS",
+		"REDIS_INSECURE_SKIP_VERIFY",
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -70,8 +76,11 @@ func TestLoadAllowsExplicitSQLiteAndMemory(t *testing.T) {
 		"DATABASE_SSLMODE",
 		"CACHE_DRIVER",
 		"REDIS_ADDR",
+		"REDIS_USERNAME",
 		"REDIS_PASSWORD",
 		"REDIS_DB",
+		"REDIS_TLS",
+		"REDIS_INSECURE_SKIP_VERIFY",
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -113,8 +122,11 @@ func TestLoadReadsAdminSecretFromEnv(t *testing.T) {
 		"DATABASE_SSLMODE",
 		"CACHE_DRIVER",
 		"REDIS_ADDR",
+		"REDIS_USERNAME",
 		"REDIS_PASSWORD",
 		"REDIS_DB",
+		"REDIS_TLS",
+		"REDIS_INSECURE_SKIP_VERIFY",
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -150,8 +162,11 @@ func TestLoadReadsMaxRequestBodySizeFromEnv(t *testing.T) {
 		"DATABASE_SSLMODE",
 		"CACHE_DRIVER",
 		"REDIS_ADDR",
+		"REDIS_USERNAME",
 		"REDIS_PASSWORD",
 		"REDIS_DB",
+		"REDIS_TLS",
+		"REDIS_INSECURE_SKIP_VERIFY",
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -168,5 +183,184 @@ func TestLoadReadsMaxRequestBodySizeFromEnv(t *testing.T) {
 
 	if got := cfg.MaxRequestBodySize; got != 64*1024*1024 {
 		t.Fatalf("MaxRequestBodySize = %d, want %d", got, 64*1024*1024)
+	}
+}
+
+func TestLoadDefaultsCodexUpstreamTransportToHTTP(t *testing.T) {
+	t.Setenv("DATABASE_DRIVER", "")
+	t.Setenv("DATABASE_HOST", "postgres")
+	t.Setenv("CACHE_DRIVER", "")
+	t.Setenv("REDIS_ADDR", "redis:6379")
+	t.Setenv("CODEX_UPSTREAM_TRANSPORT", "")
+	t.Setenv("USE_WEBSOCKET", "")
+
+	cfg, err := Load("__not_exists__.env")
+	if err != nil {
+		t.Fatalf("Load() 返回错误: %v", err)
+	}
+	if got := cfg.CodexUpstreamTransport; got != "http" {
+		t.Fatalf("CodexUpstreamTransport = %q, want http", got)
+	}
+	if cfg.UseWebsocket {
+		t.Fatal("UseWebsocket = true, want false")
+	}
+}
+
+func TestLoadHonorsCodexUpstreamTransportWS(t *testing.T) {
+	t.Setenv("DATABASE_DRIVER", "")
+	t.Setenv("DATABASE_HOST", "postgres")
+	t.Setenv("CACHE_DRIVER", "")
+	t.Setenv("REDIS_ADDR", "redis:6379")
+	t.Setenv("CODEX_UPSTREAM_TRANSPORT", "websocket")
+	t.Setenv("USE_WEBSOCKET", "")
+
+	cfg, err := Load("__not_exists__.env")
+	if err != nil {
+		t.Fatalf("Load() 返回错误: %v", err)
+	}
+	if got := cfg.CodexUpstreamTransport; got != "ws" {
+		t.Fatalf("CodexUpstreamTransport = %q, want ws", got)
+	}
+	if !cfg.UseWebsocket {
+		t.Fatal("UseWebsocket = false, want true")
+	}
+}
+
+func TestLoadKeepsLegacyUseWebsocketCompatibility(t *testing.T) {
+	t.Setenv("DATABASE_DRIVER", "")
+	t.Setenv("DATABASE_HOST", "postgres")
+	t.Setenv("CACHE_DRIVER", "")
+	t.Setenv("REDIS_ADDR", "redis:6379")
+	t.Setenv("CODEX_UPSTREAM_TRANSPORT", "")
+	t.Setenv("USE_WEBSOCKET", "true")
+
+	cfg, err := Load("__not_exists__.env")
+	if err != nil {
+		t.Fatalf("Load() 返回错误: %v", err)
+	}
+	if got := cfg.CodexUpstreamTransport; got != "ws" {
+		t.Fatalf("CodexUpstreamTransport = %q, want ws", got)
+	}
+	if !cfg.UseWebsocket {
+		t.Fatal("UseWebsocket = false, want true")
+	}
+}
+
+func TestLoadReadsRedisTLSSettings(t *testing.T) {
+	keys := []string{
+		"CODEX_PORT",
+		"CODEX_MAX_REQUEST_BODY_SIZE_MB",
+		"PORT",
+		"ADMIN_SECRET",
+		"DATABASE_DRIVER",
+		"DATABASE_PATH",
+		"DATABASE_HOST",
+		"DATABASE_PORT",
+		"DATABASE_USER",
+		"DATABASE_PASSWORD",
+		"DATABASE_NAME",
+		"DATABASE_SSLMODE",
+		"CACHE_DRIVER",
+		"REDIS_ADDR",
+		"REDIS_USERNAME",
+		"REDIS_PASSWORD",
+		"REDIS_DB",
+		"REDIS_TLS",
+		"REDIS_INSECURE_SKIP_VERIFY",
+	}
+	for _, key := range keys {
+		t.Setenv(key, "")
+	}
+
+	t.Setenv("DATABASE_HOST", "postgres")
+	t.Setenv("REDIS_ADDR", "rediss://default:url-pass@example.upstash.io:6379/2")
+	t.Setenv("REDIS_USERNAME", "env-user")
+	t.Setenv("REDIS_PASSWORD", "env-pass")
+	t.Setenv("REDIS_DB", "3")
+	t.Setenv("REDIS_TLS", "true")
+	t.Setenv("REDIS_INSECURE_SKIP_VERIFY", "1")
+
+	cfg, err := Load("__not_exists__.env")
+	if err != nil {
+		t.Fatalf("Load() 返回错误: %v", err)
+	}
+
+	if got := cfg.Cache.Redis.Addr; got != "rediss://default:url-pass@example.upstash.io:6379/2" {
+		t.Fatalf("Redis.Addr = %q, want rediss URL", got)
+	}
+	if got := cfg.Cache.Redis.Username; got != "env-user" {
+		t.Fatalf("Redis.Username = %q, want env-user", got)
+	}
+	if got := cfg.Cache.Redis.Password; got != "env-pass" {
+		t.Fatalf("Redis.Password = %q, want env-pass", got)
+	}
+	if got := cfg.Cache.Redis.DB; got != 3 {
+		t.Fatalf("Redis.DB = %d, want 3", got)
+	}
+	if !cfg.Cache.Redis.TLS {
+		t.Fatal("Redis.TLS = false, want true")
+	}
+	if !cfg.Cache.Redis.InsecureSkipVerify {
+		t.Fatal("Redis.InsecureSkipVerify = false, want true")
+	}
+}
+
+func TestLoadAcceptsValidDatabaseSchema(t *testing.T) {
+	t.Setenv("DATABASE_DRIVER", "")
+	t.Setenv("DATABASE_HOST", "postgres")
+	t.Setenv("DATABASE_NAME", "postgres")
+	t.Setenv("DATABASE_SCHEMA", "codex2api")
+	t.Setenv("CACHE_DRIVER", "")
+	t.Setenv("REDIS_ADDR", "redis:6379")
+
+	cfg, err := Load("__not_exists__.env")
+	if err != nil {
+		t.Fatalf("Load() 返回错误: %v", err)
+	}
+	if got := cfg.Database.Schema; got != "codex2api" {
+		t.Fatalf("Database.Schema = %q, want codex2api", got)
+	}
+	dsn := cfg.Database.DSN()
+	if !strings.Contains(dsn, "options='-c search_path=codex2api,public'") {
+		t.Fatalf("DSN 未包含 search_path 选项: %s", dsn)
+	}
+}
+
+func TestLoadRejectsInvalidDatabaseSchema(t *testing.T) {
+	cases := []string{
+		"public; DROP TABLE users",
+		"with space",
+		"1leading-digit",
+		"with-dash",
+		"中文",
+		strings.Repeat("a", 64),
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DATABASE_DRIVER", "")
+			t.Setenv("DATABASE_HOST", "postgres")
+			t.Setenv("DATABASE_SCHEMA", name)
+			t.Setenv("CACHE_DRIVER", "")
+			t.Setenv("REDIS_ADDR", "redis:6379")
+
+			if _, err := Load("__not_exists__.env"); err == nil {
+				t.Fatalf("非法 schema %q 应当被拒绝，但 Load() 通过了", name)
+			}
+		})
+	}
+}
+
+func TestDSNOmitsSchemaWhenEmpty(t *testing.T) {
+	d := DatabaseConfig{
+		Driver:   "postgres",
+		Host:     "h",
+		Port:     5432,
+		User:     "u",
+		Password: "p",
+		DBName:   "db",
+		SSLMode:  "disable",
+	}
+	if got := d.DSN(); strings.Contains(got, "search_path") {
+		t.Fatalf("空 schema 时 DSN 不应包含 search_path: %s", got)
 	}
 }

@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router-dom'
-import { ArrowLeft, RefreshCw } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { api } from '../api'
+import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import StatusBadge from '../components/StatusBadge'
 import type { AccountRow, OpsOverviewResponse } from '../types'
+import { formatCompactEmail } from '../lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -157,12 +158,6 @@ export default function SchedulerBoard() {
           description={t('scheduler.description')}
           actions={
             <div className="flex items-center gap-3 max-sm:w-full max-sm:flex-col max-sm:items-stretch">
-              <Button variant="outline" asChild>
-                <Link to="/ops">
-                  <ArrowLeft className="size-3.5" />
-                  {t('nav.ops')}
-                </Link>
-              </Button>
               <span className="text-sm text-muted-foreground max-sm:text-center">{t('scheduler.lastUpdated', { time: updatedLabel })}</span>
               <Button variant="outline" onClick={() => void reload()}>
                 <RefreshCw className="size-3.5" />
@@ -171,6 +166,7 @@ export default function SchedulerBoard() {
             </div>
           }
         />
+        <OpsTabs />
 
         {overview ? (
           <>
@@ -217,7 +213,7 @@ export default function SchedulerBoard() {
                   />
                 </div>
 
-                <div className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-white/45 dark:bg-white/5 px-4 py-3">
+                <div className="mt-5 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card/75 px-4 py-3">
                   <span className="text-[12px] font-semibold text-muted-foreground">{t('scheduler.filter')}</span>
                   <div className="w-[180px]">
                     <Select
@@ -253,11 +249,11 @@ export default function SchedulerBoard() {
                   <>
                     <div className="mt-5 grid gap-3 md:grid-cols-2">
                     {pagedAccounts.map((account) => (
-                      <div key={account.id} className="rounded-2xl border border-border bg-white/50 dark:bg-white/5 px-4 py-3">
+                      <div key={account.id} className="rounded-lg border border-border bg-card/75 px-4 py-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="truncate text-[14px] font-semibold text-foreground">
-                              {account.email || `ID ${account.id}`}
+                              {account.email ? formatCompactEmail(account.email) : `ID ${account.id}`}
                             </div>
                             <div className="mt-1 text-[12px] text-muted-foreground">
                               {t('scheduler.score')} {Math.round(getDispatchScore(account))} · {t('scheduler.concurrency')} {account.dynamic_concurrency_limit ?? '-'} · {t('scheduler.plan')} {account.plan_type || '-'}
@@ -298,7 +294,7 @@ export default function SchedulerBoard() {
                     </div>
                   </>
                 ) : (
-                  <div className="mt-5 rounded-2xl border border-border bg-white/40 dark:bg-white/5 px-4 py-4 text-sm text-muted-foreground">
+                  <div className="mt-5 rounded-lg border border-border bg-card/70 px-4 py-4 text-sm text-muted-foreground">
                     {t('scheduler.noRiskAccounts')}
                   </div>
                 )}
@@ -313,9 +309,9 @@ export default function SchedulerBoard() {
 
 function SummaryPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-border bg-white/65 dark:bg-white/5 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] dark:shadow-none">
-      <div className="text-[12px] font-bold tracking-[0.14em] uppercase text-muted-foreground">{label}</div>
-      <div className="mt-2 text-[20px] font-bold tracking-tight text-foreground">{value}</div>
+    <div className="rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
+      <div className="text-[12px] font-bold uppercase text-muted-foreground">{label}</div>
+      <div className="mt-2 text-[20px] font-bold text-foreground">{value}</div>
     </div>
   )
 }
@@ -362,9 +358,9 @@ function MiniOpsCard({
   }[tone]
 
   return (
-    <div className="rounded-2xl border border-border bg-white/45 dark:bg-white/5 px-4 py-4">
+    <div className="rounded-lg border border-border bg-card/75 px-4 py-4">
       <div className="text-[12px] font-semibold text-muted-foreground">{label}</div>
-      <div className="mt-2 text-[28px] font-bold leading-none tracking-tight text-foreground">{value}</div>
+      <div className="mt-2 text-[28px] font-bold leading-none text-foreground">{value}</div>
       <div className={`mt-3 inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${toneStyle}`}>
         {sub}
       </div>
@@ -428,6 +424,9 @@ function buildScoreReasonTags(account: AccountRow, t: any) {
   }
   if (breakdown.usage_penalty_7d > 0) {
     tags.push({ label: `7d -${Math.round(breakdown.usage_penalty_7d)}`, className: 'border-transparent bg-fuchsia-500/10 text-fuchsia-600 dark:bg-fuchsia-500/20 dark:text-fuchsia-300' })
+  }
+  if ((breakdown.usage_urgency_bonus_5h ?? 0) > 0) {
+    tags.push({ label: `${t('scheduler.reason5hUrgency')} +${Math.round(breakdown.usage_urgency_bonus_5h ?? 0)}`, className: 'border-transparent bg-teal-500/10 text-teal-700 dark:bg-teal-500/20 dark:text-teal-300' })
   }
   if (breakdown.latency_penalty > 0) {
     tags.push({ label: `${t('scheduler.reasonLatency')} -${Math.round(breakdown.latency_penalty)}`, className: 'border-transparent bg-cyan-500/10 text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-300' })

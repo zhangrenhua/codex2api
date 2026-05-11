@@ -3,11 +3,23 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+// schemaNameRegex 限定 PostgreSQL schema 名为 ASCII 标识符，避免 DSN/DDL 注入。
+var schemaNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// IsValidSchemaName 校验 PostgreSQL schema 名（首字母为字母或下划线，余下为字母/数字/下划线，长度 ≤63）。
+func IsValidSchemaName(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	return schemaNameRegex.MatchString(name)
+}
 
 // DatabaseConfig 数据库核心配置。
 type DatabaseConfig struct {
@@ -18,6 +30,7 @@ type DatabaseConfig struct {
 	User     string
 	Password string
 	DBName   string
+	Schema   string // PostgreSQL schema（search_path）；空值保持数据库默认行为
 	SSLMode  string
 }
 
@@ -30,8 +43,14 @@ func (d *DatabaseConfig) DSN() string {
 	if sslMode == "" {
 		sslMode = "disable"
 	}
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		d.Host, d.Port, d.User, d.Password, d.DBName, sslMode)
+	if d.Schema != "" {
+		// 通过 libpq options 在连接启动时设置 search_path，覆盖连接池中的所有连接。
+		// schema 已在 Load() 阶段做白名单校验，此处可安全拼接。
+		dsn += fmt.Sprintf(" options='-c search_path=%s,public'", d.Schema)
+	}
+	return dsn
 }
 
 // Label 返回用于展示的数据库标签。
@@ -44,9 +63,12 @@ func (d *DatabaseConfig) Label() string {
 
 // RedisConfig Redis 核心配置
 type RedisConfig struct {
-	Addr     string
-	Password string
-	DB       int
+	Addr               string
+	Username           string
+	Password           string
+	DB                 int
+	TLS                bool
+	InsecureSkipVerify bool
 }
 
 // CacheConfig 缓存核心配置。
@@ -66,12 +88,15 @@ func (c *CacheConfig) Label() string {
 // Config 全局核心环境配置（物理隔离的服务器参数）
 // 业务逻辑参数（如 ProxyURL，APIKeys，MaxConcurrency）已全部移至数据库 SystemSettings 进行化
 type Config struct {
-	Port           int
-	AdminSecret    string
-	MaxRequestBodySize int
-	Database       DatabaseConfig
-	Cache          CacheConfig
-	UseWebsocket   bool   // 是否启用 WebSocket 传输
+	Port                   int
+	BindAddress            string // 监听地址，默认 0.0.0.0（兼容 Docker / 反代 / 公网）；如需仅本机访问可设为 127.0.0.1
+	AdminSecret            string
+	AllowAnonymousV1       bool // 显式允许 /v1/* 在未配置 API Key 时无鉴权放行（默认禁止）
+	MaxRequestBodySize     int
+	Database               DatabaseConfig
+	Cache                  CacheConfig
+	UseWebsocket           bool   // 是否启用 WebSocket 传输
+	CodexUpstreamTransport string // http|auto|ws，默认 http；USE_WEBSOCKET 作为旧开关兼容
 }
 
 // Load 从 .env 文件加载核心环境配置，支持环境变量覆盖
@@ -94,14 +119,30 @@ func Load(envPath string) (*Config, error) {
 		fmt.Sscanf(port, "%d", &cfg.Port)
 	}
 	cfg.AdminSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
+	cfg.AllowAnonymousV1 = parseBoolEnv(os.Getenv("CODEX_ALLOW_ANONYMOUS"))
+	// 默认绑 0.0.0.0 以兼容 Docker 端口映射、反向代理、生产服务器等常规部署。
+	// 安全防护由 fail-closed 中间件 + 首启自助初始化 (/api/admin/bootstrap) + 启动 banner 共同保证；
+	// 想要严格仅本机访问的用户可设 CODEX_BIND=127.0.0.1。
+	cfg.BindAddress = strings.TrimSpace(os.Getenv("CODEX_BIND"))
+	if cfg.BindAddress == "" {
+		cfg.BindAddress = "0.0.0.0"
+	}
 	if v := strings.TrimSpace(os.Getenv("CODEX_MAX_REQUEST_BODY_SIZE_MB")); v != "" {
 		if mb, err := strconv.Atoi(v); err == nil && mb > 0 {
 			cfg.MaxRequestBodySize = mb * 1024 * 1024
 		}
 	}
 
-	// WebSocket 配置
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("USE_WEBSOCKET"))); v == "true" || v == "1" {
+	// Codex 上游传输配置。CODEX_UPSTREAM_TRANSPORT 优先；USE_WEBSOCKET 保留为旧开关。
+	cfg.CodexUpstreamTransport = normalizeCodexUpstreamTransport(os.Getenv("CODEX_UPSTREAM_TRANSPORT"))
+	if cfg.CodexUpstreamTransport == "" && parseBoolEnv(os.Getenv("USE_WEBSOCKET")) {
+		cfg.CodexUpstreamTransport = "ws"
+		cfg.UseWebsocket = true
+	}
+	if cfg.CodexUpstreamTransport == "" {
+		cfg.CodexUpstreamTransport = "http"
+	}
+	if cfg.CodexUpstreamTransport == "ws" {
 		cfg.UseWebsocket = true
 	}
 
@@ -117,19 +158,28 @@ func Load(envPath string) (*Config, error) {
 	cfg.Database.User = os.Getenv("DATABASE_USER")
 	cfg.Database.Password = os.Getenv("DATABASE_PASSWORD")
 	cfg.Database.DBName = os.Getenv("DATABASE_NAME")
+	if v := strings.TrimSpace(os.Getenv("DATABASE_SCHEMA")); v != "" {
+		if !IsValidSchemaName(v) {
+			return nil, fmt.Errorf("非法的 DATABASE_SCHEMA: %q（仅允许字母、数字、下划线，且不能以数字开头，长度不超过 63）", v)
+		}
+		cfg.Database.Schema = v
+	}
 	if v := os.Getenv("DATABASE_SSLMODE"); v != "" {
 		cfg.Database.SSLMode = v
 	}
 
 	// 缓存配置
 	cfg.Cache.Driver = normalizeDriver(os.Getenv("CACHE_DRIVER"), "redis")
-	cfg.Cache.Redis.Addr = os.Getenv("REDIS_ADDR")
+	cfg.Cache.Redis.Addr = strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	cfg.Cache.Redis.Username = strings.TrimSpace(os.Getenv("REDIS_USERNAME"))
 	cfg.Cache.Redis.Password = os.Getenv("REDIS_PASSWORD")
 	if v := os.Getenv("REDIS_DB"); v != "" {
 		if db, err := strconv.Atoi(v); err == nil {
 			cfg.Cache.Redis.DB = db
 		}
 	}
+	cfg.Cache.Redis.TLS = parseBoolEnv(os.Getenv("REDIS_TLS"))
+	cfg.Cache.Redis.InsecureSkipVerify = parseBoolEnv(os.Getenv("REDIS_INSECURE_SKIP_VERIFY"))
 
 	// 校验必填物理层配置
 	switch cfg.Database.Driver {
@@ -169,4 +219,26 @@ func normalizeDriver(value string, fallback string) string {
 		return fallback
 	}
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func parseBoolEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeCodexUpstreamTransport(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "http", "https", "sse":
+		return "http"
+	case "auto":
+		return "auto"
+	case "ws", "websocket", "wss":
+		return "ws"
+	default:
+		return ""
+	}
 }

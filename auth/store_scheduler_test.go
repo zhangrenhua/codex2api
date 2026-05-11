@@ -1,8 +1,13 @@
 package auth
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/codex2api/cache"
+	"github.com/codex2api/database"
 )
 
 func int64Ptr(v int64) *int64 {
@@ -118,8 +123,8 @@ func TestAccountBaseConcurrencyOverrideControlsDynamicLimit(t *testing.T) {
 
 func TestNeedsUsageProbeSkipsRateLimited(t *testing.T) {
 	acc := &Account{
-		AccessToken: "token",
-		Status:      StatusCooldown,
+		AccessToken:    "token",
+		Status:         StatusCooldown,
 		CooldownReason: "rate_limited",
 	}
 	if acc.NeedsUsageProbe(10 * time.Minute) {
@@ -129,8 +134,8 @@ func TestNeedsUsageProbeSkipsRateLimited(t *testing.T) {
 
 func TestNeedsUsageProbeSkipsUnauthorized(t *testing.T) {
 	acc := &Account{
-		AccessToken: "token",
-		Status:      StatusCooldown,
+		AccessToken:    "token",
+		Status:         StatusCooldown,
 		CooldownReason: "unauthorized",
 	}
 	if acc.NeedsUsageProbe(10 * time.Minute) {
@@ -146,6 +151,75 @@ func TestNeedsUsageProbeAllowsReadyAccount(t *testing.T) {
 	// UsagePercent7dValid = false，应该返回 true
 	if !acc.NeedsUsageProbe(10 * time.Minute) {
 		t.Fatal("NeedsUsageProbe should return true for ready account without valid usage data")
+	}
+}
+
+func TestRefreshSingleBypassesCachedAccessToken(t *testing.T) {
+	ctx := context.Background()
+	tokenCache := cache.NewMemory(1)
+	if err := tokenCache.SetAccessToken(ctx, 7, "cached-token", time.Hour); err != nil {
+		t.Fatalf("SetAccessToken 返回错误: %v", err)
+	}
+
+	store := NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&Account{
+		DBID:        7,
+		AccessToken: "old-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Status:      StatusReady,
+	})
+
+	err := store.RefreshSingle(ctx, 7)
+	if err == nil {
+		t.Fatal("RefreshSingle should force upstream refresh instead of using cached token")
+	}
+	if !strings.Contains(err.Error(), "refresh_token 为空") {
+		t.Fatalf("RefreshSingle error = %v, want missing refresh_token", err)
+	}
+}
+
+func TestApplyRefreshedPlanTypeKeepsFreeUsageLimitAuthoritative(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		PlanType:            "free",
+		UsagePercent7d:      100,
+		UsagePercent7dValid: true,
+		Reset7dAt:           now.Add(time.Hour),
+	}
+
+	acc.mu.Lock()
+	plan, applied := acc.applyRefreshedPlanTypeLocked("pro", now)
+	acc.mu.Unlock()
+
+	if plan != "pro" {
+		t.Fatalf("plan = %q, want pro", plan)
+	}
+	if applied {
+		t.Fatal("refreshed pro plan should not override active free usage-limit metadata")
+	}
+	if got := acc.GetPlanType(); got != "free" {
+		t.Fatalf("PlanType = %q, want free", got)
+	}
+}
+
+func TestApplyRefreshedPlanTypeAllowsPlanUpgradeAfterUsageReset(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		PlanType:            "free",
+		UsagePercent7d:      100,
+		UsagePercent7dValid: true,
+		Reset7dAt:           now.Add(-time.Minute),
+	}
+
+	acc.mu.Lock()
+	plan, applied := acc.applyRefreshedPlanTypeLocked("pro", now)
+	acc.mu.Unlock()
+
+	if plan != "pro" || !applied {
+		t.Fatalf("plan=%q applied=%v, want pro true", plan, applied)
+	}
+	if got := acc.GetPlanType(); got != "pro" {
+		t.Fatalf("PlanType = %q, want pro", got)
 	}
 }
 
@@ -178,5 +252,95 @@ func TestStoreNextPrefersHigherDispatchScoreWithinTier(t *testing.T) {
 
 	if got.DBID != premium.DBID {
 		t.Fatalf("Next() picked dbID=%d, want premium account %d", got.DBID, premium.DBID)
+	}
+}
+
+func TestAccountPremium5hUrgencyBonusOnlyAffectsDispatchScore(t *testing.T) {
+	acc := &Account{
+		DBID:                1,
+		AccessToken:         "token",
+		Status:              StatusReady,
+		PlanType:            "plus",
+		UsagePercent5h:      20,
+		UsagePercent5hValid: true,
+		Reset5hAt:           time.Now().Add(30 * time.Minute),
+		UsagePercent7d:      45,
+		UsagePercent7dValid: true,
+		Reset7dAt:           time.Now().Add(4 * 24 * time.Hour),
+	}
+
+	snapshot := acc.GetSchedulerDebugSnapshot(4)
+
+	if snapshot.SchedulerScore != 100 {
+		t.Fatalf("SchedulerScore = %v, want 100", snapshot.SchedulerScore)
+	}
+	if snapshot.Breakdown.UsageUrgencyBonus5h <= 20 {
+		t.Fatalf("UsageUrgencyBonus5h = %v, want > 20", snapshot.Breakdown.UsageUrgencyBonus5h)
+	}
+	if snapshot.DispatchScore <= 170 {
+		t.Fatalf("DispatchScore = %v, want plan bias plus urgency bonus", snapshot.DispatchScore)
+	}
+	if snapshot.HealthTier != string(HealthTierHealthy) {
+		t.Fatalf("HealthTier = %q, want %q", snapshot.HealthTier, HealthTierHealthy)
+	}
+}
+
+func TestAccountPremium5hUrgencyBonusSkipsNearlyExhaustedWindow(t *testing.T) {
+	acc := &Account{
+		DBID:                1,
+		AccessToken:         "token",
+		Status:              StatusReady,
+		PlanType:            "plus",
+		UsagePercent5h:      96,
+		UsagePercent5hValid: true,
+		Reset5hAt:           time.Now().Add(30 * time.Minute),
+	}
+
+	snapshot := acc.GetSchedulerDebugSnapshot(4)
+
+	if snapshot.Breakdown.UsageUrgencyBonus5h != 0 {
+		t.Fatalf("UsageUrgencyBonus5h = %v, want 0", snapshot.Breakdown.UsageUrgencyBonus5h)
+	}
+	if snapshot.DispatchScore != 150 {
+		t.Fatalf("DispatchScore = %v, want only plan bias", snapshot.DispatchScore)
+	}
+}
+
+func TestStoreNextPrefersPremium5hResetSoonWithinTier(t *testing.T) {
+	now := time.Now()
+	soon := &Account{
+		DBID:                1,
+		AccessToken:         "token",
+		Status:              StatusReady,
+		PlanType:            "plus",
+		UsagePercent5h:      25,
+		UsagePercent5hValid: true,
+		Reset5hAt:           now.Add(30 * time.Minute),
+	}
+	later := &Account{
+		DBID:                2,
+		AccessToken:         "token",
+		Status:              StatusReady,
+		PlanType:            "plus",
+		UsagePercent5h:      25,
+		UsagePercent5hValid: true,
+		Reset5hAt:           now.Add(5 * time.Hour),
+	}
+	recomputeTestAccount(soon, 2)
+	recomputeTestAccount(later, 2)
+
+	store := &Store{
+		accounts: []*Account{later, soon},
+	}
+	store.SetMaxConcurrency(2)
+
+	got := store.Next()
+	if got == nil {
+		t.Fatal("Next() returned nil")
+	}
+	defer store.Release(got)
+
+	if got.DBID != soon.DBID {
+		t.Fatalf("Next() picked dbID=%d, want reset-soon account %d", got.DBID, soon.DBID)
 	}
 }

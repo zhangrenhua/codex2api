@@ -18,8 +18,8 @@ import (
 
 const (
 	responseCacheTTL        = 10 * time.Minute
-	responseCacheMaxItems   = 2000  // 缓存条目上限，防止内存膨胀
-	responseCacheMaxPerItem = 200   // 单条缓存最大 items 数，截断过长对话
+	responseCacheMaxItems   = 2000 // 缓存条目上限，防止内存膨胀
+	responseCacheMaxPerItem = 200  // 单条缓存最大 items 数，截断过长对话
 	responseCleanupInterval = 2 * time.Minute
 )
 
@@ -121,14 +121,30 @@ func expandPreviousResponse(codexBody []byte) ([]byte, string) {
 		return codexBody, ""
 	}
 
+	currentInput := gjson.GetBytes(codexBody, "input")
+
+	// 客户端已经自带 function_call 等续链项时，跳过注入。
+	// 缓存里只会存 function_call 类项（见 cacheCompletedResponse + isCodexToolCallContextType），
+	// 再注入会让同一 call_id 出现两次，上游会以 "duplicate call_id" 等 400 拒绝。
+	// 仍返回 prevID，让 cacheCompletedResponse 能把这一轮响应链入缓存。
+	if currentInput.IsArray() && inputHasToolCallContext(currentInput) {
+		log.Printf("input 已自带工具续链项，跳过 previous_response_id=%s 的历史注入", prevID)
+		return codexBody, prevID
+	}
+
 	cached := getResponseCache(prevID)
 	if cached == nil {
-		// 缓存未命中（首次请求 / 过期 / 其他实例），无法展开，按原样继续
+		// 缓存未命中（首次请求 / 过期 / 其他实例），无法展开，按原样继续。
+		// 若 input 仅含 function_call_output 又拿不到对应的 function_call，
+		// 上游通常会返回 "No tool call found for function call output" 400，
+		// 这里打日志便于诊断（不阻断，让上游错误透传给客户端）。
+		if currentInput.IsArray() && inputHasFunctionCallOutput(currentInput) {
+			log.Printf("缓存未命中且 input 含 function_call_output，previous_response_id=%s，上游可能返回 400", prevID)
+		}
 		return codexBody, prevID
 	}
 
 	// 构建新 input: 缓存的历史 items + 当前 input items
-	currentInput := gjson.GetBytes(codexBody, "input")
 	var merged []json.RawMessage
 	merged = append(merged, cached...)
 	if currentInput.IsArray() {
@@ -149,29 +165,59 @@ func expandPreviousResponse(codexBody []byte) ([]byte, string) {
 	return codexBody, prevID
 }
 
+// inputHasToolCallContext 判断 input 数组里是否已包含 function_call 类续链项，
+// 这类项一旦同时出现在缓存里会造成 call_id 冲突。
+func inputHasToolCallContext(input gjson.Result) bool {
+	found := false
+	input.ForEach(func(_, v gjson.Result) bool {
+		if isCodexToolCallContextType(v.Get("type").String()) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// inputHasFunctionCallOutput 判断 input 数组里是否含 *_output 项（缺少配对的 function_call 时上游会 400）。
+func inputHasFunctionCallOutput(input gjson.Result) bool {
+	found := false
+	input.ForEach(func(_, v gjson.Result) bool {
+		switch v.Get("type").String() {
+		case "function_call_output", "tool_call_output", "local_shell_call_output",
+			"tool_search_call_output", "custom_tool_call_output", "mcp_tool_call_output":
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // cacheCompletedResponse 从 response.completed 事件中提取 response.id 和 response.output，
 // 与当前请求的 expanded input 合并后存入缓存。
-// 仅在响应包含 function_call 时才缓存，避免为普通对话浪费内存。
+// 仅在响应包含需要 call_id 续链的 Codex 工具调用时才缓存，避免为普通对话浪费内存。
 func cacheCompletedResponse(expandedInputRaw []byte, completedData []byte) {
 	respID := gjson.GetBytes(completedData, "response.id").String()
 	if respID == "" {
 		return
 	}
 
-	// 仅在响应包含 function_call 时才缓存（普通对话无需 previous_response_id 展开）
+	// 仅在响应包含 Codex 工具调用时才缓存（普通对话无需 previous_response_id 展开）。
+	// image_generation_call / web_search_call 虽然也是 *_call 结尾，但不属于 call_id 工具续链体系。
 	output := gjson.GetBytes(completedData, "response.output")
 	if !output.IsArray() {
 		return
 	}
-	hasFunctionCall := false
+	hasToolCallContext := false
 	output.ForEach(func(_, item gjson.Result) bool {
-		if item.Get("type").String() == "function_call" {
-			hasFunctionCall = true
+		if isCodexToolCallContextType(item.Get("type").String()) {
+			hasToolCallContext = true
 			return false
 		}
 		return true
 	})
-	if !hasFunctionCall {
+	if !hasToolCallContext {
 		return
 	}
 
@@ -181,18 +227,64 @@ func cacheCompletedResponse(expandedInputRaw []byte, completedData []byte) {
 	inputItems := gjson.ParseBytes(expandedInputRaw)
 	if inputItems.IsArray() {
 		inputItems.ForEach(func(_, v gjson.Result) bool {
-			items = append(items, json.RawMessage(v.Raw))
+			if item, ok := replayableCachedInputItem(v); ok {
+				items = append(items, item)
+			}
 			return true
 		})
 	}
 
-	// 添加响应 output items
+	// 添加响应 output 中真正需要续链的工具上下文；reasoning/message 等
+	// 服务端输出 item 带有 rs_/msg_ id，store=false 时回灌会触发 item not found。
 	output.ForEach(func(_, v gjson.Result) bool {
-		items = append(items, json.RawMessage(v.Raw))
+		if item, ok := replayableCachedOutputItem(v); ok {
+			items = append(items, item)
+		}
 		return true
 	})
 
 	if len(items) > 0 {
 		setResponseCache(respID, items)
+	}
+}
+
+func replayableCachedInputItem(item gjson.Result) (json.RawMessage, bool) {
+	return stripResponseItemID(json.RawMessage(item.Raw))
+}
+
+func replayableCachedOutputItem(item gjson.Result) (json.RawMessage, bool) {
+	if !isCodexToolCallContextType(item.Get("type").String()) {
+		return nil, false
+	}
+	return stripResponseItemID(json.RawMessage(item.Raw))
+}
+
+func stripResponseItemID(raw json.RawMessage) (json.RawMessage, bool) {
+	var item map[string]any
+	if err := json.Unmarshal(raw, &item); err != nil || item == nil {
+		return raw, true
+	}
+	if _, exists := item["id"]; !exists {
+		return raw, true
+	}
+	delete(item, "id")
+	stripped, err := json.Marshal(item)
+	if err != nil {
+		return nil, false
+	}
+	return stripped, true
+}
+
+func isCodexToolCallContextType(typ string) bool {
+	switch typ {
+	case "function_call",
+		"tool_call",
+		"local_shell_call",
+		"tool_search_call",
+		"custom_tool_call",
+		"mcp_tool_call":
+		return true
+	default:
+		return false
 	}
 }

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 
 interface StatusBadgeProps {
   status?: string | null
+  detail?: string | null
 }
 
 const statusConfig: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; dotColor: string }> = {
@@ -13,10 +14,11 @@ const statusConfig: Record<string, { variant: 'default' | 'secondary' | 'destruc
   usage_exhausted: { variant: 'secondary', dotColor: 'bg-yellow-500' },
   unauthorized: { variant: 'destructive', dotColor: 'bg-red-500' },
   error: { variant: 'destructive', dotColor: 'bg-red-400' },
+  refreshing: { variant: 'secondary', dotColor: 'bg-blue-500 animate-pulse' },
   paused: { variant: 'outline', dotColor: 'bg-blue-500' },
 }
 
-export default function StatusBadge({ status }: StatusBadgeProps) {
+export default function StatusBadge({ status, detail }: StatusBadgeProps) {
   const { t } = useTranslation()
   const key = status ?? 'unknown'
   const config = statusConfig[key] ?? { variant: 'outline' as const, dotColor: 'bg-gray-400' }
@@ -25,6 +27,12 @@ export default function StatusBadge({ status }: StatusBadgeProps) {
     <Badge variant={config.variant} className="gap-1.5 text-[13px]">
       <span className={`size-1.5 rounded-full ${config.dotColor}`} />
       {t(`status.${key}`, { defaultValue: t('status.unknown', { defaultValue: key }) })}
+      {detail && (
+        <>
+          <span className="h-3 w-px bg-current/20" />
+          <span className="text-[11px] font-bold leading-none">{detail}</span>
+        </>
+      )}
     </Badge>
   )
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -167,12 +168,17 @@ func (s *FastScheduler) SetBaseLimit(baseLimit int64) {
 }
 
 func (s *FastScheduler) Acquire() *Account {
-	return s.AcquireExcluding(nil)
+	return s.AcquireExcluding(0, nil)
 }
 
 // AcquireExcluding 获取下一个可用账号，排除指定的账号 ID 集合
 // 两阶段调度：优先在验证过的账号中选取，全忙时回退到全量扫描
-func (s *FastScheduler) AcquireExcluding(exclude map[int64]bool) *Account {
+func (s *FastScheduler) AcquireExcluding(apiKeyID int64, exclude map[int64]bool) *Account {
+	return s.AcquireExcludingWithFilter(apiKeyID, exclude, nil)
+}
+
+// AcquireExcludingWithFilter 获取下一个可用账号，并应用请求级账号过滤器。
+func (s *FastScheduler) AcquireExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
 	if s == nil {
 		return nil
 	}
@@ -194,7 +200,7 @@ func (s *FastScheduler) AcquireExcluding(exclude map[int64]bool) *Account {
 			// 阶段 1：优先在验证过的账号（桶前部 provenBound 个）中 round-robin
 			provenBound := s.provenBounds[tierIdx]
 			if provenBound > 0 {
-				acc, stale := s.scanRangeLocked(tier, 0, provenBound, &s.provenCurs[tierIdx], baseLimit, now, exclude)
+				acc, stale := s.scanRangeLocked(tier, 0, provenBound, &s.provenCurs[tierIdx], baseLimit, now, apiKeyID, exclude, filter)
 				if acc != nil {
 					return acc
 				}
@@ -205,7 +211,7 @@ func (s *FastScheduler) AcquireExcluding(exclude map[int64]bool) *Account {
 			}
 
 			// 阶段 2：回退到全量 round-robin
-			acc, stale := s.scanRangeLocked(tier, 0, len(bucket), &s.cursors[tierIdx], baseLimit, now, exclude)
+			acc, stale := s.scanRangeLocked(tier, 0, len(bucket), &s.cursors[tierIdx], baseLimit, now, apiKeyID, exclude, filter)
 			if acc != nil {
 				return acc
 			}
@@ -222,7 +228,7 @@ func (s *FastScheduler) AcquireExcluding(exclude map[int64]bool) *Account {
 
 // scanRangeLocked 在 bucket[start:end) 范围内 round-robin 扫描可用账号。
 // 返回 stale=true 表示桶内缓存已过期，调用方应重新开始扫描。
-func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeStart, rangeEnd int, cursor *atomic.Uint64, baseLimit int64, now time.Time, exclude map[int64]bool) (*Account, bool) {
+func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeStart, rangeEnd int, cursor *atomic.Uint64, baseLimit int64, now time.Time, apiKeyID int64, exclude map[int64]bool, filter AccountFilter) (*Account, bool) {
 	bucket := s.buckets[expectedTier]
 	rangeLen := rangeEnd - rangeStart
 	if rangeLen <= 0 {
@@ -237,8 +243,14 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 		if exclude != nil && exclude[entry.dbID] {
 			continue
 		}
-		tier, _, limit, _, available := entry.acc.fastSchedulerSnapshot(baseLimit, now)
-		if tier != expectedTier {
+		if !entry.acc.AllowsAPIKey(apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(entry.acc) {
+			continue
+		}
+		tier, dispatchScore, limit, proven, available := entry.acc.fastSchedulerSnapshot(baseLimit, now)
+		if tier != expectedTier || proven != entry.proven || math.Abs(dispatchScore-entry.dispatchScore) >= 1 {
 			s.removeLocked(entry.dbID)
 			if available && limit > 0 {
 				s.insertLocked(entry.acc, now)
@@ -377,7 +389,7 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 	if score == 0 && a.SchedulerScore != 0 {
 		score = a.SchedulerScore
 	}
-	if score == 0 && tier != HealthTierBanned && a.AccessToken != "" && a.Status != StatusError {
+	if score == 0 && tier != HealthTierBanned && a.hasDispatchCredentialLocked() && a.Status != StatusError {
 		rawScore := 100.0
 		appliedBias := a.effectiveScoreBiasLocked(now, tier)
 		score = rawScore + float64(appliedBias)
@@ -390,8 +402,14 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 		limit = concurrencyLimitForTier(baseConcurrencyEffective, tier)
 	}
 
-	available := a.Status != StatusError && tier != HealthTierBanned && a.AccessToken != ""
-	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) && !a.premium5hCooldownSuppressedLocked(now) {
+	available := a.Status != StatusError && tier != HealthTierBanned && a.hasDispatchCredentialLocked()
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+		available = false
+	}
+	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
+		available = false
+	}
+	if a.premium5hRateLimitedLocked(now) {
 		available = false
 	}
 	// 每次请求后的冷却检查（仅在 maxConcurrency == 0 即无并发限制模式下生效）
