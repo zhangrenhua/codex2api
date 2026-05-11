@@ -267,6 +267,8 @@ export interface SystemSettings {
   site_logo: string
   max_concurrency: number
   global_rpm: number
+  account_rpm: number
+  model_rpm: number
   test_model: string
   test_concurrency: number
   background_refresh_interval_minutes: number

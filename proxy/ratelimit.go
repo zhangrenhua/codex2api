@@ -579,6 +579,39 @@ func (erl *EnhancedRateLimiter) AllowWithContext(accountID, model string) bool {
 	return true
 }
 
+// AllowAccountModel 仅检查账号级和模型级限流（不检查全局，避免与 Middleware 重复消耗令牌）
+func (erl *EnhancedRateLimiter) AllowAccountModel(accountID, model string) bool {
+	if !erl.enabled {
+		return true
+	}
+
+	var accLimiter *LevelLimiter
+	if erl.accountRPM > 0 && accountID != "" {
+		accLimiter = erl.getOrCreateAccountLimiter(accountID)
+	}
+
+	var modelLimiter *LevelLimiter
+	if erl.modelRPM > 0 && model != "" {
+		modelLimiter = erl.getOrCreateModelLimiter(model)
+	}
+
+	if accLimiter != nil {
+		if !accLimiter.allow() {
+			atomic.AddInt64(&erl.totalLimited, 1)
+			return false
+		}
+	}
+
+	if modelLimiter != nil {
+		if !modelLimiter.allow() {
+			atomic.AddInt64(&erl.totalLimited, 1)
+			return false
+		}
+	}
+
+	return true
+}
+
 // UpdateGlobalRPM 动态更新全局限流
 func (erl *EnhancedRateLimiter) UpdateGlobalRPM(rpm int) {
 	erl.mu.Lock()
@@ -832,6 +865,32 @@ func (rl *RateLimiter) GetRPM() int {
 		return rl.enhanced.globalRPM
 	}
 	return 0
+}
+
+func (rl *RateLimiter) GetAccountRPM() int {
+	if rl.enhanced != nil {
+		return rl.enhanced.accountRPM
+	}
+	return 0
+}
+
+func (rl *RateLimiter) GetModelRPM() int {
+	if rl.enhanced != nil {
+		return rl.enhanced.modelRPM
+	}
+	return 0
+}
+
+func (rl *RateLimiter) UpdateAccountRPM(rpm int) {
+	if rl.enhanced != nil {
+		rl.enhanced.UpdateAccountRPM(rpm)
+	}
+}
+
+func (rl *RateLimiter) UpdateModelRPM(rpm int) {
+	if rl.enhanced != nil {
+		rl.enhanced.UpdateModelRPM(rpm)
+	}
 }
 
 // Middleware 返回 Gin 中间件（向后兼容）

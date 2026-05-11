@@ -213,8 +213,10 @@ func main() {
 	}
 	cancel()
 
-	// 全局 RPM 限流器
+	// RPM 限流器
 	rateLimiter := proxy.NewRateLimiter(settings.GlobalRPM)
+	rateLimiter.UpdateAccountRPM(settings.AccountRPM)
+	rateLimiter.UpdateModelRPM(settings.ModelRPM)
 	adminHandler := admin.NewHandler(store, db, tc, rateLimiter, cfg.AdminSecret)
 	// 初始化 admin handler 的连接池设置跟踪
 	adminHandler.SetPoolSizes(settings.PgMaxConns, settings.RedisPoolSize)
@@ -247,6 +249,7 @@ func main() {
 	// 从环境变量读取 Codex 画像与 Beta 配置。
 	deviceCfg := proxy.DeviceProfileConfigFromEnv(os.Getenv)
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
+	handler.SetRateLimiter(rateLimiter)
 
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket
