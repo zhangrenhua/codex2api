@@ -412,18 +412,8 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 	if a.premium5hRateLimitedLocked(now) {
 		available = false
 	}
-	// 每次请求后的冷却检查（仅在 maxConcurrency == 0 即无并发限制模式下生效）
-	if baseLimit == 0 {
-		if until := atomic.LoadInt64(&a.RequestCooldownUntil); until > 0 && now.UnixNano() < until {
-			available = false
-		}
-	}
-	// Free 账号 7d 用量耗尽，不参与调度（Reset7dAt 到期后 usageExhaustedLocked 自动返回 false）
+	// Free 账号 7d 用量耗尽，不参与调度
 	if a.usageExhaustedLocked() {
-		available = false
-	}
-	// Premium 5h 限流期间不参与调度；窗口过期后还需 usage probe 确认用量才放开调度
-	if a.premium5hBlocksSchedulingLocked(now) {
 		available = false
 	}
 
