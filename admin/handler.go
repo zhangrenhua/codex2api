@@ -2825,6 +2825,8 @@ type settingsResponse struct {
 	SiteLogo                         string `json:"site_logo"`
 	MaxConcurrency                   int    `json:"max_concurrency"`
 	GlobalRPM                        int    `json:"global_rpm"`
+	AccountRPM                       int    `json:"account_rpm"`
+	ModelRPM                         int    `json:"model_rpm"`
 	TestModel                        string `json:"test_model"`
 	TestConcurrency                  int    `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes int    `json:"background_refresh_interval_minutes"`
@@ -2884,6 +2886,8 @@ type updateSettingsReq struct {
 	SiteLogo                         *string `json:"site_logo"`
 	MaxConcurrency                   *int    `json:"max_concurrency"`
 	GlobalRPM                        *int    `json:"global_rpm"`
+	AccountRPM                       *int    `json:"account_rpm"`
+	ModelRPM                         *int    `json:"model_rpm"`
 	TestModel                        *string `json:"test_model"`
 	TestConcurrency                  *int    `json:"test_concurrency"`
 	BackgroundRefreshIntervalMinutes *int    `json:"background_refresh_interval_minutes"`
@@ -3023,6 +3027,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SiteLogo:                         branding.SiteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
+		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -3140,6 +3146,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		h.rateLimiter.UpdateRPM(v)
 		log.Printf("设置已更新: global_rpm = %d", v)
+	}
+	if req.AccountRPM != nil {
+		v := *req.AccountRPM
+		if v < 0 {
+			v = 0
+		}
+		h.rateLimiter.UpdateAccountRPM(v)
+		log.Printf("设置已更新: account_rpm = %d", v)
+	}
+	if req.ModelRPM != nil {
+		v := *req.ModelRPM
+		if v < 0 {
+			v = 0
+		}
+		h.rateLimiter.UpdateModelRPM(v)
+		log.Printf("设置已更新: model_rpm = %d", v)
 	}
 
 	if req.TestModel != nil && *req.TestModel != "" {
@@ -3494,6 +3516,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SiteLogo:                         siteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
+		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
@@ -3556,6 +3580,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SiteLogo:                         siteLogo,
 		MaxConcurrency:                   h.store.GetMaxConcurrency(),
 		GlobalRPM:                        h.rateLimiter.GetRPM(),
+		AccountRPM:                       h.rateLimiter.GetAccountRPM(),
+		ModelRPM:                         h.rateLimiter.GetModelRPM(),
 		TestModel:                        h.store.GetTestModel(),
 		TestConcurrency:                  h.store.GetTestConcurrency(),
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),

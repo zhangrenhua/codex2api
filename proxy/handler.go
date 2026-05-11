@@ -27,12 +27,13 @@ import (
 
 // Handler API 路由处理器
 type Handler struct {
-	store      *auth.Store
-	configKeys map[string]bool // 配置文件中的静态 key
-	db         *database.DB
-	cfg        *config.Config       // 全局配置
-	deviceCfg  *DeviceProfileConfig // 设备指纹配置
-	cache      cache.TokenCache     // Redis/Memory 运行态缓存
+	store       *auth.Store
+	configKeys  map[string]bool // 配置文件中的静态 key
+	db          *database.DB
+	cfg         *config.Config       // 全局配置
+	deviceCfg   *DeviceProfileConfig // 设备指纹配置
+	cache       cache.TokenCache     // Redis/Memory 运行态缓存
+	rateLimiter *RateLimiter
 }
 
 const (
@@ -325,6 +326,20 @@ func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCf
 		cfg:        cfg,
 		deviceCfg:  deviceCfg,
 	}
+}
+
+func (h *Handler) SetRateLimiter(rl *RateLimiter) {
+	h.rateLimiter = rl
+}
+
+func (h *Handler) checkAccountModelRPM(accountID int64, model string) bool {
+	if h.rateLimiter == nil || h.rateLimiter.enhanced == nil {
+		return true
+	}
+	if h.rateLimiter.enhanced.accountRPM <= 0 && h.rateLimiter.enhanced.modelRPM <= 0 {
+		return true
+	}
+	return h.rateLimiter.enhanced.AllowAccountModel(fmt.Sprintf("%d", accountID), model)
 }
 
 // SetRuntimeCache wires Redis/Memory runtime cache for hot auth metadata.
@@ -1050,6 +1065,18 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 
+		if !h.checkAccountModelRPM(account.ID(), model) {
+			h.store.Release(account)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": gin.H{
+					"message": "Rate limit exceeded",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit_exceeded",
+				},
+			})
+			return
+		}
+
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
@@ -1732,6 +1759,18 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 		}
 
+		if !h.checkAccountModelRPM(account.ID(), model) {
+			h.store.Release(account)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": gin.H{
+					"message": "Rate limit exceeded",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit_exceeded",
+				},
+			})
+			return
+		}
+
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
@@ -1970,6 +2009,18 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 				return
 			}
+		}
+
+		if !h.checkAccountModelRPM(account.ID(), model) {
+			h.store.Release(account)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": gin.H{
+					"message": "Rate limit exceeded",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit_exceeded",
+				},
+			})
+			return
 		}
 
 		start := time.Now()
