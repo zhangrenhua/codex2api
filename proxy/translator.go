@@ -159,6 +159,7 @@ const maxTools = 128
 const (
 	codexImageGenerationBridgeMarker = "<codex2api-codex-image-generation>"
 	codexImageGenerationBridgeText   = codexImageGenerationBridgeMarker + "\nWhen the user asks for raster image generation or editing, use the OpenAI Responses native `image_generation` tool attached to this request. The local Codex client may not expose an `image_gen` namespace, but that does not mean image generation is unavailable. Do not ask the user to switch to CLI fallback solely because `image_gen` is absent.\n</codex2api-codex-image-generation>"
+	jsonObjectFormatInputHint        = "Return a valid JSON object."
 )
 
 var responsesImageGenerationOptionFields = []string{
@@ -476,6 +477,54 @@ func applyResponsesImageGenerationBridgeInstructions(body map[string]any) bool {
 	}
 	body["instructions"] = existing + "\n\n" + codexImageGenerationBridgeText
 	return true
+}
+
+func hasTopLevelResponsesImageOptions(body map[string]any) bool {
+	if len(body) == 0 {
+		return false
+	}
+	for _, key := range responsesImageGenerationOptionFields {
+		if value, exists := body[key]; exists && value != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func isStructuredResponsesFormatType(formatType string) bool {
+	switch strings.ToLower(strings.TrimSpace(formatType)) {
+	case "json_schema", "json_object":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasStructuredResponsesFormat(body map[string]any) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if text, ok := body["text"].(map[string]any); ok {
+		if format, ok := text["format"].(map[string]any); ok {
+			if isStructuredResponsesFormatType(firstNonEmptyAnyString(format["type"])) {
+				return true
+			}
+		}
+	}
+	if responseFormat, ok := body["response_format"].(map[string]any); ok {
+		return isStructuredResponsesFormatType(firstNonEmptyAnyString(responseFormat["type"]))
+	}
+	return false
+}
+
+func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
+	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
+		return false
+	}
+	if hasTopLevelResponsesImageOptions(body) {
+		return true
+	}
+	return !hasStructuredResponsesFormat(body)
 }
 
 func normalizeResponsesImageOnlyModel(body map[string]any) bool {
@@ -1037,8 +1086,8 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 
 	// 2. 字符串 input → 数组包装（Codex 要求 input 为 list）
 	if inputStr, ok := body["input"].(string); ok {
-		body["input"] = []map[string]string{
-			{"role": "user", "content": inputStr},
+		body["input"] = []any{
+			map[string]any{"role": "user", "content": inputStr},
 		}
 	}
 	promptText := extractResponsesPromptText(body)
@@ -1111,7 +1160,9 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 			}
 		}
 	}
-	ensureResponsesImageGenerationTool(body)
+	if shouldAutoInjectResponsesImageGenerationTool(body) {
+		ensureResponsesImageGenerationTool(body)
+	}
 	moveTopLevelResponsesImageOptions(body)
 	normalizeResponsesImageGenerationTools(body, promptText)
 	applyResponsesImageGenerationBridgeInstructions(body)
@@ -1163,6 +1214,47 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		return rawBody, expandedInputRaw
 	}
 	return result, expandedInputRaw
+}
+
+// PrepareOpenAIResponsesBody keeps native OpenAI Responses requests compatible
+// without applying Codex-specific fields such as store/include/tool injection.
+func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
+	var body map[string]any
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		return rawBody
+	}
+
+	if re, ok := body["reasoning_effort"].(string); ok {
+		if normalized := normalizeReasoningEffort(re); normalized != "" {
+			reasoning, _ := body["reasoning"].(map[string]any)
+			if reasoning == nil {
+				reasoning = map[string]any{}
+			}
+			if _, hasEffort := reasoning["effort"]; !hasEffort {
+				reasoning["effort"] = normalized
+				body["reasoning"] = reasoning
+			}
+		}
+	}
+	if reasoning, ok := body["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			if normalized := normalizeReasoningEffort(effort); normalized != "" {
+				reasoning["effort"] = normalized
+			} else {
+				delete(reasoning, "effort")
+			}
+		}
+	}
+
+	normalizeResponsesStructuredOutputFormat(body)
+	normalizeResponsesContentPartTypes(body)
+	normalizeResponsesInputMessageContent(body)
+
+	result, err := json.Marshal(body)
+	if err != nil {
+		return rawBody
+	}
+	return result
 }
 
 // PrepareCompactResponsesBody 将 /responses/compact 请求转换为上游可接受的格式。
@@ -1540,7 +1632,95 @@ func normalizeResponsesStructuredOutputFormat(body map[string]any) bool {
 	if sanitizeStructuredOutputSchema(format) {
 		modified = true
 	}
+	if ensureJSONModeInputMentionsJSON(body, format) {
+		modified = true
+	}
 	return modified
+}
+
+func ensureJSONModeInputMentionsJSON(body map[string]any, format map[string]any) bool {
+	if strings.TrimSpace(firstNonEmptyAnyString(format["type"])) != "json_object" {
+		return false
+	}
+	input, ok := body["input"]
+	if !ok || responsesInputContainsJSON(input) {
+		return false
+	}
+
+	switch inputValue := input.(type) {
+	case string:
+		body["input"] = jsonObjectFormatInputHint + "\n\n" + inputValue
+		return true
+	case []any:
+		body["input"] = append([]any{jsonObjectDeveloperMessage()}, inputValue...)
+		return true
+	case []map[string]string:
+		inputItems := make([]any, 0, len(inputValue)+1)
+		inputItems = append(inputItems, jsonObjectDeveloperMessage())
+		for _, item := range inputValue {
+			inputItems = append(inputItems, item)
+		}
+		body["input"] = inputItems
+		return true
+	case []map[string]any:
+		inputItems := make([]any, 0, len(inputValue)+1)
+		inputItems = append(inputItems, jsonObjectDeveloperMessage())
+		for _, item := range inputValue {
+			inputItems = append(inputItems, item)
+		}
+		body["input"] = inputItems
+		return true
+	default:
+		return false
+	}
+}
+
+func jsonObjectDeveloperMessage() map[string]any {
+	return map[string]any{
+		"type": "message",
+		"role": "developer",
+		"content": []any{
+			map[string]any{"type": "input_text", "text": jsonObjectFormatInputHint},
+		},
+	}
+}
+
+func responsesInputContainsJSON(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.Contains(strings.ToLower(v), "json")
+	case []any:
+		for _, item := range v {
+			if responsesInputContainsJSON(item) {
+				return true
+			}
+		}
+	case []map[string]string:
+		for _, item := range v {
+			if responsesInputContainsJSON(item) {
+				return true
+			}
+		}
+	case []map[string]any:
+		for _, item := range v {
+			if responsesInputContainsJSON(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"content", "text", "output"} {
+			if child, ok := v[key]; ok && responsesInputContainsJSON(child) {
+				return true
+			}
+		}
+	case map[string]string:
+		for _, key := range []string{"content", "text", "output"} {
+			if child, ok := v[key]; ok && responsesInputContainsJSON(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func responsesTextFormatFromResponseFormat(responseFormat map[string]any) map[string]any {
