@@ -31,17 +31,20 @@ import type {
   PromptFilterLogsResponse,
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
-  SelfUpdateStartResponse,
-  SelfUpdateStatusResponse,
   SiteBranding,
   StatsResponse,
   CPAExportEntry,
   SystemSettings,
   UpdateAccountSchedulerRequest,
+  UpdateAPIKeyRequest,
   UpdateOpenAIResponsesAccountRequest,
   UsageLogsResponse,
   UsageLogsPagedResponse,
   UsageStats,
+  AccountGroup,
+  AccountGroupsResponse,
+  CreateAccountGroupRequest,
+  UpdateAccountGroupRequest,
 } from './types'
 
 const BASE = '/api/admin'
@@ -100,6 +103,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(BASE + path, {
     ...options,
+    cache: options.cache ?? 'no-store',
     headers,
   })
 
@@ -201,6 +205,13 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  listAccountGroups: () => request<AccountGroupsResponse>('/account-groups'),
+  createAccountGroup: (data: CreateAccountGroupRequest) =>
+    request<{ id: number; message: string }>('/account-groups', { method: 'POST', body: JSON.stringify(data) }),
+  updateAccountGroup: (id: number, data: UpdateAccountGroupRequest) =>
+    request<MessageResponse>(`/account-groups/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAccountGroup: (id: number, force = false) =>
+    request<MessageResponse>(`/account-groups/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
   toggleAccountEnabled: (id: number, enabled: boolean) =>
     request<MessageResponse>(`/accounts/${id}/enable`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   toggleAccountLock: (id: number, locked: boolean) =>
@@ -212,9 +223,6 @@ export const api = {
   getAccountUsage: (id: number) =>
     request<AccountUsageDetail>(`/accounts/${id}/usage`),
   getHealth: () => request<HealthResponse>('/health'),
-  getSelfUpdateStatus: () => request<SelfUpdateStatusResponse>('/system/update'),
-  startSelfUpdate: (data: { version?: string } = {}) =>
-    request<SelfUpdateStartResponse>('/system/update', { method: 'POST', body: JSON.stringify(data) }),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getOpsErrorSummary: (params: {
     start: string
@@ -311,6 +319,8 @@ export const api = {
     }),
   deleteAPIKey: (id: number) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),
+  updateAPIKey: (id: number, data: UpdateAPIKeyRequest) =>
+    request<MessageResponse>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getImagePromptTemplates: (params: { q?: string; tag?: string } = {}) => {
     const sp = new URLSearchParams()
     if (params.q) sp.set('q', params.q)
@@ -338,6 +348,8 @@ export const api = {
     const query = sp.toString()
     return request<ImageJobResponse>(`/images/jobs/${id}${query ? `?${query}` : ''}`)
   },
+  deleteImageJob: (id: number) =>
+    request<MessageResponse>(`/images/jobs/${id}`, { method: 'DELETE' }),
   getImageAssets: (params: { page?: number; pageSize?: number } = {}) => {
     const sp = new URLSearchParams()
     if (params.page) sp.set('page', String(params.page))
@@ -424,7 +436,7 @@ export const api = {
     request<{ message: string; inserted: number; total: number }>('/proxies', { method: 'POST', body: JSON.stringify(data) }),
   deleteProxy: (id: number) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'DELETE' }),
-  updateProxy: (id: number, data: { label?: string; enabled?: boolean }) =>
+  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean }) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   batchDeleteProxies: (ids: number[]) =>
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),

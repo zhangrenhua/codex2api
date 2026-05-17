@@ -115,7 +115,7 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
             />
             <Input
               className="h-8 px-2 font-mono text-xs"
-              placeholder="gpt-5.4"
+              placeholder="gpt-5.5"
               value={v}
               onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
             />

@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -296,6 +298,24 @@ func hasResponsesImageGenerationTool(body map[string]any) bool {
 	return false
 }
 
+func responsesImageGenerationToolChoice(body map[string]any) string {
+	if len(body) == 0 {
+		return ""
+	}
+	switch choice := body["tool_choice"].(type) {
+	case string:
+		return strings.TrimSpace(choice)
+	case map[string]any:
+		return strings.TrimSpace(firstNonEmptyAnyString(choice["type"]))
+	default:
+		return ""
+	}
+}
+
+func hasResponsesImageGenerationToolChoice(body map[string]any) bool {
+	return strings.EqualFold(responsesImageGenerationToolChoice(body), "image_generation")
+}
+
 func ensureResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 {
 		return false
@@ -387,6 +407,86 @@ func moveTopLevelResponsesImageOptions(body map[string]any) bool {
 		}
 	}
 	return modified
+}
+
+// codexWebSearchAllowedFields 是 Codex 上游接受的 web_search 配置字段白名单。
+// 实测来源：直连 chatgpt.com/backend-api/codex/responses 用 gpt-5.4-mini 探测，
+// 这三个字段会被原样回显并生效；任何不在该集合的字段会触发
+// 400 unknown_parameter。
+var codexWebSearchAllowedFields = map[string]struct{}{
+	"search_context_size": {},
+	"user_location":       {},
+	"filters":             {},
+}
+
+// normalizeResponsesWebSearchTools 把所有 OpenAI Responses 协议下的 web_search
+// 变体（web_search_preview / web_search_preview_2025_03_11 /
+// web_search_2025_08_26 等）归一为 Codex 上游唯一接受的 {"type":"web_search"}。
+//
+// Codex 后端只识别裸 "web_search"，对其他变体一律返回
+// 400 {"detail":"Unsupported tool type: ..."}。OpenAI 原生 Responses
+// 端点支持这些变体——所以本函数只能在 Codex 上游路径调用。
+//
+// 归一时保留 Codex 已知接受的配置字段（search_context_size / user_location /
+// filters），其它未知字段一律丢弃，避免触发上游的 unknown_parameter 校验。
+func normalizeResponsesWebSearchTools(body map[string]any) bool {
+	rawTools, ok := body["tools"]
+	if !ok || rawTools == nil {
+		return false
+	}
+	tools, ok := rawTools.([]any)
+	if !ok {
+		return false
+	}
+	modified := false
+	for i, rawTool := range tools {
+		toolMap, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		toolType := strings.TrimSpace(firstNonEmptyAnyString(toolMap["type"]))
+		if toolType == "" || !strings.HasPrefix(toolType, "web_search") {
+			continue
+		}
+		normalized := normalizeCodexWebSearchTool(toolMap)
+		if mapsEqual(toolMap, normalized) {
+			continue
+		}
+		tools[i] = normalized
+		modified = true
+	}
+	if modified {
+		body["tools"] = tools
+	}
+	return modified
+}
+
+// normalizeCodexWebSearchTool 返回一个仅包含 {type, <白名单字段>} 的新 map。
+// 调用前请确保 toolMap.type 以 "web_search" 开头。
+func normalizeCodexWebSearchTool(toolMap map[string]any) map[string]any {
+	out := map[string]any{"type": "web_search"}
+	for k, v := range toolMap {
+		if _, ok := codexWebSearchAllowedFields[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func mapsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		if !reflect.DeepEqual(va, vb) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeResponsesImageGenerationTools(body map[string]any, promptText string) bool {
@@ -521,10 +621,26 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
 		return false
 	}
+	if hasResponsesImageGenerationToolChoice(body) {
+		return true
+	}
 	if hasTopLevelResponsesImageOptions(body) {
 		return true
 	}
 	return !hasStructuredResponsesFormat(body)
+}
+
+func shouldInjectOpenAIResponsesImageGenerationTool(body map[string]any) bool {
+	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
+		return false
+	}
+	if hasResponsesImageGenerationToolChoice(body) {
+		return true
+	}
+	if hasTopLevelResponsesImageOptions(body) {
+		return true
+	}
+	return isImageOnlyModel(strings.TrimSpace(firstNonEmptyAnyString(body["model"])))
 }
 
 func normalizeResponsesImageOnlyModel(body map[string]any) bool {
@@ -1013,6 +1129,9 @@ func cachedOrParse(rawJSON []byte) openAIRequest {
 // 采用 Unmarshal→构造 map→Marshal 模式，只做一次 JSON 序列化
 func TranslateRequest(rawJSON []byte) ([]byte, error) {
 	req := cachedOrParse(rawJSON)
+	if err := validateChatCompletionFunctionNames(req); err != nil {
+		return nil, err
+	}
 
 	// 构建输出 map（只包含 Codex 需要的字段）
 	out := map[string]any{
@@ -1063,6 +1182,130 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+func invalidFunctionNameError(path string) error {
+	return fmt.Errorf("Invalid '%s': empty string. Expected a string with minimum length 1, but got an empty string instead.", path)
+}
+
+func validateChatCompletionFunctionNames(req openAIRequest) error {
+	for msgIdx, msg := range req.Messages {
+		for callIdx, toolCall := range msg.ToolCalls {
+			if strings.TrimSpace(toolCall.Function.Name) == "" {
+				return invalidFunctionNameError(fmt.Sprintf("messages[%d].tool_calls[%d].function.name", msgIdx, callIdx))
+			}
+		}
+	}
+	for toolIdx, rawTool := range req.Tools {
+		var parsed openAIToolParsed
+		if err := json.Unmarshal(rawTool, &parsed); err != nil || parsed.Type != "function" || parsed.Function == nil {
+			continue
+		}
+		if strings.TrimSpace(parsed.Function.Name) == "" {
+			return invalidFunctionNameError(fmt.Sprintf("tools[%d].function.name", toolIdx))
+		}
+	}
+	return nil
+}
+
+// ValidateResponsesFunctionNames rejects malformed tool-call names before they
+// reach the upstream Responses API. The upstream reports these as HTTP 400
+// empty_string errors; local validation makes the bad client field obvious.
+func ValidateResponsesFunctionNames(rawBody []byte) error {
+	var body map[string]any
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		return nil
+	}
+	return validateResponsesFunctionNames(body)
+}
+
+func validateResponsesFunctionNames(body map[string]any) error {
+	inputItems, _ := body["input"].([]any)
+	for itemIdx, rawItem := range inputItems {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "function_call" {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(item["name"])) == "" {
+			return invalidFunctionNameError(fmt.Sprintf("input[%d].name", itemIdx))
+		}
+	}
+
+	tools, _ := body["tools"].([]any)
+	for toolIdx, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyAnyString(tool["type"])) != "function" {
+			continue
+		}
+		if responsesFunctionToolName(tool) == "" {
+			path := fmt.Sprintf("tools[%d].name", toolIdx)
+			if _, ok := tool["function"].(map[string]any); ok {
+				path = fmt.Sprintf("tools[%d].function.name", toolIdx)
+			}
+			return invalidFunctionNameError(path)
+		}
+	}
+	return nil
+}
+
+func responsesFunctionToolName(tool map[string]any) string {
+	if name := strings.TrimSpace(firstNonEmptyAnyString(tool["name"])); name != "" {
+		return name
+	}
+	function, _ := tool["function"].(map[string]any)
+	if function == nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmptyAnyString(function["name"]))
+}
+
+func normalizeResponsesFunctionTools(body map[string]any) bool {
+	tools, ok := body["tools"].([]any)
+	if !ok {
+		return false
+	}
+
+	modified := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyAnyString(tool["type"])) != "function" {
+			continue
+		}
+		function, _ := tool["function"].(map[string]any)
+		if function == nil {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(tool["name"])) == "" {
+			if name := strings.TrimSpace(firstNonEmptyAnyString(function["name"])); name != "" {
+				tool["name"] = name
+				modified = true
+			}
+		}
+		if _, ok := tool["description"]; !ok {
+			if desc := strings.TrimSpace(firstNonEmptyAnyString(function["description"])); desc != "" {
+				tool["description"] = desc
+				modified = true
+			}
+		}
+		if _, ok := tool["parameters"]; !ok {
+			if params, ok := function["parameters"]; ok {
+				tool["parameters"] = params
+				modified = true
+			}
+		}
+		if _, ok := tool["strict"]; !ok {
+			if strict, ok := function["strict"]; ok {
+				tool["strict"] = strict
+				modified = true
+			}
+		}
+		delete(tool, "function")
+		modified = true
+	}
+	return modified
 }
 
 // PrepareResponsesBody 将 Responses API 原始请求转换为上游可接受的格式
@@ -1128,6 +1371,8 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		}
 	}
 	normalizeResponsesStructuredOutputFormat(body)
+	normalizeResponsesFunctionTools(body)
+	normalizeResponsesWebSearchTools(body)
 
 	// 5. 工具描述补充 + schema 清理 + 上游数量限制
 	if tools, ok := body["tools"].([]any); ok {
@@ -1247,8 +1492,14 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	}
 
 	normalizeResponsesStructuredOutputFormat(body)
+	normalizeResponsesFunctionTools(body)
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
+	if shouldInjectOpenAIResponsesImageGenerationTool(body) {
+		ensureResponsesImageGenerationTool(body)
+	}
+	moveTopLevelResponsesImageOptions(body)
+	normalizeResponsesImageGenerationTools(body, extractResponsesPromptText(body))
 
 	result, err := json.Marshal(body)
 	if err != nil {
@@ -1446,6 +1697,18 @@ func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
 
 		if parsed.Type != "function" || parsed.Function == nil {
 			// 非 function 类型 → 透传原始 JSON
+			// 例外：把 web_search_preview 等变体归一为 web_search，
+			// Codex 上游只认裸 "web_search"。归一时保留白名单字段，
+			// 与 PrepareResponsesBody 路径行为一致。
+			if parsed.Type != "" && strings.HasPrefix(parsed.Type, "web_search") {
+				var toolMap map[string]any
+				if json.Unmarshal(raw, &toolMap) == nil && toolMap != nil {
+					tools = append(tools, normalizeCodexWebSearchTool(toolMap))
+				} else {
+					tools = append(tools, map[string]any{"type": "web_search"})
+				}
+				continue
+			}
 			var passThrough any
 			_ = json.Unmarshal(raw, &passThrough)
 			tools = append(tools, passThrough)

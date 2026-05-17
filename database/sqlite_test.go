@@ -107,6 +107,95 @@ func TestSQLiteAPIKeyQuotaAndExpiration(t *testing.T) {
 	}
 }
 
+func TestSQLiteUpdateAPIKeyPatchesSelectedFields(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	key := "sk-test-patch-1234567890"
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	id, err := db.InsertAPIKeyWithOptions(ctx, APIKeyInput{
+		Name:            "patch",
+		Key:             key,
+		QuotaLimit:      1,
+		ExpiresAt:       sql.NullTime{Time: expiresAt, Valid: true},
+		AllowedGroupIDs: []int64{1, 2},
+	})
+	if err != nil {
+		t.Fatalf("InsertAPIKeyWithOptions 返回错误: %v", err)
+	}
+
+	if err := db.UpdateAPIKey(ctx, id, APIKeyUpdate{Name: "patched", NameSet: true}); err != nil {
+		t.Fatalf("UpdateAPIKey name 返回错误: %v", err)
+	}
+	row, err := db.GetAPIKeyByValue(ctx, key)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByValue 返回错误: %v", err)
+	}
+	if row.Name != "patched" || row.QuotaLimit != 1 || !row.ExpiresAt.Valid || len(row.AllowedGroupIDs) != 2 {
+		t.Fatalf("row = %#v, want only name patched", row)
+	}
+
+	if err := db.UpdateAPIKey(ctx, id, APIKeyUpdate{
+		QuotaLimitSet:      true,
+		QuotaLimit:         0,
+		ExpiresAtSet:       true,
+		ExpiresAt:          sql.NullTime{},
+		AllowedGroupIDsSet: true,
+		AllowedGroupIDs:    []int64{3},
+	}); err != nil {
+		t.Fatalf("UpdateAPIKey limits 返回错误: %v", err)
+	}
+	row, err = db.GetAPIKeyByValue(ctx, key)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByValue after patch 返回错误: %v", err)
+	}
+	if row.Name != "patched" || row.QuotaLimit != 0 || row.ExpiresAt.Valid || len(row.AllowedGroupIDs) != 1 || row.AllowedGroupIDs[0] != 3 {
+		t.Fatalf("row = %#v, want limits/groups patched", row)
+	}
+}
+
+func TestSQLiteMigratesLegacyAPIKeysColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE api_keys (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		key TEXT UNIQUE NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("create legacy api_keys: %v", err)
+	}
+	if _, err := raw.Exec(`INSERT INTO api_keys (name, key) VALUES ('legacy', 'sk-legacy-1234567890')`); err != nil {
+		t.Fatalf("insert legacy api key: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite legacy) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	row, err := db.GetAPIKeyByValue(context.Background(), "sk-legacy-1234567890")
+	if err != nil {
+		t.Fatalf("GetAPIKeyByValue legacy 返回错误: %v", err)
+	}
+	if row.Name != "legacy" || row.QuotaLimit != 0 || row.QuotaUsed != 0 || row.ExpiresAt.Valid || len(row.AllowedGroupIDs) != 0 {
+		t.Fatalf("legacy row = %#v, want migrated defaults", row)
+	}
+}
+
 func TestSQLiteAccountsEnabledDefaultsAndCanToggle(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
@@ -455,10 +544,68 @@ func TestSQLiteUsageStatsBaselineHasBillingColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"account_billed", "user_billed"} {
+	for _, name := range []string{"account_billed", "user_billed", "cache_hit_requests", "first_token_ms_sum", "first_token_samples"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_stats_baseline 缺少列 %q", name)
 		}
+	}
+}
+
+func TestDeleteAccountGroupDoesNotBroadenScopedAPIKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	groupA, err := db.CreateAccountGroup(ctx, "Group A", "", "#2563eb", 0)
+	if err != nil {
+		t.Fatalf("CreateAccountGroup A 返回错误: %v", err)
+	}
+	groupB, err := db.CreateAccountGroup(ctx, "Group B", "", "#16a34a", 1)
+	if err != nil {
+		t.Fatalf("CreateAccountGroup B 返回错误: %v", err)
+	}
+
+	keyOnlyA, err := db.InsertAPIKeyWithOptions(ctx, APIKeyInput{
+		Name:            "Only A",
+		Key:             "sk-only-a-1234567890",
+		AllowedGroupIDs: []int64{groupA},
+	})
+	if err != nil {
+		t.Fatalf("InsertAPIKeyWithOptions only-a 返回错误: %v", err)
+	}
+	keyAB, err := db.InsertAPIKeyWithOptions(ctx, APIKeyInput{
+		Name:            "A and B",
+		Key:             "sk-a-b-1234567890",
+		AllowedGroupIDs: []int64{groupA, groupB},
+	})
+	if err != nil {
+		t.Fatalf("InsertAPIKeyWithOptions a-b 返回错误: %v", err)
+	}
+
+	if err := db.DeleteAccountGroup(ctx, groupA, true); err != nil {
+		t.Fatalf("DeleteAccountGroup 返回错误: %v", err)
+	}
+
+	rows, err := db.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAPIKeys 返回错误: %v", err)
+	}
+
+	got := make(map[int64][]int64)
+	for _, row := range rows {
+		got[row.ID] = row.AllowedGroupIDs
+	}
+
+	if actual := got[keyOnlyA]; len(actual) != 1 || actual[0] != groupA {
+		t.Fatalf("keyOnlyA allowed groups = %v, want stale [%d] to preserve deny-all semantics", actual, groupA)
+	}
+	if actual := got[keyAB]; len(actual) != 1 || actual[0] != groupB {
+		t.Fatalf("keyAB allowed groups = %v, want [%d]", actual, groupB)
 	}
 }
 
@@ -709,6 +856,7 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 			Stream:          true,
 			ServiceTier:     "fast",
 			CachedTokens:    128,
+			FirstTokenMs:    820,
 			ReasoningTokens: 32,
 			APIKeyID:        7,
 			APIKeyName:      "Claude Code",
@@ -764,6 +912,18 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	if stats.TotalRequests != 3 {
 		t.Fatalf("TotalRequests = %d, want 3", stats.TotalRequests)
 	}
+	if stats.TodayCachedTokens != 128 {
+		t.Fatalf("TodayCachedTokens = %d, want 128", stats.TodayCachedTokens)
+	}
+	if stats.TodayCacheRate < 33.3 || stats.TodayCacheRate > 33.4 {
+		t.Fatalf("TodayCacheRate = %.4f, want about 33.33", stats.TodayCacheRate)
+	}
+	if stats.TotalCacheRate < 33.3 || stats.TotalCacheRate > 33.4 {
+		t.Fatalf("TotalCacheRate = %.4f, want about 33.33", stats.TotalCacheRate)
+	}
+	if stats.AvgFirstTokenMs != 820 {
+		t.Fatalf("AvgFirstTokenMs = %.2f, want 820", stats.AvgFirstTokenMs)
+	}
 	features := stats.FeatureStats
 	if features.StreamRequests != 1 || features.SyncRequests != 2 || features.FastRequests != 1 ||
 		features.CacheHitRequests != 1 || features.ReasoningRequests != 1 || features.ImageRequests != 1 ||
@@ -788,6 +948,64 @@ func TestUsageStatsIncludeCodex2APIBreakdowns(t *testing.T) {
 	}
 	if apiKeys[8].Requests != 1 || apiKeys[8].ErrorCount != 1 {
 		t.Fatalf("APIKeyStats[8] = %+v, want requests=1 errors=1", apiKeys[8])
+	}
+}
+
+func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, usageLog := range []*UsageLogInput{
+		{
+			AccountID:    1,
+			Endpoint:     "/v1/responses",
+			Model:        "gpt-5.5",
+			StatusCode:   200,
+			InputTokens:  100,
+			OutputTokens: 50,
+			TotalTokens:  150,
+			CachedTokens: 32,
+			FirstTokenMs: 600,
+		},
+		{
+			AccountID:    1,
+			Endpoint:     "/v1/responses",
+			Model:        "gpt-5.5",
+			StatusCode:   200,
+			InputTokens:  80,
+			OutputTokens: 20,
+			TotalTokens:  100,
+			FirstTokenMs: 300,
+		},
+	} {
+		if err := db.InsertUsageLog(ctx, usageLog); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	db.flushLogs()
+
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("ClearUsageLogs 返回错误: %v", err)
+	}
+
+	stats, err := db.GetUsageStats(ctx)
+	if err != nil {
+		t.Fatalf("GetUsageStats 返回错误: %v", err)
+	}
+	if stats.TotalRequests != 2 {
+		t.Fatalf("TotalRequests = %d, want 2", stats.TotalRequests)
+	}
+	if stats.TotalCacheRate < 49.9 || stats.TotalCacheRate > 50.1 {
+		t.Fatalf("TotalCacheRate = %.4f, want about 50.00", stats.TotalCacheRate)
+	}
+	if stats.AvgFirstTokenMs < 449.9 || stats.AvgFirstTokenMs > 450.1 {
+		t.Fatalf("AvgFirstTokenMs = %.4f, want about 450.00", stats.AvgFirstTokenMs)
 	}
 }
 

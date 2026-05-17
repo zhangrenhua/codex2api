@@ -523,6 +523,49 @@ func TestPrepareOpenAIResponsesBody_NormalizesLegacyImageContentPart(t *testing.
 	}
 }
 
+func TestPrepareOpenAIResponsesBody_ImageGenerationToolChoiceInjectsTool(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "object tool_choice",
+			raw: `{
+				"model":"gpt-5.4",
+				"input":"draw a cat",
+				"tool_choice":{"type":"image_generation"}
+			}`,
+		},
+		{
+			name: "string tool_choice",
+			raw: `{
+				"model":"gpt-5.4",
+				"input":"draw a cat",
+				"tool_choice":"image_generation"
+			}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PrepareOpenAIResponsesBody([]byte(tc.raw))
+
+			if toolType := gjson.GetBytes(got, "tools.0.type").String(); toolType != "image_generation" {
+				t.Fatalf("tool type = %q, want image_generation; body=%s", toolType, got)
+			}
+			if toolModel := gjson.GetBytes(got, "tools.0.model").String(); toolModel != defaultImagesToolModel {
+				t.Fatalf("tool model = %q, want %q; body=%s", toolModel, defaultImagesToolModel, got)
+			}
+			if gjson.GetBytes(got, "include").Exists() {
+				t.Fatalf("OpenAI Responses body should not get Codex include defaults; body=%s", got)
+			}
+			if gjson.GetBytes(got, "store").Exists() {
+				t.Fatalf("OpenAI Responses body should not get Codex store defaults; body=%s", got)
+			}
+		})
+	}
+}
+
 func TestPrepareResponsesBody_SanitizesTextFormatJSONSchema(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -800,6 +843,24 @@ func TestPrepareResponsesBody_DefaultsIncludeForResponses(t *testing.T) {
 	}
 	if instructions := gjson.GetBytes(got, "instructions").String(); !strings.Contains(instructions, codexImageGenerationBridgeMarker) {
 		t.Fatalf("expected bridge instructions, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_ToolChoiceImageGenerationAutoInjectsTool(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"draw a poster",
+		"tool_choice":{"type":"image_generation"},
+		"text":{"format":{"type":"json_object"}}
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if toolType := gjson.GetBytes(got, "tools.0.type").String(); toolType != "image_generation" {
+		t.Fatalf("tool type = %q, want image_generation; body=%s", toolType, got)
+	}
+	if toolModel := gjson.GetBytes(got, "tools.0.model").String(); toolModel != defaultImagesToolModel {
+		t.Fatalf("tool model = %q, want %q; body=%s", toolModel, defaultImagesToolModel, got)
 	}
 }
 
@@ -1232,6 +1293,106 @@ func TestPrepareResponsesBody_DefaultsMissingMessageContent(t *testing.T) {
 	}
 }
 
+func TestValidateResponsesFunctionNamesRejectsEmptyInputName(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":"hello"},
+			{"type":"function_call","call_id":"call_abc","name":"","arguments":"{}"}
+		]
+	}`)
+
+	err := ValidateResponsesFunctionNames(raw)
+	if err == nil {
+		t.Fatal("expected empty function_call name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "input[1].name") {
+		t.Fatalf("error should identify input item name, got %v", err)
+	}
+}
+
+func TestValidateResponsesFunctionNamesRejectsEmptyToolName(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"hello",
+		"tools":[{"type":"function","name":"  ","parameters":{"type":"object"}}]
+	}`)
+
+	err := ValidateResponsesFunctionNames(raw)
+	if err == nil {
+		t.Fatal("expected empty function tool name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tools[0].name") {
+		t.Fatalf("error should identify tool name, got %v", err)
+	}
+}
+
+func TestValidateResponsesFunctionNamesRejectsEmptyNestedToolName(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"hello",
+		"tools":[{"type":"function","function":{"name":" ","parameters":{"type":"object"}}}]
+	}`)
+
+	err := ValidateResponsesFunctionNames(raw)
+	if err == nil {
+		t.Fatal("expected empty nested function tool name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tools[0].function.name") {
+		t.Fatalf("error should identify nested tool name, got %v", err)
+	}
+}
+
+func TestValidateResponsesFunctionNamesAllowsValidFunctionNames(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call","call_id":"call_abc","name":"lookup","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_abc","output":"ok"}
+		],
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
+	}`)
+
+	if err := ValidateResponsesFunctionNames(raw); err != nil {
+		t.Fatalf("valid function names should pass, got %v", err)
+	}
+}
+
+func TestPrepareResponsesBodyNormalizesChatStyleFunctionTool(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"hello",
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"lookup",
+				"description":"Lookup data",
+				"parameters":{"type":"object","properties":{"q":{"type":"string"}}},
+				"strict":true
+			}
+		}]
+	}`)
+
+	if err := ValidateResponsesFunctionNames(raw); err != nil {
+		t.Fatalf("chat-style tool with nested name should pass validation, got %v", err)
+	}
+
+	got, _ := PrepareResponsesBody(raw)
+	tool := gjson.GetBytes(got, "tools.0")
+	if name := tool.Get("name").String(); name != "lookup" {
+		t.Fatalf("nested function name should be promoted, got %q; body=%s", name, got)
+	}
+	if tool.Get("function").Exists() {
+		t.Fatalf("nested function object should be removed after normalization, got %s", got)
+	}
+	if desc := tool.Get("description").String(); desc != "Lookup data" {
+		t.Fatalf("nested function description should be promoted, got %q; body=%s", desc, got)
+	}
+	if strict := tool.Get("strict"); !strict.Bool() {
+		t.Fatalf("nested function strict should be promoted, got %s; body=%s", strict.Raw, got)
+	}
+}
+
 func TestPrepareResponsesBody_DefaultsNullMessageContent(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -1385,6 +1546,44 @@ func TestConvertMessagesToInput_AssistantWithToolCalls(t *testing.T) {
 	}
 	if fc.Get("arguments").String() != `{"city":"NYC"}` {
 		t.Fatalf("expected arguments to match, got %q", fc.Get("arguments").String())
+	}
+}
+
+func TestTranslateRequestRejectsEmptyToolCallName(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[
+			{"role":"user","content":"Call a tool"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_123","type":"function","function":{"name":"","arguments":"{}"}}
+			]}
+		]
+	}`)
+
+	_, err := TranslateRequest(raw)
+	if err == nil {
+		t.Fatal("expected empty tool call name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "messages[1].tool_calls[0].function.name") {
+		t.Fatalf("error should identify tool call name, got %v", err)
+	}
+}
+
+func TestTranslateRequestRejectsEmptyFunctionToolName(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{"type":"function","function":{"name":" ","description":"bad","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	_, err := TranslateRequest(raw)
+	if err == nil {
+		t.Fatal("expected empty function tool name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tools[0].function.name") {
+		t.Fatalf("error should identify function tool name, got %v", err)
 	}
 }
 
@@ -1773,5 +1972,143 @@ func TestPrepareResponsesBodyHandlesMultipleCompactionItems(t *testing.T) {
 	if gjson.GetBytes(codexBody, "input.0.type").String() == "compaction" ||
 		gjson.GetBytes(codexBody, "input.2.type").String() == "compaction" {
 		t.Fatalf("compaction type should not survive in upstream body: %s", codexBody)
+	}
+}
+
+func TestPrepareResponsesBody_NormalizesWebSearchPreviewToolType(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "preview alias",
+			raw: []byte(`{
+				"model":"gpt-5.5",
+				"input":"hi",
+				"tools":[{"type":"web_search_preview"}]
+			}`),
+		},
+		{
+			name: "dated preview alias",
+			raw: []byte(`{
+				"model":"gpt-5.5",
+				"input":"hi",
+				"tools":[{"type":"web_search_preview_2025_03_11"}]
+			}`),
+		},
+		{
+			name: "dated GA alias",
+			raw: []byte(`{
+				"model":"gpt-5.5",
+				"input":"hi",
+				"tools":[{"type":"web_search_2025_08_26"}]
+			}`),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := PrepareResponsesBody(tc.raw)
+
+			toolType := gjson.GetBytes(got, "tools.0.type").String()
+			if toolType != "web_search" {
+				t.Fatalf("expected tools.0.type=web_search, got %q; body=%s", toolType, got)
+			}
+		})
+	}
+}
+
+func TestPrepareResponsesBody_PreservesWebSearchAllowedConfigFields(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"hi",
+		"tools":[{
+			"type":"web_search_preview",
+			"search_context_size":"high",
+			"user_location":{"type":"approximate","country":"JP","city":"Tokyo"},
+			"filters":{"allowed_domains":["example.com"]}
+		}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if toolType := gjson.GetBytes(got, "tools.0.type").String(); toolType != "web_search" {
+		t.Fatalf("expected tools.0.type=web_search, got %q; body=%s", toolType, got)
+	}
+	if size := gjson.GetBytes(got, "tools.0.search_context_size").String(); size != "high" {
+		t.Fatalf("expected search_context_size=high, got %q; body=%s", size, got)
+	}
+	if country := gjson.GetBytes(got, "tools.0.user_location.country").String(); country != "JP" {
+		t.Fatalf("expected user_location.country=JP, got %q; body=%s", country, got)
+	}
+	if city := gjson.GetBytes(got, "tools.0.user_location.city").String(); city != "Tokyo" {
+		t.Fatalf("expected user_location.city=Tokyo, got %q; body=%s", city, got)
+	}
+	if dom := gjson.GetBytes(got, "tools.0.filters.allowed_domains.0").String(); dom != "example.com" {
+		t.Fatalf("expected filters.allowed_domains[0]=example.com, got %q; body=%s", dom, got)
+	}
+}
+
+func TestPrepareResponsesBody_DropsUnknownWebSearchFields(t *testing.T) {
+	// Codex 上游对未知字段严格校验，会回 400 unknown_parameter。
+	// 归一时必须丢弃白名单以外的字段。
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"hi",
+		"tools":[{
+			"type":"web_search",
+			"search_context_size":"low",
+			"totally_made_up":"yes",
+			"another_garbage":123
+		}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if size := gjson.GetBytes(got, "tools.0.search_context_size").String(); size != "low" {
+		t.Fatalf("expected search_context_size to survive, got %q; body=%s", size, got)
+	}
+	for _, k := range []string{"totally_made_up", "another_garbage"} {
+		if gjson.GetBytes(got, "tools.0."+k).Exists() {
+			t.Fatalf("expected tools.0.%s to be stripped; body=%s", k, got)
+		}
+	}
+}
+
+func TestPrepareResponsesBody_KeepsBareWebSearchToolUnchanged(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"hi",
+		"tools":[{"type":"web_search"}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if toolType := gjson.GetBytes(got, "tools.0.type").String(); toolType != "web_search" {
+		t.Fatalf("expected tools.0.type=web_search, got %q; body=%s", toolType, got)
+	}
+}
+
+func TestTranslateRequest_NormalizesWebSearchPreviewToolType(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"web_search_preview","search_context_size":"high","totally_made_up":"yes"}]
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+
+	toolType := gjson.GetBytes(got, "tools.0.type").String()
+	if toolType != "web_search" {
+		t.Fatalf("expected tools.0.type=web_search, got %q; body=%s", toolType, got)
+	}
+	if size := gjson.GetBytes(got, "tools.0.search_context_size").String(); size != "high" {
+		t.Fatalf("expected search_context_size to survive, got %q; body=%s", size, got)
+	}
+	if gjson.GetBytes(got, "tools.0.totally_made_up").Exists() {
+		t.Fatalf("expected unknown field to be stripped; body=%s", got)
 	}
 }

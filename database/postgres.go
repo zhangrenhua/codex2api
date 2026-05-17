@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -31,6 +32,7 @@ type AccountRow struct {
 	Locked                  bool
 	ScoreBiasOverride       sql.NullInt64
 	BaseConcurrencyOverride sql.NullInt64
+	Tags                    []string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 }
@@ -46,6 +48,29 @@ type AccountModelCooldownRow struct {
 type OptionalInt64Slice struct {
 	Set    bool
 	Values []int64
+}
+
+type OptionalStringSlice struct {
+	Set    bool
+	Values []string
+}
+
+type OptionalString struct {
+	Set   bool
+	Value string
+}
+
+type OptionalNullInt64 struct {
+	Set   bool
+	Value sql.NullInt64
+}
+
+// AccountCredentialIndex holds pre-built sets of existing credentials for fast import dedup.
+type AccountCredentialIndex struct {
+	RefreshTokens map[string]bool
+	AccessTokens  map[string]bool
+	SessionTokens map[string]bool
+	AccountIDs    map[string]bool
 }
 
 // GetCredential 从 credentials JSONB 获取字符串字段
@@ -104,6 +129,7 @@ type DB struct {
 	usageLogBatchSize     int64
 	usageLogFlushInterval int64 // ns
 	logFlushNotify        chan struct{}
+	accountInsertMu       sync.Mutex
 }
 
 const (
@@ -119,6 +145,8 @@ const (
 	minUsageLogFlushIntervalSeconds     = 1
 	maxUsageLogFlushIntervalSeconds     = 300
 )
+
+var ErrDuplicateAccountCredential = errors.New("duplicate account credential")
 
 func NormalizeUsageLogMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
@@ -281,6 +309,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 				prompt_tokens   BIGINT NOT NULL DEFAULT 0,
 				completion_tokens BIGINT NOT NULL DEFAULT 0,
 				cached_tokens   BIGINT NOT NULL DEFAULT 0,
+				cache_hit_requests BIGINT NOT NULL DEFAULT 0,
+				first_token_ms_sum DOUBLE PRECISION NOT NULL DEFAULT 0,
+				first_token_samples BIGINT NOT NULL DEFAULT 0,
 				account_billed  DOUBLE PRECISION NOT NULL DEFAULT 0,
 				user_billed     DOUBLE PRECISION NOT NULL DEFAULT 0
 			)
@@ -313,6 +344,9 @@ func (db *DB) ensureUsageStatsBaselineBillingColumns(ctx context.Context) error 
 		}{
 			{name: "account_billed", def: "REAL NOT NULL DEFAULT 0"},
 			{name: "user_billed", def: "REAL NOT NULL DEFAULT 0"},
+			{name: "cache_hit_requests", def: "INTEGER NOT NULL DEFAULT 0"},
+			{name: "first_token_ms_sum", def: "REAL NOT NULL DEFAULT 0"},
+			{name: "first_token_samples", def: "INTEGER NOT NULL DEFAULT 0"},
 		} {
 			if _, ok := columns[column.name]; ok {
 				continue
@@ -326,6 +360,9 @@ func (db *DB) ensureUsageStatsBaselineBillingColumns(ctx context.Context) error 
 	_, err := db.conn.ExecContext(ctx, `
 		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS account_billed DOUBLE PRECISION NOT NULL DEFAULT 0;
 		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS user_billed DOUBLE PRECISION NOT NULL DEFAULT 0;
+		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS cache_hit_requests BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS first_token_ms_sum DOUBLE PRECISION NOT NULL DEFAULT 0;
+		ALTER TABLE usage_stats_baseline ADD COLUMN IF NOT EXISTS first_token_samples BIGINT NOT NULL DEFAULT 0;
 	`)
 	return err
 }
@@ -443,6 +480,30 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS image_quota_total INT NULL;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS today_used_count INT DEFAULT 0;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS image_quota_reset_at TIMESTAMPTZ NULL;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '[]'::jsonb;
+
+	CREATE TABLE IF NOT EXISTS account_groups (
+		id          SERIAL PRIMARY KEY,
+		name        VARCHAR(80) UNIQUE NOT NULL,
+		description TEXT DEFAULT '',
+		color       VARCHAR(20) DEFAULT '',
+		sort_order  INT DEFAULT 0,
+		created_at  TIMESTAMPTZ DEFAULT NOW(),
+		updated_at  TIMESTAMPTZ DEFAULT NOW()
+	);
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS color VARCHAR(20) DEFAULT '';
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0;
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+	CREATE TABLE IF NOT EXISTS account_group_members (
+		account_id BIGINT NOT NULL,
+		group_id   BIGINT NOT NULL,
+		PRIMARY KEY (account_id, group_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_account_group_members_group ON account_group_members(group_id);
+	CREATE INDEX IF NOT EXISTS idx_account_group_members_account ON account_group_members(account_id);
 
 	UPDATE accounts
 	SET status = 'deleted',
@@ -518,6 +579,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS quota_used DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL;
 	CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+
+	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_group_ids JSONB DEFAULT '[]'::jsonb;
 
 			CREATE TABLE IF NOT EXISTS system_settings (
 				id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -742,24 +805,37 @@ func (db *DB) migrate(ctx context.Context) error {
 
 // APIKeyRow API 密钥行
 type APIKeyRow struct {
-	ID         int64        `json:"id"`
-	Name       string       `json:"name"`
-	Key        string       `json:"key"`
-	QuotaLimit float64      `json:"quota_limit"`
-	QuotaUsed  float64      `json:"quota_used"`
-	ExpiresAt  sql.NullTime `json:"expires_at"`
-	CreatedAt  time.Time    `json:"created_at"`
+	ID              int64        `json:"id"`
+	Name            string       `json:"name"`
+	Key             string       `json:"key"`
+	QuotaLimit      float64      `json:"quota_limit"`
+	QuotaUsed       float64      `json:"quota_used"`
+	ExpiresAt       sql.NullTime `json:"expires_at"`
+	AllowedGroupIDs []int64      `json:"allowed_group_ids"`
+	CreatedAt       time.Time    `json:"created_at"`
 }
 
 type APIKeyInput struct {
-	Name       string
-	Key        string
-	QuotaLimit float64
-	QuotaUsed  float64
-	ExpiresAt  sql.NullTime
+	Name            string
+	Key             string
+	QuotaLimit      float64
+	QuotaUsed       float64
+	ExpiresAt       sql.NullTime
+	AllowedGroupIDs []int64
 }
 
-const apiKeySelectColumns = `id, name, key, created_at, COALESCE(quota_limit, 0), COALESCE(quota_used, 0), expires_at`
+type APIKeyUpdate struct {
+	Name               string
+	NameSet            bool
+	QuotaLimit         float64
+	QuotaLimitSet      bool
+	ExpiresAt          sql.NullTime
+	ExpiresAtSet       bool
+	AllowedGroupIDs    []int64
+	AllowedGroupIDsSet bool
+}
+
+const apiKeySelectColumns = `id, name, key, created_at, COALESCE(quota_limit, 0), COALESCE(quota_used, 0), expires_at, COALESCE(allowed_group_ids, '[]')`
 
 // ListAPIKeys 获取所有 API 密钥
 func (db *DB) ListAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
@@ -815,9 +891,9 @@ func (db *DB) InsertAPIKeyWithOptions(ctx context.Context, input APIKeyInput) (i
 		input.QuotaUsed = 0
 	}
 	return db.insertRowID(ctx,
-		`INSERT INTO api_keys (name, key, quota_limit, quota_used, expires_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		`INSERT INTO api_keys (name, key, quota_limit, quota_used, expires_at) VALUES ($1, $2, $3, $4, $5)`,
-		input.Name, input.Key, input.QuotaLimit, input.QuotaUsed, nullableTimeArg(input.ExpiresAt),
+		`INSERT INTO api_keys (name, key, quota_limit, quota_used, expires_at, allowed_group_ids) VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING id`,
+		`INSERT INTO api_keys (name, key, quota_limit, quota_used, expires_at, allowed_group_ids) VALUES ($1, $2, $3, $4, $5, $6)`,
+		input.Name, input.Key, input.QuotaLimit, input.QuotaUsed, nullableTimeArg(input.ExpiresAt), encodeInt64SliceJSON(input.AllowedGroupIDs),
 	)
 }
 
@@ -837,7 +913,146 @@ func (row *APIKeyRow) IsQuotaExhausted() bool {
 }
 
 func (row *APIKeyRow) HasAccessConstraints() bool {
-	return row != nil && (row.QuotaLimit > 0 || row.ExpiresAt.Valid)
+	return row != nil && (row.QuotaLimit > 0 || row.ExpiresAt.Valid || len(row.AllowedGroupIDs) > 0)
+}
+
+// UpdateAPIKeyName updates the display name of an API key without changing the key value.
+func (db *DB) UpdateAPIKeyName(ctx context.Context, id int64, name string) error {
+	res, err := db.conn.ExecContext(ctx, `UPDATE api_keys SET name = $1 WHERE id = $2`, name, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// UpdateAPIKeyQuotaLimit updates the quota ceiling. A non-positive value clears the limit.
+func (db *DB) UpdateAPIKeyQuotaLimit(ctx context.Context, id int64, quotaLimit float64) error {
+	if quotaLimit < 0 {
+		quotaLimit = 0
+	}
+	res, err := db.conn.ExecContext(ctx, `UPDATE api_keys SET quota_limit = $1 WHERE id = $2`, quotaLimit, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// UpdateAPIKeyExpiresAt updates or clears the key expiration.
+func (db *DB) UpdateAPIKeyExpiresAt(ctx context.Context, id int64, expiresAt sql.NullTime) error {
+	res, err := db.conn.ExecContext(ctx, `UPDATE api_keys SET expires_at = $1 WHERE id = $2`, nullableTimeArg(expiresAt), id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// UpdateAPIKeyAllowedGroups persists the allowed-group scope for an API key.
+// Empty slice clears the scope (key may schedule any account).
+func (db *DB) UpdateAPIKeyAllowedGroups(ctx context.Context, id int64, groupIDs []int64) error {
+	payload := encodeInt64SliceJSON(groupIDs)
+	var (
+		res sql.Result
+		err error
+	)
+	if db.isSQLite() {
+		res, err = db.conn.ExecContext(ctx, `UPDATE api_keys SET allowed_group_ids = $1 WHERE id = $2`, payload, id)
+	} else {
+		res, err = db.conn.ExecContext(ctx, `UPDATE api_keys SET allowed_group_ids = $1::jsonb WHERE id = $2`, payload, id)
+	}
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (db *DB) UpdateAPIKeyAllowedGroupIDs(ctx context.Context, id int64, groupIDs []int64) error {
+	return db.UpdateAPIKeyAllowedGroups(ctx, id, groupIDs)
+}
+
+// UpdateAPIKey applies multiple editable fields in one transaction.
+// Omitted fields keep their existing values.
+func (db *DB) UpdateAPIKey(ctx context.Context, id int64, update APIKeyUpdate) error {
+	sets := make([]string, 0, 4)
+	args := make([]interface{}, 0, 5)
+	placeholder := func() string {
+		args = append(args, nil)
+		if db.isSQLite() {
+			return "?"
+		}
+		return fmt.Sprintf("$%d", len(args))
+	}
+	setArg := func(value interface{}) string {
+		ph := placeholder()
+		args[len(args)-1] = value
+		return ph
+	}
+	if update.NameSet {
+		sets = append(sets, "name = "+setArg(update.Name))
+	}
+	if update.QuotaLimitSet {
+		quotaLimit := update.QuotaLimit
+		if quotaLimit < 0 {
+			quotaLimit = 0
+		}
+		sets = append(sets, "quota_limit = "+setArg(quotaLimit))
+	}
+	if update.ExpiresAtSet {
+		sets = append(sets, "expires_at = "+setArg(nullableTimeArg(update.ExpiresAt)))
+	}
+	if update.AllowedGroupIDsSet {
+		payload := encodeInt64SliceJSON(update.AllowedGroupIDs)
+		ph := setArg(payload)
+		if db.isSQLite() {
+			sets = append(sets, "allowed_group_ids = "+ph)
+		} else {
+			sets = append(sets, "allowed_group_ids = "+ph+"::jsonb")
+		}
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+	idPlaceholder := placeholder()
+	args[len(args)-1] = id
+	res, err := db.conn.ExecContext(ctx, "UPDATE api_keys SET "+strings.Join(sets, ", ")+" WHERE id = "+idPlaceholder, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // ==================== System Settings ====================
@@ -958,7 +1173,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.UsageLogFlushIntervalSeconds, &s.StreamFlushPolicy, &s.StreamFlushIntervalMS,
 		&s.ImageStorageConfig,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	s.SiteName = NormalizeSiteName(s.SiteName)
@@ -1149,9 +1364,12 @@ func (db *DB) InsertProxies(ctx context.Context, urls []string, label string) (i
 		if db.isSQLite() {
 			res, err := db.conn.ExecContext(ctx, `INSERT INTO proxies (url, label) VALUES ($1, $2) ON CONFLICT(url) DO NOTHING`, u, label)
 			if err != nil {
-				continue
+				return inserted, err
 			}
-			affected, _ := res.RowsAffected()
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return inserted, err
+			}
 			if affected > 0 {
 				inserted++
 			}
@@ -1162,6 +1380,10 @@ func (db *DB) InsertProxies(ctx context.Context, urls []string, label string) (i
 			`INSERT INTO proxies (url, label) VALUES ($1, $2) ON CONFLICT (url) DO NOTHING RETURNING id`, u, label).Scan(&id)
 		if err == nil {
 			inserted++
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return inserted, err
 		}
 	}
 	return inserted, nil
@@ -1169,8 +1391,18 @@ func (db *DB) InsertProxies(ctx context.Context, urls []string, label string) (i
 
 // DeleteProxy 删除单个代理
 func (db *DB) DeleteProxy(ctx context.Context, id int64) error {
-	_, err := db.conn.ExecContext(ctx, `DELETE FROM proxies WHERE id = $1`, id)
-	return err
+	res, err := db.conn.ExecContext(ctx, `DELETE FROM proxies WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // DeleteProxies 批量删除代理
@@ -1195,16 +1427,43 @@ func (db *DB) DeleteProxies(ctx context.Context, ids []int64) (int, error) {
 }
 
 // UpdateProxy 更新代理
-func (db *DB) UpdateProxy(ctx context.Context, id int64, label *string, enabled *bool) error {
-	if label != nil {
-		if _, err := db.conn.ExecContext(ctx, `UPDATE proxies SET label = $1 WHERE id = $2`, *label, id); err != nil {
+func (db *DB) UpdateProxy(ctx context.Context, id int64, urlValue *string, label *string, enabled *bool) error {
+	if urlValue == nil && label == nil && enabled == nil {
+		var exists int
+		if err := db.conn.QueryRowContext(ctx, `SELECT 1 FROM proxies WHERE id = $1`, id).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return sql.ErrNoRows
+			}
 			return err
 		}
+		return nil
+	}
+	assignments := make([]string, 0, 3)
+	args := make([]interface{}, 0, 4)
+	if urlValue != nil {
+		args = append(args, *urlValue)
+		assignments = append(assignments, fmt.Sprintf("url = $%d", len(args)))
+	}
+	if label != nil {
+		args = append(args, *label)
+		assignments = append(assignments, fmt.Sprintf("label = $%d", len(args)))
 	}
 	if enabled != nil {
-		if _, err := db.conn.ExecContext(ctx, `UPDATE proxies SET enabled = $1 WHERE id = $2`, *enabled, id); err != nil {
-			return err
-		}
+		args = append(args, *enabled)
+		assignments = append(assignments, fmt.Sprintf("enabled = $%d", len(args)))
+	}
+	args = append(args, id)
+	query := fmt.Sprintf("UPDATE proxies SET %s WHERE id = $%d", strings.Join(assignments, ", "), len(args))
+	res, err := db.conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }
@@ -1591,16 +1850,20 @@ type UsageStats struct {
 	TotalPrompt        int64               `json:"total_prompt_tokens"`
 	TotalCompletion    int64               `json:"total_completion_tokens"`
 	TotalCachedTokens  int64               `json:"total_cached_tokens"`
+	TotalCacheRate     float64             `json:"total_cache_rate"`
 	TotalAccountBilled float64             `json:"total_account_billed"`
 	TotalUserBilled    float64             `json:"total_user_billed"`
 	AvgAccountBilled   float64             `json:"avg_account_billed_per_request"`
 	AvgUserBilled      float64             `json:"avg_user_billed_per_request"`
 	TodayRequests      int64               `json:"today_requests"`
 	TodayTokens        int64               `json:"today_tokens"`
+	TodayCachedTokens  int64               `json:"today_cached_tokens"`
+	TodayCacheRate     float64             `json:"today_cache_rate"`
 	TodayAccountBilled float64             `json:"today_account_billed"`
 	TodayUserBilled    float64             `json:"today_user_billed"`
 	RPM                float64             `json:"rpm"`
 	TPM                float64             `json:"tpm"`
+	AvgFirstTokenMs    float64             `json:"avg_first_token_ms"`
 	AvgDurationMs      float64             `json:"avg_duration_ms"`
 	ErrorRate          float64             `json:"error_rate"`
 	FeatureStats       UsageFeatureStat    `json:"feature_stats"`
@@ -1676,14 +1939,16 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	SELECT
 		COUNT(*) AS today_requests,
 		COALESCE(SUM(total_tokens), 0) AS today_tokens,
-			COALESCE(SUM(prompt_tokens), 0) AS today_prompt,
-			COALESCE(SUM(completion_tokens), 0) AS today_completion,
-			COALESCE(SUM(cached_tokens), 0) AS today_cached,
-			COALESCE(SUM(account_billed), 0) AS today_account_billed,
-			COALESCE(SUM(user_billed), 0) AS today_user_billed,
-			COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
-			COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
-			COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
+		COALESCE(SUM(prompt_tokens), 0) AS today_prompt,
+		COALESCE(SUM(completion_tokens), 0) AS today_completion,
+		COALESCE(SUM(cached_tokens), 0) AS today_cached,
+		COALESCE(SUM(account_billed), 0) AS today_account_billed,
+		COALESCE(SUM(user_billed), 0) AS today_user_billed,
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
+		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
+		COALESCE(AVG(NULLIF(first_token_ms, 0)), 0) AS avg_first_token_ms,
+		COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
+		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
 	FROM usage_logs
 	WHERE created_at >= $1
@@ -1691,12 +1956,15 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	`
 
 	var todayErrors int64
+	var todayCacheHitRequests int64
 	var todayPrompt, todayCompletion, todayCached int64
 	err := db.conn.QueryRowContext(ctx, todayQuery, todayStart, minuteAgo).Scan(
 		&stats.TodayRequests, &stats.TodayTokens, &todayPrompt, &todayCompletion, &todayCached,
 		&stats.TodayAccountBilled, &stats.TodayUserBilled,
 		&stats.RPM, &stats.TPM,
+		&stats.AvgFirstTokenMs,
 		&stats.AvgDurationMs,
+		&todayCacheHitRequests,
 		&todayErrors,
 	)
 	if err != nil {
@@ -1705,7 +1973,10 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 
 	// 统计当前可见请求总数和计费总额（排除 499，保证与使用统计列表口径一致）
 	var visibleTotal int64
+	var visibleCacheHitRequests int64
+	var visibleFirstTokenSamples int64
 	var currentTokens, currentPrompt, currentCompletion, currentCached int64
+	var currentFirstTokenMsSum float64
 	var currentAccountBilled, currentUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
 			SELECT
@@ -1714,27 +1985,41 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 				COALESCE(SUM(prompt_tokens), 0),
 				COALESCE(SUM(completion_tokens), 0),
 				COALESCE(SUM(cached_tokens), 0),
+				COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END), 0),
 				COALESCE(SUM(account_billed), 0),
 				COALESCE(SUM(user_billed), 0)
 			FROM usage_logs
 			WHERE status_code <> 499
-		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &currentAccountBilled, &currentUserBilled)
+		`).Scan(&visibleTotal, &currentTokens, &currentPrompt, &currentCompletion, &currentCached, &visibleCacheHitRequests, &currentFirstTokenMsSum, &visibleFirstTokenSamples, &currentAccountBilled, &currentUserBilled)
 
 	// 加上基线值（清空日志前保存的累计值）
-	var bReq, bTok, bPrompt, bComp, bCached int64
+	var bReq, bTok, bPrompt, bComp, bCached, bCacheHitRequests, bFirstTokenSamples int64
+	var bFirstTokenMsSum float64
 	var bAccountBilled, bUserBilled float64
 	_ = db.conn.QueryRowContext(ctx, `
-			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, account_billed, user_billed
+			SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens, cache_hit_requests, first_token_ms_sum, first_token_samples, account_billed, user_billed
 			FROM usage_stats_baseline WHERE id = 1
-		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bAccountBilled, &bUserBilled)
+		`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached, &bCacheHitRequests, &bFirstTokenMsSum, &bFirstTokenSamples, &bAccountBilled, &bUserBilled)
 
 	stats.TotalRequests = visibleTotal + bReq
 	stats.TotalTokens = currentTokens + bTok
 	stats.TotalPrompt = currentPrompt + bPrompt
 	stats.TotalCompletion = currentCompletion + bComp
 	stats.TotalCachedTokens = currentCached + bCached
+	stats.TodayCachedTokens = todayCached
 	stats.TotalAccountBilled = currentAccountBilled + bAccountBilled
 	stats.TotalUserBilled = currentUserBilled + bUserBilled
+	if stats.TodayRequests > 0 {
+		stats.TodayCacheRate = float64(todayCacheHitRequests) / float64(stats.TodayRequests) * 100
+	}
+	if stats.TotalRequests > 0 {
+		stats.TotalCacheRate = float64(visibleCacheHitRequests+bCacheHitRequests) / float64(stats.TotalRequests) * 100
+	}
+	if totalFirstTokenSamples := visibleFirstTokenSamples + bFirstTokenSamples; totalFirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = (currentFirstTokenMsSum + bFirstTokenMsSum) / float64(totalFirstTokenSamples)
+	}
 	if stats.TotalRequests > 0 {
 		stats.AvgAccountBilled = stats.TotalAccountBilled / float64(stats.TotalRequests)
 		stats.AvgUserBilled = stats.TotalUserBilled / float64(stats.TotalRequests)
@@ -2531,12 +2816,15 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 	_, err := db.conn.ExecContext(ctx, `
 		UPDATE usage_stats_baseline SET
 			total_requests  = total_requests  + COALESCE((SELECT COUNT(*) FROM usage_logs WHERE status_code <> 499), 0),
-				total_tokens    = total_tokens    + COALESCE((SELECT SUM(total_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-				prompt_tokens   = prompt_tokens   + COALESCE((SELECT SUM(prompt_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-				completion_tokens = completion_tokens + COALESCE((SELECT SUM(completion_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-				cached_tokens   = cached_tokens   + COALESCE((SELECT SUM(cached_tokens) FROM usage_logs WHERE status_code <> 499), 0),
-				account_billed  = account_billed  + COALESCE((SELECT SUM(account_billed) FROM usage_logs WHERE status_code <> 499), 0),
-				user_billed     = user_billed     + COALESCE((SELECT SUM(user_billed) FROM usage_logs WHERE status_code <> 499), 0)
+			total_tokens    = total_tokens    + COALESCE((SELECT SUM(total_tokens) FROM usage_logs WHERE status_code <> 499), 0),
+			prompt_tokens   = prompt_tokens   + COALESCE((SELECT SUM(prompt_tokens) FROM usage_logs WHERE status_code <> 499), 0),
+			completion_tokens = completion_tokens + COALESCE((SELECT SUM(completion_tokens) FROM usage_logs WHERE status_code <> 499), 0),
+			cached_tokens   = cached_tokens   + COALESCE((SELECT SUM(cached_tokens) FROM usage_logs WHERE status_code <> 499), 0),
+			cache_hit_requests = cache_hit_requests + COALESCE((SELECT SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
+			first_token_ms_sum = first_token_ms_sum + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN first_token_ms ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
+			first_token_samples = first_token_samples + COALESCE((SELECT SUM(CASE WHEN first_token_ms > 0 THEN 1 ELSE 0 END) FROM usage_logs WHERE status_code <> 499), 0),
+			account_billed  = account_billed  + COALESCE((SELECT SUM(account_billed) FROM usage_logs WHERE status_code <> 499), 0),
+			user_billed     = user_billed     + COALESCE((SELECT SUM(user_billed) FROM usage_logs WHERE status_code <> 499), 0)
 			WHERE id = 1
 		`)
 	if err != nil {
@@ -2653,7 +2941,7 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 // ListActive 获取所有未删除账号。
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), created_at, updated_at
 		FROM accounts
 		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		ORDER BY id
@@ -2669,6 +2957,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 		a := &AccountRow{}
 		var credRaw interface{}
 		var cooldownUntilRaw interface{}
+		var tagsRaw interface{}
 		var createdAtRaw interface{}
 		var updatedAtRaw interface{}
 		if err := rows.Scan(
@@ -2686,12 +2975,14 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 			&a.Locked,
 			&a.ScoreBiasOverride,
 			&a.BaseConcurrencyOverride,
+			&tagsRaw,
 			&createdAtRaw,
 			&updatedAtRaw,
 		); err != nil {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}
 		a.Credentials = decodeCredentials(credRaw)
+		a.Tags = decodeTagsValue(tagsRaw)
 		a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 		if err != nil {
 			return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
@@ -2791,7 +3082,7 @@ func (db *DB) ClearExpiredModelCooldowns(ctx context.Context) error {
 // GetAccountByID 获取未删除账号的完整数据库行。
 func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), created_at, updated_at
 		FROM accounts
 		WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		LIMIT 1
@@ -2799,6 +3090,7 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 	a := &AccountRow{}
 	var credRaw interface{}
 	var cooldownUntilRaw interface{}
+	var tagsRaw interface{}
 	var createdAtRaw interface{}
 	var updatedAtRaw interface{}
 	err := db.conn.QueryRowContext(ctx, query, id).Scan(
@@ -2816,16 +3108,18 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 		&a.Locked,
 		&a.ScoreBiasOverride,
 		&a.BaseConcurrencyOverride,
+		&tagsRaw,
 		&createdAtRaw,
 		&updatedAtRaw,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
 		}
 		return nil, fmt.Errorf("查询账号失败: %w", err)
 	}
 	a.Credentials = decodeCredentials(credRaw)
+	a.Tags = decodeTagsValue(tagsRaw)
 	a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 	if err != nil {
 		return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
@@ -2842,35 +3136,65 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 }
 
 // UpdateAccountSchedulerConfig 更新账号调度配置。
-func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreBiasOverride sql.NullInt64, baseConcurrencyOverride sql.NullInt64, allowedAPIKeyIDs OptionalInt64Slice) error {
+func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreBiasOverride OptionalNullInt64, baseConcurrencyOverride OptionalNullInt64, allowedAPIKeyIDs OptionalInt64Slice) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE accounts
-		SET score_bias_override = $1,
-		    base_concurrency_override = $2,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = $3
-	`, nullableInt64Value(scoreBiasOverride), nullableInt64Value(baseConcurrencyOverride), id)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
+	if scoreBiasOverride.Set || baseConcurrencyOverride.Set {
+		sets := make([]string, 0, 3)
+		args := make([]interface{}, 0, 3)
+		add := func(column string, value interface{}) {
+			args = append(args, value)
+			ph := "?"
+			if !db.isSQLite() {
+				ph = fmt.Sprintf("$%d", len(args))
+			}
+			sets = append(sets, column+" = "+ph)
+		}
+		if scoreBiasOverride.Set {
+			add("score_bias_override", nullableInt64Value(scoreBiasOverride.Value))
+		}
+		if baseConcurrencyOverride.Set {
+			add("base_concurrency_override", nullableInt64Value(baseConcurrencyOverride.Value))
+		}
+		sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+		args = append(args, id)
+		ph := "?"
+		if !db.isSQLite() {
+			ph = fmt.Sprintf("$%d", len(args))
+		}
+		result, err := tx.ExecContext(ctx, "UPDATE accounts SET "+strings.Join(sets, ", ")+" WHERE id = "+ph+" AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'", args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			return sql.ErrNoRows
+		}
+	} else {
+		query := `SELECT 1 FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+		if db.isSQLite() {
+			query = `SELECT 1 FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+		}
+		var exists int
+		if err := tx.QueryRowContext(ctx, query, id).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return sql.ErrNoRows
+			}
+			return err
+		}
 	}
 
 	if allowedAPIKeyIDs.Set {
-		selectQuery := `SELECT credentials FROM accounts WHERE id = $1`
+		selectQuery := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 		if db.isSQLite() {
-			selectQuery = `SELECT credentials FROM accounts WHERE id = ?`
+			selectQuery = `SELECT credentials FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 		} else {
 			selectQuery += ` FOR UPDATE`
 		}
@@ -2897,6 +3221,101 @@ func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreB
 		}
 	}
 
+	return tx.Commit()
+}
+
+// UpdateAccountSchedulerMetadata applies scheduler overrides and UI metadata in
+// one transaction. Runtime store updates should happen only after this returns.
+func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scoreBiasOverride OptionalNullInt64, baseConcurrencyOverride OptionalNullInt64, allowedAPIKeyIDs OptionalInt64Slice, tags OptionalStringSlice, groupIDs OptionalInt64Slice, proxyURL OptionalString) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	query := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+	if db.isSQLite() {
+		query = `SELECT credentials FROM accounts WHERE id = ? AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+	} else {
+		query += ` FOR UPDATE`
+	}
+	var currentRaw interface{}
+	if err := tx.QueryRowContext(ctx, query, id).Scan(&currentRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sql.ErrNoRows
+		}
+		return err
+	}
+
+	sets := make([]string, 0, 6)
+	args := make([]interface{}, 0, 8)
+	add := func(column string, value interface{}) {
+		args = append(args, value)
+		ph := "?"
+		if !db.isSQLite() {
+			ph = fmt.Sprintf("$%d", len(args))
+		}
+		sets = append(sets, column+" = "+ph)
+	}
+	if scoreBiasOverride.Set {
+		add("score_bias_override", nullableInt64Value(scoreBiasOverride.Value))
+	}
+	if baseConcurrencyOverride.Set {
+		add("base_concurrency_override", nullableInt64Value(baseConcurrencyOverride.Value))
+	}
+	if tags.Set {
+		if db.isSQLite() {
+			add("tags", encodeTagsJSON(tags.Values))
+		} else {
+			args = append(args, encodeTagsJSON(tags.Values))
+			sets = append(sets, fmt.Sprintf("tags = $%d::jsonb", len(args)))
+		}
+	}
+	if proxyURL.Set {
+		add("proxy_url", strings.TrimSpace(proxyURL.Value))
+	}
+	if allowedAPIKeyIDs.Set {
+		merged := mergeCredentialMaps(decodeCredentials(currentRaw), map[string]interface{}{
+			"allowed_api_key_ids": normalizePositiveInt64Slice(allowedAPIKeyIDs.Values),
+		})
+		credJSON, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("序列化 credentials 失败: %w", err)
+		}
+		if db.isSQLite() {
+			add("credentials", credJSON)
+		} else {
+			args = append(args, credJSON)
+			sets = append(sets, fmt.Sprintf("credentials = $%d::jsonb", len(args)))
+		}
+	}
+	if len(sets) > 0 {
+		sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+		args = append(args, id)
+		ph := "?"
+		if !db.isSQLite() {
+			ph = fmt.Sprintf("$%d", len(args))
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE accounts SET "+strings.Join(sets, ", ")+" WHERE id = "+ph, args...); err != nil {
+			return err
+		}
+	}
+	if groupIDs.Set {
+		ph := "$1"
+		insertQ := "INSERT INTO account_group_members (account_id, group_id) VALUES ($1, $2)"
+		if db.isSQLite() {
+			ph = "?"
+			insertQ = "INSERT INTO account_group_members (account_id, group_id) VALUES (?, ?)"
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM account_group_members WHERE account_id = "+ph, id); err != nil {
+			return err
+		}
+		for _, gid := range normalizeIDSlice(groupIDs.Values) {
+			if _, err := tx.ExecContext(ctx, insertQ, id, gid); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -3064,6 +3483,12 @@ func (db *DB) BatchSetError(ctx context.Context, ids []int64, errorMsg string) e
 
 // SoftDeleteAccount 将账号标记为 deleted，保留数据用于审计和事件追溯。
 func (db *DB) SoftDeleteAccount(ctx context.Context, id int64) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	query := `
 		UPDATE accounts
 		SET status = 'deleted',
@@ -3074,8 +3499,21 @@ func (db *DB) SoftDeleteAccount(ctx context.Context, id int64) error {
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1 AND status <> 'deleted'
 	`
-	_, err := db.conn.ExecContext(ctx, query, id)
-	return err
+	res, err := tx.ExecContext(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_group_members WHERE account_id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // BatchSoftDeleteAccounts 批量软删除账号，分批执行避免 SQL 参数过多。

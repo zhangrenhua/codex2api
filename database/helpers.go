@@ -359,3 +359,53 @@ func (db *DB) insertRowID(ctx context.Context, postgresQuery string, sqliteQuery
 	err := db.conn.QueryRowContext(ctx, postgresQuery, args...).Scan(&id)
 	return id, err
 }
+
+// decodeInt64SliceValue parses a JSON array of integers from a JSONB or TEXT column.
+func decodeInt64SliceValue(raw interface{}) []int64 {
+	data := bytesFromDBValue(raw)
+	if len(data) == 0 {
+		return nil
+	}
+	var out []int64
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// encodeInt64SliceJSON marshals []int64 to JSON. Returns "[]" for nil/empty.
+func encodeInt64SliceJSON(values []int64) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// decodeTagsValue parses a tags column value (from JSONB on PG, TEXT on SQLite) into []string.
+func decodeTagsValue(raw interface{}) []string {
+	data := bytesFromDBValue(raw)
+	if len(data) == 0 {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// encodeTagsJSON marshals a []string to JSON array string. Returns "[]" for nil/empty.
+func encodeTagsJSON(tags []string) string {
+	if len(tags) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(tags)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}

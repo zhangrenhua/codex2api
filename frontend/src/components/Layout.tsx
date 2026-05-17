@@ -1,13 +1,10 @@
 import { type PropsWithChildren, type ReactNode, useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Sun, Moon, Languages, Globe, BookOpen, FileCode2, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Sun, Moon, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import { useTheme } from '../hooks/useTheme'
 import { useVersionCheck } from '../hooks/useVersionCheck'
-import type { SelfUpdateStatusResponse } from '../types'
-import { getErrorMessage } from '../utils/error'
 import SecurityBanner from './SecurityBanner'
 
 type NavDef = {
@@ -29,7 +26,6 @@ const navDefs: NavDef[] = [
   { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
   { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[18px]" /> },
   { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[18px]" /> },
-  { to: '/api-reference', labelKey: 'nav2.apiRef', icon: <FileCode2 className="size-[18px]" /> },
 ]
 
 export default function Layout({ children }: PropsWithChildren) {
@@ -41,11 +37,6 @@ export default function Layout({ children }: PropsWithChildren) {
   const logoSrc = siteLogo || DEFAULT_SITE_LOGO
   const [spinning, setSpinning] = useState(false)
   const [showVersionPopover, setShowVersionPopover] = useState(false)
-  const [selfUpdateStatus, setSelfUpdateStatus] = useState<SelfUpdateStatusResponse | null>(null)
-  const [selfUpdateLoading, setSelfUpdateLoading] = useState(false)
-  const [selfUpdateSubmitting, setSelfUpdateSubmitting] = useState(false)
-  const [selfUpdateNotice, setSelfUpdateNotice] = useState('')
-  const [selfUpdateError, setSelfUpdateError] = useState('')
   const versionPopoverRef = useRef<HTMLDivElement | null>(null)
   const releaseURL = latestVersion
     ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
@@ -70,50 +61,6 @@ export default function Layout({ children }: PropsWithChildren) {
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [showVersionPopover])
-
-  useEffect(() => {
-    if (!showVersionPopover || !hasUpdate) return
-
-    let cancelled = false
-    setSelfUpdateLoading(true)
-    setSelfUpdateError('')
-
-    api.getSelfUpdateStatus()
-      .then((status) => {
-        if (cancelled) return
-        setSelfUpdateStatus(status)
-        if (status.error) setSelfUpdateError(status.error)
-      })
-      .catch((error) => {
-        if (!cancelled) setSelfUpdateError(getErrorMessage(error))
-      })
-      .finally(() => {
-        if (!cancelled) setSelfUpdateLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [hasUpdate, showVersionPopover])
-
-  const handleSelfUpdate = async () => {
-    if (!latestVersion || selfUpdateSubmitting || !selfUpdateStatus?.supported) return
-    if (!window.confirm(t('common.selfUpdateConfirm', { version: latestVersion }))) return
-
-    setSelfUpdateSubmitting(true)
-    setSelfUpdateError('')
-    setSelfUpdateNotice('')
-    try {
-      const result = await api.startSelfUpdate({ version: latestVersion })
-      setSelfUpdateNotice(result.message || t('common.selfUpdateStarted'))
-      const status = await api.getSelfUpdateStatus()
-      setSelfUpdateStatus(status)
-    } catch (error) {
-      setSelfUpdateError(getErrorMessage(error))
-    } finally {
-      setSelfUpdateSubmitting(false)
-    }
-  }
 
   const handleThemeToggle = (e: React.MouseEvent) => {
     setSpinning(true)
@@ -187,34 +134,6 @@ export default function Layout({ children }: PropsWithChildren) {
                           {t('common.viewReleaseNotes')}
                           <ExternalLink className="size-3.5" />
                         </a>
-                        {hasUpdate && (
-                          <div className="mt-2 border-t border-border pt-2">
-                            <button
-                              type="button"
-                              disabled={selfUpdateLoading || selfUpdateSubmitting || !selfUpdateStatus?.supported || selfUpdateStatus?.running}
-                              onClick={() => void handleSelfUpdate()}
-                              className="inline-flex w-full items-center justify-center rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-55"
-                            >
-                              {selfUpdateSubmitting
-                                ? t('common.selfUpdateStarting')
-                                : selfUpdateStatus?.running
-                                  ? t('common.selfUpdateRunning')
-                                  : t('common.selfUpdate')}
-                            </button>
-                            <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
-                              {selfUpdateLoading
-                                ? t('common.selfUpdateChecking')
-                                : selfUpdateStatus?.supported
-                                  ? t('common.selfUpdateHint')
-                                  : t('common.selfUpdateUnavailable', { reason: selfUpdateStatus?.reason || selfUpdateError || '-' })}
-                            </p>
-                            {(selfUpdateNotice || selfUpdateError) && (
-                              <p className={`mt-1.5 text-[10px] leading-4 ${selfUpdateError ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                                {selfUpdateError || selfUpdateNotice}
-                              </p>
-                            )}
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>

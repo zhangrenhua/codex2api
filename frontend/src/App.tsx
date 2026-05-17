@@ -13,8 +13,7 @@ const OperationsErrors = lazy(() => import('./pages/OperationsErrors'))
 const Proxies = lazy(() => import('./pages/Proxies'))
 const SchedulerBoard = lazy(() => import('./pages/SchedulerBoard'))
 const Settings = lazy(() => import('./pages/Settings'))
-const Guide = lazy(() => import('./pages/Guide'))
-const ApiReference = lazy(() => import('./pages/ApiReference'))
+const Docs = lazy(() => import('./pages/Docs'))
 const APIKeys = lazy(() => import('./pages/APIKeys'))
 const Usage = lazy(() => import('./pages/Usage'))
 const ImageStudio = lazy(() => import('./pages/ImageStudio'))
@@ -42,8 +41,9 @@ export default function App() {
                 <Route path="/ops/scheduler" element={<SchedulerBoard />} />
                 <Route path="/usage" element={<Usage />} />
                 <Route path="/settings" element={<Settings />} />
-                <Route path="/docs" element={<Guide />} />
-                <Route path="/api-reference" element={<ApiReference />} />
+                <Route path="/docs" element={<Docs />} />
+                <Route path="/guide" element={<Navigate to="/docs" replace />} />
+                <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
               </Routes>
             </Suspense>
           </RouteErrorBoundary>

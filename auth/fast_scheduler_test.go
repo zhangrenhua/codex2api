@@ -147,6 +147,29 @@ func TestStoreNextExcludingRespectsAPIKeyWhitelist(t *testing.T) {
 	}
 }
 
+func TestStoreNextExcludingRespectsAPIKeyAllowedGroups(t *testing.T) {
+	restricted := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	restricted.GroupIDs = []int64{10}
+	fallback := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 1)
+	fallback.GroupIDs = []int64{20}
+
+	store := &Store{
+		accounts:       []*Account{restricted, fallback},
+		maxConcurrency: 1,
+	}
+	store.SetAPIKeyAllowedGroups(1, []int64{20})
+
+	got := store.NextExcluding(1, nil)
+	if got == nil {
+		t.Fatal("NextExcluding() returned nil")
+	}
+	defer store.Release(got)
+
+	if got.DBID != 2 {
+		t.Fatalf("NextExcluding() picked dbID=%d, want 2", got.DBID)
+	}
+}
+
 func TestStoreNextSkipsDispatchPausedAccount(t *testing.T) {
 	paused := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
 	atomic.StoreInt32(&paused.DispatchPaused, 1)

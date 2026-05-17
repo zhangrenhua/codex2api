@@ -25,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route } from 'lucide-react'
+import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -54,6 +54,22 @@ function getStatusBadgeClassName(statusCode: number): string {
 }
 
 const TIME_RANGE_OPTIONS: TimeRangeKey[] = ['1h', '6h', '24h', '7d', '30d']
+
+const USAGE_ANALYSIS_VISIBILITY_KEY = 'usage_analysis_visible'
+
+function getInitialAnalysisVisibility(): boolean {
+  try {
+    return window.localStorage.getItem(USAGE_ANALYSIS_VISIBILITY_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function persistAnalysisVisibility(visible: boolean) {
+  try {
+    window.localStorage.setItem(USAGE_ANALYSIS_VISIBILITY_KEY, visible ? 'true' : 'false')
+  } catch {}
+}
 
 function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
   return apiKey.name ? `${apiKey.name} · ${apiKey.key}` : apiKey.key
@@ -273,9 +289,9 @@ function ModelSharePie({ stats }: { stats: UsageModelStat[] }) {
               cy="50%"
               innerRadius="54%"
               outerRadius="78%"
-              paddingAngle={2}
-              stroke="var(--color-card)"
-              strokeWidth={2}
+              paddingAngle={0}
+              stroke="none"
+              strokeWidth={0}
             >
               {pieData.map((_, index) => (
                 <Cell key={index} fill={modelPieColors[index % modelPieColors.length]} />
@@ -650,10 +666,123 @@ function StatusCodeBadge({ log }: { log: UsageLog }) {
 
 const usageTableHeadClass = 'text-[12px] font-semibold'
 const usageTableTextClass = 'text-[14px]'
-const usageTableMonoClass = 'font-geist-mono text-[13px] tabular-nums'
+const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
 const usageTableBadgeClass = 'text-[13px]'
-const modelPieColors = ['#2563eb', '#059669', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#db2777']
+const modelPieColors = [
+  '#2563eb', '#059669', '#f59e0b', '#dc2626', '#7c3aed',
+  '#0891b2', '#db2777', '#ea580c', '#4f46e5', '#16a34a',
+  '#ca8a04', '#e11d48', '#0d9488', '#9333ea', '#65a30d',
+  '#0284c7', '#c026d3', '#d97706', '#6366f1', '#14b8a6',
+]
 const modelPieShellClass = 'flex min-h-[196px] flex-col border-l border-border pl-4 max-lg:min-h-0 max-lg:border-l-0 max-lg:border-t max-lg:pl-0 max-lg:pt-3'
+
+type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'duration' | 'time'
+
+const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
+  { key: 'status', labelKey: 'usage.tableStatus' },
+  { key: 'model', labelKey: 'usage.tableModel' },
+  { key: 'account', labelKey: 'usage.tableAccount' },
+  { key: 'apiKey', labelKey: 'usage.tableApiKey' },
+  { key: 'endpoint', labelKey: 'usage.tableEndpoint' },
+  { key: 'type', labelKey: 'usage.tableType' },
+  { key: 'token', labelKey: 'usage.tableToken' },
+  { key: 'cost', labelKey: 'usage.tableCost' },
+  { key: 'cached', labelKey: 'usage.tableCached' },
+  { key: 'firstToken', labelKey: 'usage.tableFirstToken' },
+  { key: 'duration', labelKey: 'usage.tableDuration' },
+  { key: 'time', labelKey: 'usage.tableTime' },
+]
+
+const USAGE_VISIBLE_COLUMNS_KEY = 'codex2api:usage:visible-columns'
+const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
+  status: true,
+  model: true,
+  account: true,
+  apiKey: true,
+  endpoint: true,
+  type: true,
+  token: true,
+  cost: true,
+  cached: true,
+  firstToken: true,
+  duration: true,
+  time: true,
+}
+
+function getInitialUsageVisibleColumns(): Record<UsageTableColumn, boolean> {
+  try {
+    const stored = localStorage.getItem(USAGE_VISIBLE_COLUMNS_KEY)
+    if (stored) {
+      const parsed = JSON.parse(stored)
+      if (parsed && typeof parsed === 'object') {
+        const defaults: Record<UsageTableColumn, boolean> = { ...DEFAULT_USAGE_VISIBLE_COLUMNS }
+        for (const key of Object.keys(defaults) as UsageTableColumn[]) {
+          if (key in parsed) defaults[key] = Boolean(parsed[key])
+        }
+        return defaults
+      }
+    }
+  } catch { /* ignore */ }
+  return { ...DEFAULT_USAGE_VISIBLE_COLUMNS }
+}
+
+function persistUsageVisibleColumns(columns: Record<UsageTableColumn, boolean>) {
+  try { localStorage.setItem(USAGE_VISIBLE_COLUMNS_KEY, JSON.stringify(columns)) } catch { /* ignore */ }
+}
+
+function ColumnSettingsDropdown({
+  open,
+  columns,
+  onOpenChange,
+  onToggle,
+}: {
+  open: boolean
+  columns: Record<UsageTableColumn, boolean>
+  onOpenChange: (open: boolean) => void
+  onToggle: (key: UsageTableColumn) => void
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <div className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onOpenChange(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <SlidersHorizontal className="size-3.5" />
+        {t('accounts.columnSettings', { defaultValue: 'Columns' })}
+      </Button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+        >
+          <div className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase text-muted-foreground">
+            {t('accounts.columnSettings', { defaultValue: 'Columns' })}
+          </div>
+          {USAGE_COLUMN_DEFINITIONS.map((column) => (
+            <label
+              key={column.key}
+              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted"
+            >
+              <input
+                type="checkbox"
+                className="size-3.5 rounded border-border"
+                checked={columns[column.key]}
+                onChange={() => onToggle(column.key)}
+              />
+              <span>{t(column.labelKey)}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 export default function Usage() {
   const { t } = useTranslation()
@@ -679,6 +808,9 @@ export default function Usage() {
   const showFastFilter = true
   const pageSizeOptions = [10, 20, 50, 100]
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
+  const [visibleColumns, setVisibleColumns] = useState<Record<UsageTableColumn, boolean>>(getInitialUsageVisibleColumns)
+  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false)
+  const [showAnalysis, setShowAnalysis] = useState(getInitialAnalysisVisibility)
 
   // 搜索防抖：输入停止 400ms 后触发查询
   const handleSearchChange = useCallback((value: string) => {
@@ -773,6 +905,14 @@ export default function Usage() {
     return () => window.clearInterval(timer)
   }, [reloadSilently])
 
+  useEffect(() => {
+    persistUsageVisibleColumns(visibleColumns)
+  }, [visibleColumns])
+
+  useEffect(() => {
+    persistAnalysisVisibility(showAnalysis)
+  }, [showAnalysis])
+
   const { stats } = data
   const totalPages = Math.max(1, Math.ceil(logsTotal / pageSize))
   const currentPage = Math.min(page, totalPages)
@@ -822,6 +962,16 @@ export default function Usage() {
           title={t('usage.title')}
           description={t('usage.description')}
           onRefresh={() => { void reload(); void loadLogs(); void loadAPIKeys() }}
+          actions={
+            <Button
+              variant="outline"
+              aria-pressed={showAnalysis}
+              onClick={() => setShowAnalysis((v) => !v)}
+            >
+              <BarChart3 className="size-3.5" />
+              {showAnalysis ? t('usage.hideAnalysis') : t('usage.showAnalysis')}
+            </Button>
+          }
         />
 
         <div className="space-y-6">
@@ -927,29 +1077,33 @@ export default function Usage() {
           </Card>
         </div>
 
-        <div className="grid grid-cols-[minmax(0,0.5fr)_minmax(360px,0.5fr)] gap-3 max-lg:grid-cols-1">
-          <ModelStatsPanel stats={modelStats} />
-          <FeatureStatsPanel stats={featureStats} totalRequests={totalRequests} />
-        </div>
+        {showAnalysis && (
+          <>
+            <div className="grid grid-cols-[minmax(0,0.5fr)_minmax(360px,0.5fr)] gap-3 max-lg:grid-cols-1">
+              <ModelStatsPanel stats={modelStats} />
+              <FeatureStatsPanel stats={featureStats} totalRequests={totalRequests} />
+            </div>
 
-        <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-          <EndpointStatsPanel stats={endpointStats} totalRequests={totalRequests} />
-          <APIKeyStatsPanel stats={apiKeyStats} totalRequests={totalRequests} />
-        </div>
+            <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+              <EndpointStatsPanel stats={endpointStats} totalRequests={totalRequests} />
+              <APIKeyStatsPanel stats={apiKeyStats} totalRequests={totalRequests} />
+            </div>
+          </>
+        )}
 
         {/* Logs table */}
         <Card>
           <CardContent className="p-4">
-            <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-              <div className="flex items-center gap-3">
-                <h3 className="text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-                <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:overflow-x-auto">
+              <div className="flex shrink-0 items-center gap-3">
+                <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
+                <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5">
                   {TIME_RANGE_OPTIONS.map((key) => (
                     <button
                       key={key}
                       type="button"
                       onClick={() => { setTimeRange(key); setPage(1) }}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                      className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
                         timeRange === key
                           ? 'bg-background text-foreground shadow-sm border border-border'
                           : 'text-muted-foreground hover:text-foreground'
@@ -960,8 +1114,8 @@ export default function Usage() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
+              <div className="flex shrink-0 items-center gap-3">
+                <span className="whitespace-nowrap text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
                 <Button
                   variant="destructive"
                   size="sm"
@@ -995,9 +1149,9 @@ export default function Usage() {
             </div>
 
             {/* 筛选栏 */}
-            <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2">
+            <div className="toolbar-surface mb-4 flex items-center gap-2 overflow-visible whitespace-nowrap max-lg:overflow-x-auto">
               {/* 搜索框 */}
-              <div className="relative w-72 max-sm:w-full">
+              <div className="relative w-60 shrink-0 max-sm:w-full">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
                 <Input
                   className="pl-8 h-8 rounded-lg text-[13px]"
@@ -1009,7 +1163,7 @@ export default function Usage() {
 
               {/* 模型下拉 */}
               <Select
-                className="w-44"
+                className="w-36 shrink-0"
                 compact
                 value={filterModel}
                 onValueChange={(v) => { setFilterModel(v); setPage(1) }}
@@ -1022,7 +1176,7 @@ export default function Usage() {
 
               {/* 端点下拉 */}
               <Select
-                className="w-52"
+                className="w-44 shrink-0"
                 compact
                 value={filterEndpoint}
                 onValueChange={(v) => { setFilterEndpoint(v); setPage(1) }}
@@ -1039,7 +1193,7 @@ export default function Usage() {
 
               {showAPIKeyFilter && (
                 <Select
-                  className="w-60"
+                  className="w-48 shrink-0"
                   compact
                   value={filterApiKeyId}
                   onValueChange={(v) => { setFilterApiKeyId(v); setPage(1) }}
@@ -1050,7 +1204,7 @@ export default function Usage() {
 
               {/* 类型下拉 */}
               <Select
-                className="w-32"
+                className="w-28 shrink-0"
                 compact
                 value={filterStream}
                 onValueChange={(v) => { setFilterStream(v as '' | 'true' | 'false'); setPage(1) }}
@@ -1066,7 +1220,7 @@ export default function Usage() {
                 <button
                   type="button"
                   onClick={() => { setFilterFast(filterFast === 'true' ? '' : 'true'); setPage(1) }}
-                  className={`h-8 px-2.5 rounded-lg border text-[13px] font-medium transition-colors inline-flex items-center gap-1 ${
+                  className={`h-8 shrink-0 px-2.5 rounded-lg border text-[13px] font-medium transition-colors inline-flex items-center gap-1 whitespace-nowrap ${
                     filterFast === 'true'
                       ? 'border-blue-500/40 bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400'
                       : 'border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted/50'
@@ -1088,12 +1242,21 @@ export default function Usage() {
                     setFilterStream(''); setFilterFast('')
                     setPage(1)
                   }}
-                  className="h-8 px-2.5 rounded-lg border border-border bg-background text-[13px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors inline-flex items-center gap-1"
+                  className="h-8 shrink-0 px-2.5 rounded-lg border border-border bg-background text-[13px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <X className="size-3.5" />
                   {t('usage.clearFilters')}
                 </button>
               )}
+
+              <div className="ml-auto shrink-0">
+                <ColumnSettingsDropdown
+                  open={columnSettingsOpen}
+                  columns={visibleColumns}
+                  onOpenChange={setColumnSettingsOpen}
+                  onToggle={(key) => setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))}
+                />
+              </div>
             </div>
 
             <StateShell
@@ -1107,28 +1270,28 @@ export default function Usage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableStatus')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableModel')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableAccount')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableToken')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableCost')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableCached')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableFirstToken')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableDuration')}</TableHead>
-                      <TableHead className={usageTableHeadClass}>{t('usage.tableTime')}</TableHead>
+                      {visibleColumns.status && <TableHead className={usageTableHeadClass}>{t('usage.tableStatus')}</TableHead>}
+                      {visibleColumns.model && <TableHead className={usageTableHeadClass}>{t('usage.tableModel')}</TableHead>}
+                      {visibleColumns.account && <TableHead className={usageTableHeadClass}>{t('usage.tableAccount')}</TableHead>}
+                      {visibleColumns.apiKey && <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>}
+                      {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
+                      {visibleColumns.type && <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>}
+                      {visibleColumns.token && <TableHead className={usageTableHeadClass}>{t('usage.tableToken')}</TableHead>}
+                      {visibleColumns.cost && <TableHead className={usageTableHeadClass}>{t('usage.tableCost')}</TableHead>}
+                      {visibleColumns.cached && <TableHead className={usageTableHeadClass}>{t('usage.tableCached')}</TableHead>}
+                      {visibleColumns.firstToken && <TableHead className={usageTableHeadClass}>{t('usage.tableFirstToken')}</TableHead>}
+                      {visibleColumns.duration && <TableHead className={usageTableHeadClass}>{t('usage.tableDuration')}</TableHead>}
+                      {visibleColumns.time && <TableHead className={usageTableHeadClass}>{t('usage.tableTime')}</TableHead>}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {logs.map((log: UsageLog) => {
                       return (
                       <TableRow key={log.id}>
-                        <TableCell>
+                        {visibleColumns.status && <TableCell>
                           <StatusCodeBadge log={log} />
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.model && <TableCell>
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <Badge variant="outline" className={usageTableBadgeClass}>
                               {log.model || '-'}
@@ -1165,16 +1328,16 @@ export default function Usage() {
                               </Badge>
                             )}
                           </div>
-                        </TableCell>
-                        <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
+                        </TableCell>}
+                        {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           {formatCompactEmail(log.account_email)}
-                        </TableCell>
-                        <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
+                        </TableCell>}
+                        {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
+                          <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
                             {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
                           </span>
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.endpoint && <TableCell>
                           <div className={`${usageTableMonoClass} leading-relaxed`}>
                             <span className="text-muted-foreground">
                               {log.inbound_endpoint || log.endpoint || '-'}
@@ -1183,8 +1346,8 @@ export default function Usage() {
                               <span className="text-muted-foreground"> → {log.upstream_endpoint}</span>
                             )}
                           </div>
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.type && <TableCell>
                           <Badge
                             variant="outline"
                             className={usageTableBadgeClass}
@@ -1196,8 +1359,8 @@ export default function Usage() {
                           >
                             {log.stream ? 'stream' : 'sync'}
                           </Badge>
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.token && <TableCell>
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                             <div className={`${usageTableMonoClass} leading-relaxed`}>
                               <span className="text-blue-500">↓{formatTokens(log.input_tokens)}</span>
@@ -1213,11 +1376,11 @@ export default function Usage() {
                           ) : (
                             <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
                           )}
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.cost && <TableCell>
                           <UsageCostCell log={log} />
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.cached && <TableCell>
                           {log.cached_tokens > 0 ? (
                             <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
                               <DatabaseZap className="size-3.5" />
@@ -1226,22 +1389,22 @@ export default function Usage() {
                           ) : (
                             <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
                           )}
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.firstToken && <TableCell>
                           {log.first_token_ms > 0 ? (
                             <span className={`${usageTableMonoClass} ${log.first_token_ms > 5000 ? 'text-red-500' : log.first_token_ms > 2000 ? 'text-amber-500' : 'text-emerald-500'}`}>
                               {log.first_token_ms > 1000 ? `${(log.first_token_ms / 1000).toFixed(1)}s` : `${log.first_token_ms}ms`}
                             </span>
                           ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
-                        </TableCell>
-                        <TableCell>
+                        </TableCell>}
+                        {visibleColumns.duration && <TableCell>
                           <span className={`${usageTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
                             {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
                           </span>
-                        </TableCell>
-                        <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>
+                        </TableCell>}
+                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>
                           {formatBeijingTime(log.created_at)}
-                        </TableCell>
+                        </TableCell>}
                       </TableRow>
                       )
                     })}

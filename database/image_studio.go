@@ -407,6 +407,30 @@ func (db *DB) ListImageGenerationJobs(ctx context.Context, page, pageSize int) (
 	return &ImageJobPage{Jobs: jobs, Total: total}, nil
 }
 
+func (db *DB) DeleteImageGenerationJob(ctx context.Context, id int64) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM image_assets WHERE job_id=$1`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM image_generation_jobs WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func scanImageGenerationJob(scanner interface {
 	Scan(dest ...interface{}) error
 }) (*ImageGenerationJob, error) {
@@ -586,8 +610,8 @@ func scanAPIKeyRow(scanner interface {
 	Scan(dest ...interface{}) error
 }) (*APIKeyRow, error) {
 	row := &APIKeyRow{}
-	var createdAtRaw, expiresAtRaw interface{}
-	if err := scanner.Scan(&row.ID, &row.Name, &row.Key, &createdAtRaw, &row.QuotaLimit, &row.QuotaUsed, &expiresAtRaw); err != nil {
+	var createdAtRaw, expiresAtRaw, allowedGroupsRaw interface{}
+	if err := scanner.Scan(&row.ID, &row.Name, &row.Key, &createdAtRaw, &row.QuotaLimit, &row.QuotaUsed, &expiresAtRaw, &allowedGroupsRaw); err != nil {
 		return nil, err
 	}
 	createdAt, err := parseDBTimeValue(createdAtRaw)
@@ -600,5 +624,6 @@ func scanAPIKeyRow(scanner interface {
 	}
 	row.CreatedAt = createdAt
 	row.ExpiresAt = expiresAt
+	row.AllowedGroupIDs = decodeInt64SliceValue(allowedGroupsRaw)
 	return row, nil
 }

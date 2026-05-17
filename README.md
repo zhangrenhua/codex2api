@@ -72,6 +72,7 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 - [Live Demo](#live-demo)
 - [Screenshots](#screenshots)
+- [Sponsors](#sponsors)
 - [Quick Start](#quick-start)
 - [Documentation](#documentation)
 - [Upgrade and Local Development](#upgrade-and-local-development)
@@ -85,6 +86,19 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 - [Disclaimer and License](#disclaimer-and-license)
 - [Star History](#star-history)
 - [Links](#links)
+
+---
+
+## Sponsors
+
+> Want to appear here? Open an issue on GitHub.
+
+<table>
+<tr>
+<td width="180" align="center" valign="middle"><a href="https://ai.centos.hk"><b>星辰·AI</b></a></td>
+<td valign="middle">Thanks to <b><a href="https://ai.centos.hk">星辰·AI</a></b> for sponsoring this project! 星辰·AI provides stable and high-speed relay services for Claude Code / Codex / Gemini, suitable for both individual developers and teams.</td>
+</tr>
+</table>
 
 ---
 
