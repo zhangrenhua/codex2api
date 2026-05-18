@@ -23,7 +23,7 @@ type ClientProfile struct {
 }
 
 const (
-	latestCodexCLIVersion         = "0.128.0"
+	latestCodexCLIVersion         = "0.130.0"
 	latestCodexCLIUserAgentPrefix = "codex_cli_rs/" + latestCodexCLIVersion
 )
 
