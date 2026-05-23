@@ -145,6 +145,18 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 		}
 
+		switch h.checkAccountModelRPMKind(account.ID(), model) {
+		case AccountModelLimitAccount:
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			excludeAccounts[account.ID()] = true
+			continue
+		case AccountModelLimitModel:
+			h.store.Release(account)
+			sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "Model rate limit exceeded")
+			return
+		}
+
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)

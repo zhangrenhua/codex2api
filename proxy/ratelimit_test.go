@@ -237,27 +237,23 @@ func TestLevelLimiter_Basic(t *testing.T) {
 	}
 }
 
-func TestLevelLimiter_Cooldown(t *testing.T) {
+func TestLevelLimiter_RejectsWhenTokensExhausted(t *testing.T) {
 	ll := newLevelLimiter("test", LevelGlobal, 1) // 1 RPM，容易触发限流
 
-	// 第一个请求应该通过
+	// 第一个请求消耗令牌，应该通过
 	if !ll.allow() {
 		t.Error("Expected first allow to succeed")
 	}
 
-	// 第二个请求应该触发冷却
+	// 第二个请求令牌不足，应该被拒绝
 	if ll.allow() {
 		t.Error("Expected second allow to fail due to rate limit")
 	}
 
-	// 检查是否在冷却中
-	if !ll.cooldown.isInCooldown() {
-		t.Error("Expected to be in cooldown")
-	}
-
-	// 冷却期间应该持续拒绝
-	if ll.allow() {
-		t.Error("Expected allow to fail during cooldown")
+	// 不应该进入指数退避冷却 —— 令牌桶自身已是限流机制
+	// 旧实现会触发 cooldown 且 level 永不重置，导致线上误报 429
+	if ll.cooldown.isInCooldown() {
+		t.Error("Expected NOT to enter exponential backoff cooldown")
 	}
 }
 
@@ -282,12 +278,10 @@ func TestLevelLimiter_UpdateRPM(t *testing.T) {
 func TestLevelLimiter_ResetCooldown(t *testing.T) {
 	ll := newLevelLimiter("test", LevelGlobal, 1)
 
-	// 触发冷却
-	ll.allow()
-	ll.allow() // 触发限流
-
+	// 手动进入冷却（模拟将来上游真实返回 429 时主动调用 enterCooldown 的场景）
+	ll.enterCooldown()
 	if !ll.cooldown.isInCooldown() {
-		t.Fatal("Expected to be in cooldown")
+		t.Fatal("Expected to be in cooldown after enterCooldown")
 	}
 
 	// 重置冷却

@@ -333,13 +333,15 @@ func (h *Handler) SetRateLimiter(rl *RateLimiter) {
 }
 
 func (h *Handler) checkAccountModelRPM(accountID int64, model string) bool {
+	return h.checkAccountModelRPMKind(accountID, model) == AccountModelLimitNone
+}
+
+// checkAccountModelRPMKind 返回 RPM 拒绝类别，便于调用方决定是换账号重试还是直接 429。
+func (h *Handler) checkAccountModelRPMKind(accountID int64, model string) AccountModelLimitKind {
 	if h.rateLimiter == nil || h.rateLimiter.enhanced == nil {
-		return true
+		return AccountModelLimitNone
 	}
-	if h.rateLimiter.enhanced.accountRPM <= 0 && h.rateLimiter.enhanced.modelRPM <= 0 {
-		return true
-	}
-	return h.rateLimiter.enhanced.AllowAccountModel(fmt.Sprintf("%d", accountID), model)
+	return h.rateLimiter.enhanced.AllowAccountModelKind(fmt.Sprintf("%d", accountID), model)
 }
 
 // SetRuntimeCache wires Redis/Memory runtime cache for hot auth metadata.
@@ -1226,11 +1228,19 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 
-		if !h.checkAccountModelRPM(account.ID(), model) {
+		switch h.checkAccountModelRPMKind(account.ID(), model) {
+		case AccountModelLimitAccount:
+			// 当前账号 RPM 用尽，换下一个账号重试（不算重试次数，重试次数留给真实失败）
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			excludeAccounts[account.ID()] = true
+			continue
+		case AccountModelLimitModel:
+			// 模型级 RPM 用尽，重试别的账号无意义，直接 429
 			h.store.Release(account)
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
-					"message": "Rate limit exceeded",
+					"message": "Model rate limit exceeded",
 					"type":    "rate_limit_error",
 					"code":    "rate_limit_exceeded",
 				},
@@ -1949,11 +1959,19 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 		}
 
-		if !h.checkAccountModelRPM(account.ID(), model) {
+		switch h.checkAccountModelRPMKind(account.ID(), model) {
+		case AccountModelLimitAccount:
+			// 当前账号 RPM 用尽，换下一个账号重试（不算重试次数，重试次数留给真实失败）
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			excludeAccounts[account.ID()] = true
+			continue
+		case AccountModelLimitModel:
+			// 模型级 RPM 用尽，重试别的账号无意义，直接 429
 			h.store.Release(account)
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
-					"message": "Rate limit exceeded",
+					"message": "Model rate limit exceeded",
 					"type":    "rate_limit_error",
 					"code":    "rate_limit_exceeded",
 				},
@@ -2201,11 +2219,19 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 		}
 
-		if !h.checkAccountModelRPM(account.ID(), model) {
+		switch h.checkAccountModelRPMKind(account.ID(), model) {
+		case AccountModelLimitAccount:
+			// 当前账号 RPM 用尽，换下一个账号重试（不算重试次数，重试次数留给真实失败）
+			h.store.Release(account)
+			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			excludeAccounts[account.ID()] = true
+			continue
+		case AccountModelLimitModel:
+			// 模型级 RPM 用尽，重试别的账号无意义，直接 429
 			h.store.Release(account)
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": gin.H{
-					"message": "Rate limit exceeded",
+					"message": "Model rate limit exceeded",
 					"type":    "rate_limit_error",
 					"code":    "rate_limit_exceeded",
 				},

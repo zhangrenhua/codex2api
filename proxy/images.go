@@ -889,6 +889,23 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			}
 		}
 
+		switch h.checkAccountModelRPMKind(account.ID(), requestModel) {
+		case AccountModelLimitAccount:
+			h.store.Release(account)
+			excludeAccounts[account.ID()] = true
+			continue
+		case AccountModelLimitModel:
+			h.store.Release(account)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": gin.H{
+					"message": "Model rate limit exceeded",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit_exceeded",
+				},
+			})
+			return
+		}
+
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))

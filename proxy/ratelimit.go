@@ -297,12 +297,17 @@ func newLevelLimiter(key string, level RateLimitLevel, rpm int) *LevelLimiter {
 }
 
 // allow 尝试获取令牌
+//
+// 注意：令牌不足时不进入指数退避冷却 —— 令牌桶自身已是足够的限流机制，
+// 桶会按 rpm/60 个/秒 自动补充。叠加 cooldown 层会造成双重惩罚，且现有
+// 代码没有任何路径会重置 cooldown level，导致一旦触发就会指数级累积
+// 到 30 分钟（线上表现为"偶发超限后长时间误报 429"）。
+// enterCooldown 留给将来上游真实返回 429 时主动调用使用。
 func (ll *LevelLimiter) allow() bool {
 	ll.lastAccess.Store(time.Now().UnixNano())
 	ll.mu.Lock()
 	defer ll.mu.Unlock()
 
-	// 在函数入口递增总请求数
 	ll.metrics.TotalRequests++
 	ll.metrics.LastUpdatedAt = time.Now()
 
@@ -310,32 +315,22 @@ func (ll *LevelLimiter) allow() bool {
 		return true
 	}
 
-	// 检查是否在冷却中
-	if ll.cooldown.isInCooldown() {
-		ll.metrics.BlockedRequests++
-		return false
-	}
-
-	// 尝试获取令牌
 	if ll.bucket.allow() {
 		ll.metrics.AllowedRequests++
 		ll.metrics.CurrentRPM = int64(ll.bucket.getRate())
 		return true
 	}
 
-	// 令牌不足，进入冷却
-	ll.enterCooldown()
 	ll.metrics.BlockedRequests++
 	return false
 }
 
-// allowN 尝试获取N个令牌
+// allowN 尝试获取N个令牌（同 allow，不再触发指数退避冷却）
 func (ll *LevelLimiter) allowN(n int) bool {
 	ll.lastAccess.Store(time.Now().UnixNano())
 	ll.mu.Lock()
 	defer ll.mu.Unlock()
 
-	// 在函数入口递增总请求数
 	ll.metrics.TotalRequests += int64(n)
 	ll.metrics.LastUpdatedAt = time.Now()
 
@@ -343,17 +338,11 @@ func (ll *LevelLimiter) allowN(n int) bool {
 		return true
 	}
 
-	if ll.cooldown.isInCooldown() {
-		ll.metrics.BlockedRequests += int64(n)
-		return false
-	}
-
 	if ll.bucket.allowN(n) {
 		ll.metrics.AllowedRequests += int64(n)
 		return true
 	}
 
-	ll.enterCooldown()
 	ll.metrics.BlockedRequests += int64(n)
 	return false
 }
@@ -555,32 +544,58 @@ func (erl *EnhancedRateLimiter) AllowWithContext(accountID, model string) bool {
 	return true
 }
 
-// AllowAccountModel 仅检查账号级和模型级限流（不含全局，避免与 Middleware 双重扣减）
-func (erl *EnhancedRateLimiter) AllowAccountModel(accountID, model string) bool {
-	if !erl.enabled {
-		return true
+// AccountModelLimitKind 标识 AllowAccountModelKind 拒绝的类别
+type AccountModelLimitKind int
+
+const (
+	AccountModelLimitNone    AccountModelLimitKind = 0 // 通过
+	AccountModelLimitAccount AccountModelLimitKind = 1 // 单账号 RPM 触发（建议换账号重试）
+	AccountModelLimitModel   AccountModelLimitKind = 2 // 单模型 RPM 触发（重试无意义）
+)
+
+// AllowAccountModelKind 检查账号级和模型级限流。返回拒绝类别便于上层决定是否换账号重试。
+// 注意：不含全局，避免与 Middleware 双重扣减。
+// 检查顺序：先 ModelRPM 后 AccountRPM，先扣的桶不退还（token bucket 不支持回滚），
+// 这里有意把 Model 放前面，因为 Model 失败直接 429，AccountRPM 失败可能切账号，
+// 顺序反过来的话切账号时 Model token 已扣，仍可能在下一账号继续触发 Model 限流。
+func (erl *EnhancedRateLimiter) AllowAccountModelKind(accountID, model string) AccountModelLimitKind {
+	erl.mu.RLock()
+	enabled := erl.enabled
+	accountRPM := erl.accountRPM
+	modelRPM := erl.modelRPM
+	erl.mu.RUnlock()
+	if !enabled {
+		return AccountModelLimitNone
 	}
-	var accLimiter *LevelLimiter
-	if erl.accountRPM > 0 && accountID != "" {
-		accLimiter = erl.getOrCreateAccountLimiter(accountID)
-	}
+
 	var modelLimiter *LevelLimiter
-	if erl.modelRPM > 0 && model != "" {
+	if modelRPM > 0 && model != "" {
 		modelLimiter = erl.getOrCreateModelLimiter(model)
-	}
-	if accLimiter != nil {
-		if !accLimiter.allow() {
-			atomic.AddInt64(&erl.totalLimited, 1)
-			return false
-		}
 	}
 	if modelLimiter != nil {
 		if !modelLimiter.allow() {
 			atomic.AddInt64(&erl.totalLimited, 1)
-			return false
+			return AccountModelLimitModel
 		}
 	}
-	return true
+
+	var accLimiter *LevelLimiter
+	if accountRPM > 0 && accountID != "" {
+		accLimiter = erl.getOrCreateAccountLimiter(accountID)
+	}
+	if accLimiter != nil {
+		if !accLimiter.allow() {
+			atomic.AddInt64(&erl.totalLimited, 1)
+			return AccountModelLimitAccount
+		}
+	}
+
+	return AccountModelLimitNone
+}
+
+// AllowAccountModel 兼容旧调用方（保持 bool 返回）。
+func (erl *EnhancedRateLimiter) AllowAccountModel(accountID, model string) bool {
+	return erl.AllowAccountModelKind(accountID, model) == AccountModelLimitNone
 }
 
 func (erl *EnhancedRateLimiter) getOrCreateAccountLimiter(accountID string) *LevelLimiter {
