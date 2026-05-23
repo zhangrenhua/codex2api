@@ -128,6 +128,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				auto_clean_full_usage INTEGER DEFAULT 0,
 				auto_clean_error INTEGER DEFAULT 0,
 				auto_clean_expired INTEGER DEFAULT 0,
+				lazy_mode INTEGER DEFAULT 0,
 				proxy_pool_enabled INTEGER DEFAULT 0,
 				fast_scheduler_enabled INTEGER DEFAULT 0,
 				max_retries INTEGER DEFAULT 2,
@@ -140,7 +141,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				usage_log_flush_interval_seconds INTEGER DEFAULT 5,
 				stream_flush_policy TEXT DEFAULT 'immediate',
 				stream_flush_interval_ms INTEGER DEFAULT 20,
-				image_storage_config TEXT DEFAULT '{}'
+				image_storage_config TEXT DEFAULT '{}',
+				scheduler_mode TEXT DEFAULT 'round_robin'
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -307,6 +309,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "auto_clean_full_usage", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_error", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_expired", "INTEGER DEFAULT 0"},
+		{"system_settings", "lazy_mode", "INTEGER DEFAULT 0"},
 		{"system_settings", "proxy_pool_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "fast_scheduler_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
@@ -334,8 +337,11 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "image_storage_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "account_rpm", "INTEGER DEFAULT 0"},
 		{"system_settings", "model_rpm", "INTEGER DEFAULT 0"},
+		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
+		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},
+		{"accounts", "credit_skip_usage_window", "INTEGER DEFAULT 0"},
 		{"accounts", "image_quota_remaining", "INTEGER NULL"},
 		{"accounts", "image_quota_total", "INTEGER NULL"},
 		{"accounts", "today_used_count", "INTEGER DEFAULT 0"},
