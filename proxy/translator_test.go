@@ -65,8 +65,9 @@ func TestResolveBillingServiceTier(t *testing.T) {
 		want      string
 	}{
 		{name: "actual priority wins", actual: "priority", requested: "fast", want: "priority"},
-		{name: "actual default downgrade wins", actual: "default", requested: "fast", want: "default"},
-		{name: "unknown concrete actual tier wins", actual: "burst", requested: "fast", want: "burst"},
+		{name: "requested fast bills priority even when upstream downgrades to default", actual: "default", requested: "fast", want: "priority"},
+		{name: "requested fast bills priority even when upstream reports unknown tier", actual: "burst", requested: "fast", want: "priority"},
+		{name: "upstream concrete tier wins when client did not request fast", actual: "burst", requested: "", want: "burst"},
 		{name: "requested fast fallback bills priority", actual: "", requested: "fast", want: "priority"},
 		{name: "requested priority fallback bills priority", actual: "", requested: "priority", want: "priority"},
 		{name: "default stays default", actual: "default", requested: "", want: "default"},
@@ -711,6 +712,12 @@ func TestPrepareResponsesBody_ConvertsAndSanitizesLegacyResponseFormat(t *testin
 	if gjson.GetBytes(got, "text.format.schema.properties.testEnvironmentContract.minProperties").Exists() {
 		t.Fatalf("minProperties should be stripped after response_format conversion; body=%s", got)
 	}
+	if v := gjson.GetBytes(got, "text.format.schema.additionalProperties"); !v.Exists() || v.Bool() {
+		t.Fatalf("root object should get additionalProperties=false, got %s; body=%s", v.Raw, got)
+	}
+	if v := gjson.GetBytes(got, "text.format.schema.properties.testEnvironmentContract.additionalProperties"); !v.Exists() || v.Bool() {
+		t.Fatalf("nested object should get additionalProperties=false, got %s; body=%s", v.Raw, got)
+	}
 }
 
 func TestTranslateRequest_ConvertsAndSanitizesResponseFormat(t *testing.T) {
@@ -748,6 +755,12 @@ func TestTranslateRequest_ConvertsAndSanitizesResponseFormat(t *testing.T) {
 	}
 	if gjson.GetBytes(got, "text.format.schema.properties.testEnvironmentContract.minProperties").Exists() {
 		t.Fatalf("minProperties should be stripped in translated response_format schema; body=%s", got)
+	}
+	if v := gjson.GetBytes(got, "text.format.schema.additionalProperties"); !v.Exists() || v.Bool() {
+		t.Fatalf("root object should get additionalProperties=false, got %s; body=%s", v.Raw, got)
+	}
+	if v := gjson.GetBytes(got, "text.format.schema.properties.testEnvironmentContract.additionalProperties"); !v.Exists() || v.Bool() {
+		t.Fatalf("nested object should get additionalProperties=false, got %s; body=%s", v.Raw, got)
 	}
 }
 

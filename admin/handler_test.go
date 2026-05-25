@@ -147,6 +147,103 @@ func TestRefreshAccountReturnsRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestResetAccountStatusSyncsPlanMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := auth.NewStore(nil, nil, nil)
+	account := &auth.Account{DBID: 42, AccessToken: "at", PlanType: "free"}
+	account.SetUsageSnapshot(88, time.Now().Add(time.Hour))
+	store.AddAccount(account)
+
+	called := make(chan int64, 1)
+	handler := &Handler{
+		store: store,
+		syncAccountPlanOnReset: func(_ context.Context, acc *auth.Account) error {
+			if acc == nil {
+				t.Errorf("sync account is nil")
+				called <- -1
+				return nil
+			}
+			called <- acc.DBID
+			return nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: "42"}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/42/reset-status", nil)
+
+	handler.ResetAccountStatus(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	select {
+	case id := <-called:
+		if id != 42 {
+			t.Fatalf("sync DBID = %d, want 42", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected reset to sync plan metadata")
+	}
+	if _, ok := account.GetUsagePercent7d(); ok {
+		t.Fatal("expected reset to clear cached usage")
+	}
+}
+
+func TestBatchResetStatusSyncsEachResolvedAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := auth.NewStore(nil, nil, nil)
+	store.AddAccount(&auth.Account{DBID: 11, AccessToken: "at-11", PlanType: "free"})
+	store.AddAccount(&auth.Account{DBID: 22, AccessToken: "at-22", PlanType: "plus"})
+
+	gotIDs := make(chan int64, 2)
+	handler := &Handler{
+		store: store,
+		syncAccountPlanOnReset: func(_ context.Context, acc *auth.Account) error {
+			gotIDs <- acc.DBID
+			if acc.DBID == 22 {
+				return errors.New("temporary upstream failure")
+			}
+			return nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/batch-reset-status", strings.NewReader(`{"ids":[11,99,22]}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.BatchResetStatus(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["success"] != float64(2) || payload["failed"] != float64(1) {
+		t.Fatalf("payload = %#v, want success=2 failed=1", payload)
+	}
+
+	collected := make(map[int64]bool)
+	deadline := time.After(2 * time.Second)
+	for len(collected) < 2 {
+		select {
+		case id := <-gotIDs:
+			collected[id] = true
+		case <-deadline:
+			t.Fatalf("synced ids = %v, want {11,22}", collected)
+		}
+	}
+	if !collected[11] || !collected[22] {
+		t.Fatalf("synced ids = %v, want both 11 and 22", collected)
+	}
+}
+
 func TestCreateAPIKeyPersistsQuotaAndExpiration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

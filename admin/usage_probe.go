@@ -9,6 +9,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/gin-gonic/gin"
 )
 
 // ProbeUsageSnapshot 主动发送最小探针请求刷新账号用量
@@ -59,4 +60,22 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 		}
 		return fmt.Errorf("探针返回状态 %d", resp.StatusCode)
 	}
+}
+
+// ForceUsageProbe 主动触发一次"忽略缓存阈值"的全量用量探针，并立即返回。
+// 真正的探针在后台并发执行（受 usage_probe_concurrency 限制）。
+func (h *Handler) ForceUsageProbe(c *gin.Context) {
+	if h.store.GetLazyMode() {
+		c.JSON(http.StatusOK, gin.H{
+			"triggered":   false,
+			"reason":      "lazy_mode",
+			"concurrency": h.store.GetUsageProbeConcurrency(),
+		})
+		return
+	}
+	h.store.TriggerUsageProbeForceAsync()
+	c.JSON(http.StatusOK, gin.H{
+		"triggered":   true,
+		"concurrency": h.store.GetUsageProbeConcurrency(),
+	})
 }

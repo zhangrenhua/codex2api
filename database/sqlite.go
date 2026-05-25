@@ -123,6 +123,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				auto_clean_rate_limited INTEGER DEFAULT 0,
 				background_refresh_interval_minutes INTEGER DEFAULT 2,
 				usage_probe_max_age_minutes INTEGER DEFAULT 10,
+				usage_probe_concurrency INTEGER DEFAULT 16,
 				recovery_probe_interval_minutes INTEGER DEFAULT 30,
 				admin_secret TEXT DEFAULT '',
 				auto_clean_full_usage INTEGER DEFAULT 0,
@@ -142,7 +143,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				stream_flush_policy TEXT DEFAULT 'immediate',
 				stream_flush_interval_ms INTEGER DEFAULT 20,
 				image_storage_config TEXT DEFAULT '{}',
-				scheduler_mode TEXT DEFAULT 'round_robin'
+				scheduler_mode TEXT DEFAULT 'round_robin',
+				affinity_mode TEXT DEFAULT 'bounded'
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -290,6 +292,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"api_keys", "quota_limit", "REAL DEFAULT 0"},
 		{"api_keys", "quota_used", "REAL DEFAULT 0"},
 		{"api_keys", "allowed_group_ids", "TEXT DEFAULT '[]'"},
+		{"api_keys", "limits", "TEXT DEFAULT '{}'"},
 		{"api_keys", "expires_at", "TIMESTAMP NULL"},
 		{"account_groups", "description", "TEXT DEFAULT ''"},
 		{"account_groups", "color", "TEXT DEFAULT ''"},
@@ -304,6 +307,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "auto_clean_rate_limited", "INTEGER DEFAULT 0"},
 		{"system_settings", "background_refresh_interval_minutes", "INTEGER DEFAULT 2"},
 		{"system_settings", "usage_probe_max_age_minutes", "INTEGER DEFAULT 10"},
+		{"system_settings", "usage_probe_concurrency", "INTEGER DEFAULT 16"},
 		{"system_settings", "recovery_probe_interval_minutes", "INTEGER DEFAULT 30"},
 		{"system_settings", "admin_secret", "TEXT DEFAULT ''"},
 		{"system_settings", "auto_clean_full_usage", "INTEGER DEFAULT 0"},
@@ -338,6 +342,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "account_rpm", "INTEGER DEFAULT 0"},
 		{"system_settings", "model_rpm", "INTEGER DEFAULT 0"},
 		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
+		{"system_settings", "affinity_mode", "TEXT DEFAULT 'bounded'"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},
@@ -705,18 +710,28 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 	return result, nil
 }
 
-// getUsageStatsSQLite SQLite 版使用统计（内存聚合，避免 PG 特有语法）
-func (db *DB) getUsageStatsSQLite(ctx context.Context) (*UsageStats, error) {
+// getUsageStatsSQLite SQLite 版使用统计（内存聚合，避免 PG 特有语法）。
+// rangeStart 为零值时回落到"今日"(本地 0 点起);rangeEnd 为零值表示至今。
+func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time.Time) (*UsageStats, error) {
 	now := time.Now()
-	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if rangeStart.IsZero() {
+		rangeStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	}
 	minuteAgo := now.Add(-1 * time.Minute)
 
-	rows, err := db.conn.QueryContext(ctx, `
+	query := `
 			SELECT created_at, total_tokens, prompt_tokens, completion_tokens,
 			       cached_tokens, first_token_ms, duration_ms, status_code, account_billed, user_billed
 			FROM usage_logs
 			WHERE created_at >= $1 AND status_code <> 499
-		`, db.timeArg(todayStart))
+		`
+	args := []interface{}{db.timeArg(rangeStart)}
+	if !rangeEnd.IsZero() {
+		query += " AND created_at < $2"
+		args = append(args, db.timeArg(rangeEnd))
+	}
+
+	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -6,9 +6,12 @@ import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
-import ToastNotice from "../components/ToastNotice";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
+import {
+  DEFAULT_PAGE_SIZE_OPTIONS,
+  usePersistedPageSize,
+} from "../hooks/usePersistedPageSize";
 import { useToast } from "../hooks/useToast";
 import type {
   AccountRow,
@@ -249,10 +252,14 @@ async function runAccountBatch(
 
 export default function Accounts() {
   const { t } = useTranslation();
-  const pageSizeOptions = [10, 20, 50, 100];
+  const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [showAdd, setShowAdd] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = usePersistedPageSize(
+    "accounts",
+    20,
+    pageSizeOptions,
+  );
   const [statusFilter, setStatusFilter] = useState<
     | "all"
     | "normal"
@@ -1726,7 +1733,7 @@ export default function Accounts() {
           failed: result.failed,
         }),
       );
-      void reload();
+      void reloadSilently();
     } catch (error) {
       showToast(
         t("accounts.batchTestFailed", { error: getErrorMessage(error) }),
@@ -2306,6 +2313,14 @@ export default function Accounts() {
                 accounts={accounts}
                 compact
                 className="min-w-0"
+                onProbeStarted={() => {
+                  showToast(t('accounts.quotaDistributionRefreshStarted'), 'success')
+                  // 探针在后台并发执行；稍等一下再静默拉取，让首批结果有机会回流
+                  window.setTimeout(() => {
+                    void reloadSilently()
+                  }, 4000)
+                }}
+                onProbeError={(message) => showToast(message, 'error')}
               />
               <AccountRateLimitRecoveryChart
                 accounts={accounts}
@@ -2319,7 +2334,7 @@ export default function Accounts() {
           ) : null}
 
           <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_max-content]">
-            <div className="toolbar-surface flex items-center gap-1.5 overflow-visible max-lg:overflow-x-auto xl:flex-nowrap">
+            <div className="toolbar-surface flex items-center gap-1.5 overflow-visible max-lg:flex-wrap max-lg:overflow-visible xl:flex-nowrap">
               <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
                 {t("accounts.filter")}
               </span>
@@ -2367,7 +2382,7 @@ export default function Accounts() {
               ))}
             </div>
 
-            <div className="toolbar-surface flex items-center gap-1.5 overflow-visible max-lg:overflow-x-auto xl:flex-nowrap">
+            <div className="toolbar-surface flex items-center gap-1.5 overflow-visible max-lg:flex-wrap max-lg:overflow-visible xl:flex-nowrap">
               <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
                 {t("accounts.schedulerView")}
               </span>
@@ -2394,7 +2409,7 @@ export default function Accounts() {
             </div>
           </div>
 
-          <div className="mb-4 flex items-center gap-2 overflow-visible max-lg:flex-wrap max-lg:overflow-x-auto">
+          <div className="mb-4 flex items-center gap-2 overflow-visible max-lg:flex-wrap max-lg:overflow-visible">
             <div className="relative w-64 shrink-0 max-sm:w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
               <Input
@@ -2407,7 +2422,7 @@ export default function Accounts() {
                 }}
               />
             </div>
-            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
+            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5 max-sm:w-full max-sm:flex-wrap">
               {(["all", "pro", "prolite", "plus", "team", "free"] as const).map(
                 (key) => (
                   <button
@@ -2602,7 +2617,7 @@ export default function Accounts() {
           )}
 
           <Card>
-            <CardContent className="p-4">
+            <CardContent className="p-3 sm:p-4">
               <StateShell
                 variant="section"
                 isEmpty={accounts.length === 0}
@@ -2614,7 +2629,40 @@ export default function Accounts() {
                   </Button>
                 }
               >
-                <div className="data-table-shell">
+                <div className="grid gap-3 lg:hidden">
+                  {pagedAccounts.map((account, index) => {
+                    const isSelected = selected.has(account.id);
+                    return (
+                      <AccountMobileCard
+                        key={account.id}
+                        account={account}
+                        sequence={(currentPage - 1) * pageSize + index + 1}
+                        selected={isSelected}
+                        allGroups={allGroups}
+                        lazyMode={lazyMode}
+                        refreshing={refreshingIds.has(account.id)}
+                        authJsonExporting={authJsonExportingIds.has(account.id)}
+                        t={t}
+                        onToggleSelect={() => toggleSelect(account.id)}
+                        onEdit={() => openSchedulerEditor(account)}
+                        onUsage={() => setUsageAccount(account)}
+                        onTest={() => setTestingAccount(account)}
+                        onRefresh={() => void handleRefresh(account)}
+                        onGenerateAuthJson={() =>
+                          void handleGenerateAuthJSON(account)
+                        }
+                        onToggleEnabled={() =>
+                          void handleToggleEnabled(account)
+                        }
+                        onToggleLock={() => void handleToggleLock(account)}
+                        onResetStatus={() => void handleResetStatus(account)}
+                        onDelete={() => void handleDelete(account)}
+                      />
+                    );
+                  })}
+                </div>
+
+                <div className="data-table-shell hidden lg:block">
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -4737,8 +4785,6 @@ export default function Accounts() {
           </Modal>
 
           {confirmDialog}
-
-          <ToastNotice toast={toast} />
         </>
       </StateShell>
     </div>
@@ -5616,6 +5662,345 @@ function ColumnSettingsMenu({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function AccountMobileCard({
+  account,
+  sequence,
+  selected,
+  allGroups,
+  lazyMode,
+  refreshing,
+  authJsonExporting,
+  t,
+  onToggleSelect,
+  onEdit,
+  onUsage,
+  onTest,
+  onRefresh,
+  onGenerateAuthJson,
+  onToggleEnabled,
+  onToggleLock,
+  onResetStatus,
+  onDelete,
+}: {
+  account: AccountRow;
+  sequence: number;
+  selected: boolean;
+  allGroups: AccountGroup[];
+  lazyMode: boolean;
+  refreshing: boolean;
+  authJsonExporting: boolean;
+  t: ReturnType<typeof useTranslation>["t"];
+  onToggleSelect: () => void;
+  onEdit: () => void;
+  onUsage: () => void;
+  onTest: () => void;
+  onRefresh: () => void;
+  onGenerateAuthJson: () => void;
+  onToggleEnabled: () => void;
+  onToggleLock: () => void;
+  onResetStatus: () => void;
+  onDelete: () => void;
+}) {
+  const displayName = account.openai_responses_api
+    ? formatAccountName(account)
+    : formatCompactEmail(account.email);
+  const fullName = formatAccountName(account);
+  const groups = resolveAccountGroups(account.group_ids ?? [], allGroups);
+  const refreshDisabled =
+    refreshing || account.at_only || account.openai_responses_api;
+  const authJsonDisabled =
+    authJsonExporting || account.at_only || account.openai_responses_api;
+
+  return (
+    <article
+      className={`min-w-0 rounded-lg border bg-card p-3 shadow-sm ${
+        selected ? "border-primary/35 bg-primary/5" : "border-border"
+      }`}
+    >
+      <div className="flex min-w-0 items-start gap-3">
+        <input
+          type="checkbox"
+          className="mt-1 size-4 shrink-0 cursor-pointer accent-primary"
+          checked={selected}
+          onChange={onToggleSelect}
+          aria-label={fullName}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-mono font-semibold text-muted-foreground">
+                  #{sequence}
+                </span>
+                <PlanBadge planType={account.plan_type} />
+              </div>
+              <div
+                className="mt-1 truncate text-[15px] font-semibold leading-tight text-foreground"
+                title={fullName}
+              >
+                {displayName}
+              </div>
+            </div>
+            <div className="shrink-0">
+              <StatusBadge
+                status={account.status}
+                detail={getAccountRateLimitWindow(account) ?? undefined}
+              />
+            </div>
+          </div>
+
+          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+            {account.at_only && (
+              <span className="inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950 dark:text-amber-400 dark:ring-amber-400/20">
+                AT
+              </span>
+            )}
+            {account.openai_responses_api && (
+              <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-400 dark:ring-emerald-400/20">
+                Responses API
+              </span>
+            )}
+            {account.enabled === false && (
+              <span className="inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
+                <PowerOff className="mr-0.5 size-2.5" />
+                {t("accounts.disabled")}
+              </span>
+            )}
+            {account.locked && (
+              <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
+                <Lock className="mr-0.5 size-2.5" />
+                {t("accounts.lock")}
+              </span>
+            )}
+            <AccountStatusCountdown account={account} />
+          </div>
+
+          {account.status === "error" && account.error_message && (
+            <div
+              className="mt-2 break-words text-[11px] leading-tight text-red-500"
+              title={account.error_message}
+            >
+              {account.error_message}
+            </div>
+          )}
+          {(account.model_cooldowns?.length ?? 0) > 0 && (
+            <div className="mt-2 text-[11px] leading-tight text-amber-600">
+              model {account.model_cooldowns?.[0]?.model}
+              {(account.model_cooldowns?.length ?? 0) > 1
+                ? ` +${(account.model_cooldowns?.length ?? 1) - 1}`
+                : ""}
+            </div>
+          )}
+          <div className="mt-1 text-[11px] text-muted-foreground">
+            {t("accounts.healthSummary", {
+              health: formatHealthTier(account.health_tier, t),
+              score: Math.round(getDispatchScore(account)),
+              concurrency: account.dynamic_concurrency_limit ?? "-",
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid min-w-0 grid-cols-2 gap-2 max-[380px]:grid-cols-1">
+        <AccountMobileMetric label={t("accounts.requests")}>
+          <div className="flex items-center gap-2 text-[13px]">
+            <span className="font-medium text-emerald-600">
+              {account.success_requests ?? 0}
+            </span>
+            <span className="text-muted-foreground">/</span>
+            <span className="font-medium text-red-500">
+              {account.error_requests ?? 0}
+            </span>
+          </div>
+          {((account.retry_error_requests ?? 0) > 0 ||
+            (account.rate_limit_attempts ?? 0) > 0) && (
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              retry {account.retry_error_requests ?? 0} · 429{" "}
+              {account.rate_limit_attempts ?? 0}
+            </div>
+          )}
+        </AccountMobileMetric>
+        <AccountMobileMetric label={t("accounts.billed")}>
+          <BilledCell account={account} />
+        </AccountMobileMetric>
+        <AccountMobileMetric
+          label={t("accounts.usage")}
+          className="col-span-2 max-[380px]:col-span-1"
+        >
+          <UsageCell account={account} />
+        </AccountMobileMetric>
+        <AccountMobileMetric label={t("accounts.updatedAt")}>
+          {lazyMode ? (
+            <div className="space-y-0.5">
+              <div>
+                <span className="mr-1 text-muted-foreground/70">
+                  {t("accounts.recordUpdatedAtShort")}
+                </span>
+                {formatRelativeTime(account.updated_at)}
+              </div>
+              <div>
+                <span className="mr-1 text-muted-foreground/70">
+                  {t("accounts.usageUpdatedAtShort")}
+                </span>
+                {account.codex_usage_updated_at
+                  ? formatRelativeTime(account.codex_usage_updated_at)
+                  : t("accounts.noUsageUpdatedAt")}
+              </div>
+            </div>
+          ) : (
+            formatRelativeTime(account.updated_at)
+          )}
+        </AccountMobileMetric>
+        <AccountMobileMetric label={t("accounts.importTime")}>
+          {formatBeijingTime(account.created_at)}
+        </AccountMobileMetric>
+      </div>
+
+      {((account.tags ?? []).length > 0 || groups.length > 0) && (
+        <div className="mt-3 space-y-1.5 border-t border-border pt-2">
+          <ChipList items={account.tags ?? []} tone="purple" />
+          <GroupChipList groups={groups} />
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-5 gap-1.5 max-[380px]:grid-cols-4">
+        <AccountMobileActionButton
+          title={t("accounts.editScheduler")}
+          onClick={onEdit}
+          icon={<Pencil className="size-3.5" />}
+        />
+        <AccountMobileActionButton
+          title={t("accounts.usageDetail")}
+          onClick={onUsage}
+          icon={<BarChart3 className="size-3.5" />}
+        />
+        <AccountMobileActionButton
+          title={t("accounts.testConnection")}
+          onClick={onTest}
+          icon={<Zap className="size-3.5" />}
+        />
+        <AccountMobileActionButton
+          title={
+            account.at_only || account.openai_responses_api
+              ? t("accounts.atRefreshDisabled")
+              : t("accounts.refreshAccessToken")
+          }
+          disabled={refreshDisabled}
+          onClick={onRefresh}
+          icon={
+            <RefreshCw
+              className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
+            />
+          }
+        />
+        <AccountMobileActionButton
+          title={
+            account.at_only || account.openai_responses_api
+              ? t("accounts.authJsonDisabled")
+              : t("accounts.generateAuthJson")
+          }
+          disabled={authJsonDisabled}
+          onClick={onGenerateAuthJson}
+          icon={<FileJson className="size-3.5" />}
+        />
+        <AccountMobileActionButton
+          title={
+            account.enabled === false
+              ? t("accounts.enableHint")
+              : t("accounts.disableHint")
+          }
+          variant={account.enabled === false ? "default" : "outline"}
+          onClick={onToggleEnabled}
+          icon={
+            account.enabled === false ? (
+              <Power className="size-3.5" />
+            ) : (
+              <PowerOff className="size-3.5" />
+            )
+          }
+        />
+        <AccountMobileActionButton
+          title={
+            account.locked ? t("accounts.unlockHint") : t("accounts.lockHint")
+          }
+          variant={account.locked ? "default" : "outline"}
+          onClick={onToggleLock}
+          icon={
+            account.locked ? (
+              <Lock className="size-3.5" />
+            ) : (
+              <Unlock className="size-3.5" />
+            )
+          }
+        />
+        <AccountMobileActionButton
+          title={t("accounts.resetStatusHint")}
+          onClick={onResetStatus}
+          icon={<RotateCcw className="size-3.5" />}
+        />
+        <AccountMobileActionButton
+          title={t("accounts.deleteAccount")}
+          variant="destructive"
+          onClick={onDelete}
+          icon={<Trash2 className="size-3.5" />}
+        />
+      </div>
+    </article>
+  );
+}
+
+function AccountMobileMetric({
+  label,
+  children,
+  className = "",
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`min-w-0 rounded-lg border border-border bg-muted/20 p-2 ${className}`}
+    >
+      <div className="mb-1 text-[11px] font-bold uppercase text-muted-foreground">
+        {label}
+      </div>
+      <div className="min-w-0 break-words text-[12px] leading-snug text-foreground">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AccountMobileActionButton({
+  title,
+  icon,
+  onClick,
+  disabled,
+  variant = "outline",
+}: {
+  title: string;
+  icon: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  variant?: "default" | "outline" | "destructive";
+}) {
+  return (
+    <Button
+      type="button"
+      variant={variant}
+      size="icon-sm"
+      className="h-9 w-full"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+    >
+      {icon}
+    </Button>
   );
 }
 
