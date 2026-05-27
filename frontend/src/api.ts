@@ -6,6 +6,7 @@ import type {
   AddOpenAIResponsesAccountRequest,
   AdminErrorResponse,
   APIKeysResponse,
+  APIKeyTokenStat,
   AccountsResponse,
   ChartAggregation,
   CreateAccountResponse,
@@ -31,8 +32,11 @@ import type {
   PromptFilterLogsResponse,
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
+  RuntimeStatusResponse,
+  ResetRadarResponse,
   SiteBranding,
   StatsResponse,
+  SetupHintsResponse,
   CPAExportEntry,
   SystemSettings,
   UpdateAccountSchedulerRequest,
@@ -43,6 +47,7 @@ import type {
   UsageStats,
   AccountGroup,
   AccountGroupsResponse,
+  BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
 } from './types'
@@ -92,7 +97,8 @@ function extractAdminErrorMessage(body: string, status: number): string {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
-  if (options.body !== undefined && options.body !== null && !headers.has('Content-Type')) {
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
+  if (options.body !== undefined && options.body !== null && !isFormData && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
 
@@ -228,6 +234,8 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/credit`, { method: 'PATCH', body: JSON.stringify(data) }),
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
+  getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),
   getOpsErrorSummary: (params: {
     start: string
     end: string
@@ -282,6 +290,15 @@ export const api = {
     if (params.end) searchParams.set('end', params.end)
     const qs = searchParams.toString()
     return request<UsageStats>(qs ? `/usage/stats?${qs}` : '/usage/stats')
+  },
+  getAPIKeyTokenStats: (params: { start?: string; end?: string } = {}) => {
+    const searchParams = new URLSearchParams()
+    if (params.start) searchParams.set('start', params.start)
+    if (params.end) searchParams.set('end', params.end)
+    const qs = searchParams.toString()
+    return request<{ items: APIKeyTokenStat[] }>(
+      qs ? `/usage/api-keys?${qs}` : '/usage/api-keys',
+    )
   },
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {
     const searchParams = new URLSearchParams()
@@ -379,9 +396,15 @@ export const api = {
     request<MessageResponse>(`/images/assets/${id}`, { method: 'DELETE' }),
   clearUsageLogs: () =>
     request<MessageResponse>('/usage/logs', { method: 'DELETE' }),
+  getSetupHints: () => request<SetupHintsResponse>('/setup-hints'),
   getSettings: () => request<SystemSettings>('/settings'),
   updateSettings: (data: Partial<SystemSettings>) =>
     request<SystemSettings>('/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  uploadBackground: (file: File) => {
+    const form = new FormData()
+    form.set('file', file)
+    return request<BackgroundUploadResponse>('/settings/background-upload', { method: 'POST', body: form })
+  },
   testImageStorageConnection: (data: {
     endpoint: string
     region: string

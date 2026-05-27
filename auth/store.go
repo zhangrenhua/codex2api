@@ -117,6 +117,8 @@ type Account struct {
 	Tags                    []string
 	GroupIDs                []int64
 	ModelCooldowns          map[string]ModelCooldown
+
+	SubscriptionExpiresAt time.Time
 }
 
 type ModelCooldown struct {
@@ -143,6 +145,10 @@ const (
 	premium7dUrgencyMaxBonus         = 80.0
 	premium7dUrgencyMinRemainingPct  = 5.0
 	premium7dUrgencyFullRemainingPct = 70.0
+	expiryUrgencyUrgentDays          = 3
+	expiryUrgencyWarnDays            = 7
+	expiryUrgencyUrgentBonus         = 60.0
+	expiryUrgencyWarnBonus           = 25.0
 )
 
 // SchedulerBreakdown 调度评分拆解
@@ -157,6 +163,7 @@ type SchedulerBreakdown struct {
 	UsagePenalty7d      float64
 	UsageUrgencyBonus5h float64
 	UsageUrgencyBonus7d float64
+	ExpiryUrgencyBonus  float64
 	LatencyPenalty      float64
 	SuccessRatePenalty  float64 // 滑动窗口成功率惩罚
 }
@@ -775,6 +782,30 @@ func (a *Account) effectiveScoreBiasLocked(now time.Time, tier AccountHealthTier
 	return defaultScoreBiasForPlan(a.PlanType)
 }
 
+// expiryUrgencyBonusLocked 在订阅快到期时给账号加分,促使调度器优先消耗它。
+// <= 3d 紧急(+60) / <= 7d 警告(+25) / 其它(0)。已过期/free/api 不加分。
+func (a *Account) expiryUrgencyBonusLocked(now time.Time) float64 {
+	if a.SubscriptionExpiresAt.IsZero() {
+		return 0
+	}
+	plan := strings.ToLower(strings.TrimSpace(a.PlanType))
+	if plan == "" || plan == "free" || plan == "api" {
+		return 0
+	}
+	remaining := a.SubscriptionExpiresAt.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	days := remaining.Hours() / 24
+	switch {
+	case days <= expiryUrgencyUrgentDays:
+		return expiryUrgencyUrgentBonus
+	case days <= expiryUrgencyWarnDays:
+		return expiryUrgencyWarnBonus
+	}
+	return 0
+}
+
 func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	now := time.Now()
 	breakdown := a.schedulerBreakdownLocked(now)
@@ -824,8 +855,9 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	if a.dispatchBonusEligibleLocked(now, tier) {
 		breakdown.UsageUrgencyBonus5h = a.premium5hUsageUrgencyBonusLocked(now)
 		breakdown.UsageUrgencyBonus7d = a.premium7dUsageUrgencyBonusLocked(now)
+		breakdown.ExpiryUrgencyBonus = a.expiryUrgencyBonusLocked(now)
 	}
-	dispatchScore := score + float64(scoreBiasEffective) + breakdown.UsageUrgencyBonus5h + breakdown.UsageUrgencyBonus7d
+	dispatchScore := score + float64(scoreBiasEffective) + breakdown.UsageUrgencyBonus5h + breakdown.UsageUrgencyBonus7d + breakdown.ExpiryUrgencyBonus
 
 	a.HealthTier = tier
 	a.SchedulerScore = score
@@ -1342,6 +1374,7 @@ func (a *Account) GetSchedulerDebugSnapshot(baseLimit int64) SchedulerDebugSnaps
 	if a.dispatchBonusEligibleLocked(now, a.HealthTier) {
 		breakdown.UsageUrgencyBonus5h = a.premium5hUsageUrgencyBonusLocked(now)
 		breakdown.UsageUrgencyBonus7d = a.premium7dUsageUrgencyBonusLocked(now)
+		breakdown.ExpiryUrgencyBonus = a.expiryUrgencyBonusLocked(now)
 	}
 	return SchedulerDebugSnapshot{
 		HealthTier:               string(a.HealthTier),
@@ -2256,6 +2289,14 @@ func (s *Store) GetUsageProbeConcurrency() int {
 	return n
 }
 
+// UsageProbeRunning reports whether a batch usage probe is currently active.
+func (s *Store) UsageProbeRunning() bool {
+	if s == nil {
+		return false
+	}
+	return s.usageProbeBatch.Load()
+}
+
 // SetRecoveryProbeInterval 设置恢复探测最小间隔。
 func (s *Store) SetRecoveryProbeInterval(d time.Duration) {
 	if d <= 0 {
@@ -2271,6 +2312,22 @@ func (s *Store) GetRecoveryProbeInterval() time.Duration {
 		return defaultRecoveryProbeInterval
 	}
 	return d
+}
+
+// RecoveryProbeRunning reports whether a batch recovery probe is currently active.
+func (s *Store) RecoveryProbeRunning() bool {
+	if s == nil {
+		return false
+	}
+	return s.recoveryProbeBatch.Load()
+}
+
+// AutoCleanupRunning reports whether an automatic cleanup pass is currently active.
+func (s *Store) AutoCleanupRunning() bool {
+	if s == nil {
+		return false
+	}
+	return s.autoCleanupBatch.Load()
 }
 
 // CleanExpiredNow 立即执行一次过期清理，返回清理数量
@@ -2386,6 +2443,11 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 				} else {
 					log.Printf("[账号 %d] 解析 expires_at 失败: %v", row.ID, err)
 				}
+			}
+		}
+		if subExp := row.GetCredential("subscription_expires_at"); subExp != "" {
+			if parsed, err := time.Parse(time.RFC3339, subExp); err == nil {
+				account.SubscriptionExpiresAt = parsed
 			}
 		}
 		if row.CooldownUntil.Valid {
@@ -2637,6 +2699,7 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 		bestPriority := -1
 		bestDispatchScore := -math.MaxFloat64
 		var bestLoad int64 = math.MaxInt64
+		var bestLimit int64
 		maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 
 		for _, acc := range s.accounts {
@@ -2667,6 +2730,7 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 				bestPriority = priority
 				bestDispatchScore = dispatchScore
 				bestLoad = load
+				bestLimit = limit
 				best = acc
 			}
 		}
@@ -2678,10 +2742,9 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 		if s.accountHasCachedCooldown(best) {
 			continue
 		}
-		atomic.AddInt64(&best.ActiveRequests, 1)
-		atomic.AddInt64(&best.TotalRequests, 1)
-		atomic.StoreInt64(&best.LastUsedAt, time.Now().UnixNano())
-		return best
+		if tryAcquireAccount(best, bestLimit) {
+			return best
+		}
 	}
 	return nil
 }
@@ -2936,9 +2999,9 @@ func (s *Store) NextForSession(key string, apiKeyID int64, exclude map[int64]boo
 // affinity_mode 决定粘性强度:
 //   - off:     永不读绑定,每次都走完整挑号策略
 //   - bounded (默认): 绑定有效但被以下任一条件解除
-//     • 累计请求超过 defaultMaxAffinityRequests (50)
-//     • 绑定时长超过 defaultMaxAffinityDuration (5min)
-//     • 绑定账号当前已不属于 healthy 桶 (warm/risky/banned)
+//   - 累计请求超过 defaultMaxAffinityRequests (50)
+//   - 绑定时长超过 defaultMaxAffinityDuration (5min)
+//   - 绑定账号当前已不属于 healthy 桶 (warm/risky/banned)
 //   - strict:  完全沿用旧行为,只在 TTL 过期或显式 Unbind 时换号
 //
 // 解除发生时绕过 binding 走完整挑号策略(NextExcludingWithFilter),后续 BindSessionAffinity
@@ -4740,6 +4803,9 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		} else if acc.PlanType == "" {
 			log.Printf("[账号 %d] 刷新后 plan_type 为空，无法识别套餐类型", dbID)
 		}
+		if !info.SubscriptionExpiresAt.IsZero() {
+			acc.SubscriptionExpiresAt = info.SubscriptionExpiresAt
+		}
 	}
 	if activeCooldown {
 		acc.Status = StatusCooldown
@@ -4784,6 +4850,9 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		}
 		if appliedPlanType != "" {
 			credentials["plan_type"] = appliedPlanType
+		}
+		if !info.SubscriptionExpiresAt.IsZero() {
+			credentials["subscription_expires_at"] = info.SubscriptionExpiresAt.Format(time.RFC3339)
 		}
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {

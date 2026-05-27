@@ -1,6 +1,6 @@
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { api, getAdminKey } from "../api";
+import { api, getAdminKey, resetAdminAuthState } from "../api";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
@@ -74,6 +74,8 @@ import {
   Hourglass,
   X,
   SlidersHorizontal,
+  LayoutGrid,
+  Rows3,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -83,7 +85,6 @@ import AccountRateLimitRecoveryChart from "../components/AccountRateLimitRecover
 import ChipInput from "../components/ChipInput";
 
 const ACCOUNT_BATCH_CONCURRENCY = 6;
-const ACCOUNT_REFRESH_BATCH_CONCURRENCY = 4;
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
 const ACCOUNT_VISIBLE_COLUMNS_KEY = "codex2api:accounts:visible-columns";
 const ACCOUNT_TABLE_COLUMNS = [
@@ -163,6 +164,27 @@ function persistAccountVisibleColumns(
     );
   } catch {
     // Keep the in-memory preference working when localStorage is unavailable.
+  }
+}
+
+const ACCOUNT_VIEW_MODE_KEY = "codex2api:accounts:view-mode";
+type AccountViewMode = "table" | "grid";
+
+function getInitialAccountViewMode(): AccountViewMode {
+  try {
+    const raw = window.localStorage.getItem(ACCOUNT_VIEW_MODE_KEY);
+    if (raw === "grid" || raw === "table") return raw;
+  } catch {
+    // ignore
+  }
+  return "table";
+}
+
+function persistAccountViewMode(mode: AccountViewMode) {
+  try {
+    window.localStorage.setItem(ACCOUNT_VIEW_MODE_KEY, mode);
+  } catch {
+    // ignore
   }
 }
 
@@ -250,6 +272,95 @@ async function runAccountBatch(
   return { success, fail };
 }
 
+type BatchOperationAction = "batch_test" | "batch_delete" | "batch_refresh";
+
+interface BatchOperationEvent {
+  type: "start" | "progress" | "complete";
+  action: BatchOperationAction;
+  current?: number;
+  total?: number;
+  success?: number;
+  failed?: number;
+  banned?: number;
+  rate_limited?: number;
+  deleted?: number;
+  account_id?: number;
+  message?: string;
+  error?: string;
+}
+
+interface OperationProgressState {
+  show: boolean;
+  action: BatchOperationAction;
+  title: string;
+  current: number;
+  total: number;
+  success: number;
+  failed: number;
+  banned: number;
+  rateLimited: number;
+  deleted: number;
+  done: boolean;
+  message?: string;
+}
+
+async function readOperationSSE(
+  res: Response,
+  onEvent: (event: BatchOperationEvent) => void,
+) {
+  const reader = res.body?.getReader();
+  if (!reader) return;
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)) as BatchOperationEvent);
+      } catch {
+        /* 忽略格式异常的进度帧 */
+      }
+    }
+  }
+}
+
+async function readAdminStreamError(res: Response): Promise<string> {
+  const body = await res.text();
+  if (!body.trim()) return `HTTP ${res.status}`;
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    if (parsed.error?.trim()) return parsed.error;
+  } catch {
+    /* ignore */
+  }
+  return body;
+}
+
+async function postAdminSSE(path: string, body?: unknown): Promise<Response> {
+  const headers: Record<string, string> = {};
+  const adminKey = getAdminKey();
+  if (adminKey) headers["X-Admin-Key"] = adminKey;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
+  const res = await fetch(`/api/admin${path}`, {
+    method: "POST",
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    if (res.status === 401) resetAdminAuthState();
+    throw new Error(await readAdminStreamError(res));
+  }
+  return res;
+}
+
 export default function Accounts() {
   const { t } = useTranslation();
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
@@ -296,6 +407,9 @@ export default function Accounts() {
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchRefreshing, setBatchRefreshing] = useState(false);
   const [batchTesting, setBatchTesting] = useState(false);
+  const [operationProgress, setOperationProgress] =
+    useState<OperationProgressState | null>(null);
+  const operationProgressHideTimer = useRef<number | null>(null);
   const [lockingSubscriptionAccounts, setLockingSubscriptionAccounts] =
     useState(false);
   const [cleaningBanned, setCleaningBanned] = useState(false);
@@ -405,6 +519,9 @@ export default function Accounts() {
   const [visibleColumns, setVisibleColumns] = useState<
     Record<AccountTableColumn, boolean>
   >(getInitialAccountVisibleColumns);
+  const [viewMode, setViewMode] = useState<AccountViewMode>(
+    getInitialAccountViewMode,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
   const jsonAtInputRef = useRef<HTMLInputElement>(null);
@@ -414,6 +531,78 @@ export default function Accounts() {
   const lazyModeRef = useRef<boolean | null>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
+
+  useEffect(() => {
+    return () => {
+      if (operationProgressHideTimer.current !== null) {
+        window.clearTimeout(operationProgressHideTimer.current);
+      }
+    };
+  }, []);
+
+  const closeOperationProgress = useCallback(() => {
+    if (operationProgressHideTimer.current !== null) {
+      window.clearTimeout(operationProgressHideTimer.current);
+      operationProgressHideTimer.current = null;
+    }
+    setOperationProgress(null);
+  }, []);
+
+  const scheduleOperationProgressClose = useCallback(() => {
+    if (operationProgressHideTimer.current !== null) {
+      window.clearTimeout(operationProgressHideTimer.current);
+    }
+    operationProgressHideTimer.current = window.setTimeout(() => {
+      setOperationProgress(null);
+      operationProgressHideTimer.current = null;
+    }, 5000);
+  }, []);
+
+  const applyOperationProgressEvent = useCallback(
+    (title: string, event: BatchOperationEvent) => {
+      if (operationProgressHideTimer.current !== null) {
+        window.clearTimeout(operationProgressHideTimer.current);
+        operationProgressHideTimer.current = null;
+      }
+      setOperationProgress((prev) => ({
+        show: true,
+        action: event.action,
+        title,
+        current: event.current ?? prev?.current ?? 0,
+        total: event.total ?? prev?.total ?? 0,
+        success: event.success ?? prev?.success ?? 0,
+        failed: event.failed ?? prev?.failed ?? 0,
+        banned: event.banned ?? prev?.banned ?? 0,
+        rateLimited: event.rate_limited ?? prev?.rateLimited ?? 0,
+        deleted: event.deleted ?? prev?.deleted ?? 0,
+        done: event.type === "complete",
+        message: event.error || event.message || prev?.message,
+      }));
+      if (event.type === "complete") {
+        scheduleOperationProgressClose();
+      }
+    },
+    [scheduleOperationProgressClose],
+  );
+
+  const runStreamingAccountOperation = useCallback(
+    async (
+      path: string,
+      body: unknown,
+      title: string,
+    ): Promise<BatchOperationEvent | null> => {
+      let finalEvent: BatchOperationEvent | null = null;
+      const res = await postAdminSSE(path, body);
+      await readOperationSSE(res, (event) => {
+        applyOperationProgressEvent(title, event);
+        if (event.type === "complete") {
+          finalEvent = event;
+        }
+      });
+      return finalEvent;
+    },
+    [applyOperationProgressEvent],
+  );
 
   const loadAccounts = useCallback(async (options?: LoadOptions) => {
     const shouldLoadSettings = !options?.silent || lazyModeRef.current === null;
@@ -472,6 +661,10 @@ export default function Accounts() {
   useEffect(() => {
     persistAccountVisibleColumns(visibleColumns);
   }, [visibleColumns]);
+
+  useEffect(() => {
+    persistAccountViewMode(viewMode);
+  }, [viewMode]);
 
   useEffect(() => {
     if (groupFilter === null) return;
@@ -1353,11 +1546,11 @@ export default function Accounts() {
         const blob = new Blob([JSON.stringify(data, null, 2)], {
           type: "application/json",
         });
-        downloadBlob(blob, `cpa-${ts}-${data.length}.json`);
+        downloadBlob(blob, `codex2api-${ts}-${data.length}.json`);
       } else {
         const text = data.map((e) => e.refresh_token).join("\n");
         const blob = new Blob([text], { type: "text/plain" });
-        downloadBlob(blob, `rt-${ts}-${data.length}.txt`);
+        downloadBlob(blob, `codex2api-rt-${ts}-${data.length}.txt`);
       }
       showToast(t("accounts.exportSuccess", { count: data.length }));
     } catch (error) {
@@ -1574,10 +1767,21 @@ export default function Accounts() {
     if (!confirmed) return;
     setBatchLoading(true);
     try {
-      const { success, fail } = await runAccountBatch(ids, api.deleteAccount);
+      const result = await runStreamingAccountOperation(
+        "/accounts/batch-delete?stream=true",
+        { ids },
+        t("accounts.batchDeleteProgressTitle"),
+      );
+      const success = result?.success ?? result?.deleted ?? 0;
+      const fail = result?.failed ?? 0;
       showToast(t("accounts.batchDeleteDone", { success, fail }));
       setSelected(new Set());
       void reload();
+    } catch (error) {
+      showToast(
+        t("accounts.batchDeleteFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
     } finally {
       setBatchLoading(false);
     }
@@ -1589,13 +1793,20 @@ export default function Accounts() {
     setBatchLoading(true);
     setBatchRefreshing(true);
     try {
-      const { success, fail } = await runAccountBatch(
-        targetIds,
-        api.refreshAccount,
-        ACCOUNT_REFRESH_BATCH_CONCURRENCY,
+      const result = await runStreamingAccountOperation(
+        "/accounts/batch-refresh?stream=true",
+        { ids: targetIds },
+        t("accounts.batchRefreshProgressTitle"),
       );
+      const success = result?.success ?? 0;
+      const fail = result?.failed ?? 0;
       showToast(t("accounts.batchRefreshDone", { success, fail }));
       void reload();
+    } catch (error) {
+      showToast(
+        t("accounts.batchRefreshFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
     } finally {
       setBatchLoading(false);
       setBatchRefreshing(false);
@@ -1724,13 +1935,17 @@ export default function Accounts() {
     if (ids && ids.length === 0) return;
     setBatchTesting(true);
     try {
-      const result = await api.batchTestAccounts(ids);
+      const result = await runStreamingAccountOperation(
+        "/accounts/batch-test?stream=true",
+        ids ? { ids } : undefined,
+        t("accounts.batchTestProgressTitle"),
+      );
       showToast(
         t("accounts.batchTestDone", {
-          success: result.success,
-          banned: result.banned,
-          rateLimited: result.rate_limited,
-          failed: result.failed,
+          success: result?.success ?? 0,
+          banned: result?.banned ?? 0,
+          rateLimited: result?.rate_limited ?? 0,
+          failed: result?.failed ?? 0,
         }),
       );
       void reloadSilently();
@@ -2075,6 +2290,10 @@ export default function Accounts() {
           </div>
         </div>
       )}
+      <OperationProgressToast
+        progress={operationProgress}
+        onClose={closeOperationProgress}
+      />
       <StateShell
         variant="page"
         loading={loading}
@@ -2485,7 +2704,39 @@ export default function Accounts() {
               <FolderOpen className="size-3.5" />
               {t("accounts.groupManage")}
             </Button>
-            <div className="ml-auto shrink-0">
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <div className="hidden lg:inline-flex items-center rounded-md border border-border bg-muted/50 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setViewMode("table")}
+                  title={t("accounts.viewModeTable")}
+                  aria-label={t("accounts.viewModeTable")}
+                  aria-pressed={viewMode === "table"}
+                  className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
+                    viewMode === "table"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Rows3 className="size-3.5" />
+                  {t("accounts.viewModeTable")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("grid")}
+                  title={t("accounts.viewModeGrid")}
+                  aria-label={t("accounts.viewModeGrid")}
+                  aria-pressed={viewMode === "grid"}
+                  className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
+                    viewMode === "grid"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <LayoutGrid className="size-3.5" />
+                  {t("accounts.viewModeGrid")}
+                </button>
+              </div>
               <ColumnSettingsMenu
                 columns={visibleColumns}
                 onToggle={(column) =>
@@ -2629,7 +2880,13 @@ export default function Accounts() {
                   </Button>
                 }
               >
-                <div className="grid gap-3 lg:hidden">
+                <div
+                  className={
+                    viewMode === "grid"
+                      ? "grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+                      : "grid gap-3 lg:hidden"
+                  }
+                >
                   {pagedAccounts.map((account, index) => {
                     const isSelected = selected.has(account.id);
                     return (
@@ -2662,7 +2919,9 @@ export default function Accounts() {
                   })}
                 </div>
 
-                <div className="data-table-shell hidden lg:block">
+                <div
+                  className={`data-table-shell hidden lg:block ${viewMode === "grid" ? "lg:hidden" : ""}`}
+                >
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -2866,7 +3125,13 @@ export default function Accounts() {
                             )}
                             {visibleColumns.plan && (
                               <TableCell>
-                                <PlanBadge planType={account.plan_type} />
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <PlanBadge planType={account.plan_type} />
+                                  <ExpiryBadge
+                                    expiresAt={account.subscription_expires_at}
+                                    planType={account.plan_type}
+                                  />
+                                </div>
                               </TableCell>
                             )}
                             {visibleColumns.status && (
@@ -2879,6 +3144,7 @@ export default function Accounts() {
                                         getAccountRateLimitWindow(account) ??
                                         undefined
                                       }
+                                      errorMessage={account.error_message}
                                     />
                                     <AccountStatusCountdown account={account} />
                                   </div>
@@ -4812,8 +5078,12 @@ function formatJSONText(text: string) {
 
 async function copyTextToClipboard(text: string) {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back for non-secure contexts or browsers that block clipboard writes.
+    }
   }
 
   const textarea = document.createElement("textarea");
@@ -4822,8 +5092,11 @@ async function copyTextToClipboard(text: string) {
   textarea.style.position = "fixed";
   textarea.style.top = "-1000px";
   textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
   document.body.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
   textarea.select();
+  textarea.setSelectionRange(0, text.length);
   const copied = document.execCommand("copy");
   document.body.removeChild(textarea);
   if (!copied) {
@@ -5292,6 +5565,129 @@ function HeaderActionMenu({
   );
 }
 
+function OperationProgressToast({
+  progress,
+  onClose,
+}: {
+  progress: OperationProgressState | null;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!progress?.show) return null;
+
+  const percent =
+    progress.total > 0
+      ? Math.min(100, Math.max(0, Math.round((progress.current / progress.total) * 100)))
+      : 0;
+  const metrics =
+    progress.action === "batch_delete"
+      ? [
+          {
+            label: t("accounts.operationProgressDeleted"),
+            value: progress.deleted || progress.success,
+            tone: "text-emerald-600 dark:text-emerald-400",
+          },
+          {
+            label: t("accounts.operationProgressFailed"),
+            value: progress.failed,
+            tone: "text-red-600 dark:text-red-400",
+          },
+        ]
+      : progress.action === "batch_refresh"
+        ? [
+            {
+              label: t("accounts.operationProgressSuccess"),
+              value: progress.success,
+              tone: "text-emerald-600 dark:text-emerald-400",
+            },
+            {
+              label: t("accounts.operationProgressFailed"),
+              value: progress.failed,
+              tone: "text-red-600 dark:text-red-400",
+            },
+          ]
+        : [
+            {
+              label: t("accounts.operationProgressSuccess"),
+              value: progress.success,
+              tone: "text-emerald-600 dark:text-emerald-400",
+            },
+            {
+              label: t("accounts.operationProgressBanned"),
+              value: progress.banned,
+              tone: "text-red-600 dark:text-red-400",
+            },
+            {
+              label: t("accounts.operationProgressRateLimited"),
+              value: progress.rateLimited,
+              tone: "text-amber-600 dark:text-amber-400",
+            },
+            {
+              label: t("accounts.operationProgressFailed"),
+              value: progress.failed,
+              tone: "text-red-600 dark:text-red-400",
+            },
+          ];
+
+  return (
+    <div className="fixed right-4 top-4 z-[80] w-[min(380px,calc(100vw-2rem))] rounded-lg border border-border bg-card/98 p-4 text-card-foreground shadow-xl backdrop-blur">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            {progress.done ? (
+              <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <Hourglass className="size-4 shrink-0 animate-pulse text-primary" />
+            )}
+            <div className="truncate text-sm font-semibold">{progress.title}</div>
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {progress.done
+              ? t("accounts.operationProgressDone")
+              : t("accounts.operationProgressRunning")}
+            {" · "}
+            {progress.current}/{progress.total || 0}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={onClose}
+          aria-label={t("common.close")}
+        >
+          <X className="size-4" />
+        </button>
+      </div>
+
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ease-out ${
+            progress.done ? "bg-emerald-500" : "bg-primary"
+          }`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        {metrics.map((metric) => (
+          <div key={metric.label} className="rounded-md bg-muted/40 px-2 py-1.5">
+            <div className="text-muted-foreground">{metric.label}</div>
+            <div className={`mt-0.5 font-semibold ${metric.tone}`}>
+              {metric.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {progress.message ? (
+        <div className="mt-3 max-h-10 overflow-hidden break-words text-xs text-muted-foreground">
+          {progress.message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function formatPlanLabel(planType?: string): string {
   const raw = (planType || "").trim();
   if (!raw) return "-";
@@ -5299,6 +5695,53 @@ function formatPlanLabel(planType?: string): string {
   if (lower === "prolite" || lower === "pro_lite" || lower === "pro-lite")
     return "ProLite";
   return raw;
+}
+
+function ExpiryBadge({ expiresAt, planType }: { expiresAt?: string; planType?: string }) {
+  const { t, i18n } = useTranslation();
+  if (!expiresAt) return null;
+  const plan = (planType || "").toLowerCase().trim();
+  if (plan === "" || plan === "free" || plan === "api") return null;
+
+  const timestamp = Date.parse(expiresAt);
+  if (Number.isNaN(timestamp)) return null;
+
+  const days = Math.floor((timestamp - Date.now()) / 86_400_000);
+  const localDate = new Date(timestamp).toLocaleDateString(i18n.language);
+
+  if (days < 0) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiredTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-400/30 dark:bg-zinc-700/50 dark:text-zinc-300 dark:ring-zinc-500/30"
+      >
+        {t("accounts.subscriptionExpiredDays", { days: -days })}
+      </span>
+    );
+  }
+  if (days <= 3) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-inset ring-red-500/30 dark:bg-red-500/20 dark:text-red-300 dark:ring-red-400/30"
+      >
+        {days === 0
+          ? t("accounts.subscriptionExpiresToday")
+          : t("accounts.subscriptionExpiresDays", { days })}
+      </span>
+    );
+  }
+  if (days <= 7) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30"
+      >
+        {t("accounts.subscriptionExpiresDays", { days })}
+      </span>
+    );
+  }
+  return null;
 }
 
 function PlanBadge({ planType }: { planType?: string }) {
@@ -5736,6 +6179,10 @@ function AccountMobileCard({
                   #{sequence}
                 </span>
                 <PlanBadge planType={account.plan_type} />
+                <ExpiryBadge
+                  expiresAt={account.subscription_expires_at}
+                  planType={account.plan_type}
+                />
               </div>
               <div
                 className="mt-1 truncate text-[15px] font-semibold leading-tight text-foreground"
@@ -5748,6 +6195,7 @@ function AccountMobileCard({
               <StatusBadge
                 status={account.status}
                 detail={getAccountRateLimitWindow(account) ?? undefined}
+                errorMessage={account.error_message}
               />
             </div>
           </div>

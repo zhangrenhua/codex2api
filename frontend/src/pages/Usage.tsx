@@ -11,7 +11,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
-import type { APIKeyRow, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats } from '../types'
+import type { APIKeyRow, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats } from '../types'
 import { formatCompactEmail } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
@@ -30,9 +30,30 @@ import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
-function formatTokens(value?: number | null): string {
+function formatTokens(value?: number | null, showFullNumbers = false): string {
   if (value === undefined || value === null) return '0'
-  return value.toLocaleString()
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return '0'
+  const roundedValue = Math.round(numericValue)
+  if (showFullNumbers) return roundedValue.toLocaleString()
+
+  const absValue = Math.abs(numericValue)
+  const units = [
+    { value: 1_000_000_000_000, suffix: 'T' },
+    { value: 1_000_000_000, suffix: 'B' },
+    { value: 1_000_000, suffix: 'M' },
+    { value: 1_000, suffix: 'K' },
+  ]
+  const unit = units.find((item) => absValue >= item.value)
+  if (!unit) return roundedValue.toLocaleString()
+
+  const scaled = numericValue / unit.value
+  const fractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
+  const compact = scaled
+    .toFixed(fractionDigits)
+    .replace(/\.0+$/, '')
+    .replace(/(\.\d*?)0+$/, '$1')
+  return `${compact}${unit.suffix}`
 }
 
 function getStatusBadgeClassName(statusCode: number): string {
@@ -300,13 +321,19 @@ function buildModelPieData(stats: UsageModelStat[], useAmount: boolean, otherLab
   }))
 }
 
-function ModelSharePie({ stats }: { stats: UsageModelStat[] }) {
+function ModelSharePie({
+  stats,
+  showFullUsageNumbers,
+}: {
+  stats: UsageModelStat[]
+  showFullUsageNumbers: boolean
+}) {
   const { t } = useTranslation()
   const totalAmount = stats.reduce((sum, item) => sum + safeNumber(item.user_billed), 0)
   const totalRequests = stats.reduce((sum, item) => sum + safeNumber(item.requests), 0)
   const useAmount = totalAmount > 0
   const pieData = buildModelPieData(stats, useAmount, t('usage.modelStatsOther'))
-  const centerValue = useAmount ? formatCostCardValue(totalAmount) : formatTokens(totalRequests)
+  const centerValue = useAmount ? formatCostCardValue(totalAmount) : formatTokens(totalRequests, showFullUsageNumbers)
   const metricLabel = useAmount ? t('usage.modelPieAmount') : t('usage.modelPieRequests')
 
   if (pieData.length === 0) {
@@ -348,7 +375,7 @@ function ModelSharePie({ stats }: { stats: UsageModelStat[] }) {
             </Pie>
             <RechartsTooltip
               formatter={(value, name) => [
-                useAmount ? formatCostCardValue(Number(value ?? 0)) : formatTokens(Number(value ?? 0)),
+                useAmount ? formatCostCardValue(Number(value ?? 0)) : formatTokens(Number(value ?? 0), showFullUsageNumbers),
                 String(name ?? ''),
               ]}
               contentStyle={{
@@ -384,7 +411,13 @@ function ModelSharePie({ stats }: { stats: UsageModelStat[] }) {
   )
 }
 
-function ModelStatsPanel({ stats }: { stats: UsageModelStat[] }) {
+function ModelStatsPanel({
+  stats,
+  showFullUsageNumbers,
+}: {
+  stats: UsageModelStat[]
+  showFullUsageNumbers: boolean
+}) {
   const { t } = useTranslation()
   const totalRequests = stats.reduce((sum, item) => sum + safeNumber(item.requests), 0)
   const maxRequests = Math.max(1, ...stats.map((item) => safeNumber(item.requests)))
@@ -420,10 +453,10 @@ function ModelStatsPanel({ stats }: { stats: UsageModelStat[] }) {
                           {item.model}
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-muted-foreground">
-                          <span>{t('usage.modelStatsRequests')}: {formatTokens(item.requests)}</span>
-                          <span>{t('usage.modelStatsTokens')}: {formatTokens(item.tokens)}</span>
+                          <span>{t('usage.modelStatsRequests')}: {formatTokens(item.requests, showFullUsageNumbers)}</span>
+                          <span>{t('usage.modelStatsTokens')}: {formatTokens(item.tokens, showFullUsageNumbers)}</span>
                           {item.error_count > 0 && (
-                            <span className="text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')}: {formatTokens(item.error_count)}</span>
+                            <span className="text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')}: {formatTokens(item.error_count, showFullUsageNumbers)}</span>
                           )}
                         </div>
                       </div>
@@ -441,7 +474,7 @@ function ModelStatsPanel({ stats }: { stats: UsageModelStat[] }) {
                 )
               })}
             </div>
-            <ModelSharePie stats={stats} />
+            <ModelSharePie stats={stats} showFullUsageNumbers={showFullUsageNumbers} />
           </div>
         )}
       </CardContent>
@@ -449,7 +482,15 @@ function ModelStatsPanel({ stats }: { stats: UsageModelStat[] }) {
   )
 }
 
-function FeatureStatsPanel({ stats, totalRequests }: { stats?: UsageFeatureStats; totalRequests: number }) {
+function FeatureStatsPanel({
+  stats,
+  totalRequests,
+  showFullUsageNumbers,
+}: {
+  stats?: UsageFeatureStats
+  totalRequests: number
+  showFullUsageNumbers: boolean
+}) {
   const { t } = useTranslation()
   const safeStats = stats ?? {
     stream_requests: 0,
@@ -504,7 +545,7 @@ function FeatureStatsPanel({ stats, totalRequests }: { stats?: UsageFeatureStats
                   </span>
                 </div>
                 <div className="mt-0.5 font-geist-mono text-[20px] font-bold leading-tight tabular-nums text-foreground">
-                  {formatTokens(item.value)}
+                  {formatTokens(item.value, showFullUsageNumbers)}
                 </div>
                 <div className="mt-1.5 h-[3px] overflow-hidden rounded-full bg-foreground/5">
                   <div
@@ -521,7 +562,15 @@ function FeatureStatsPanel({ stats, totalRequests }: { stats?: UsageFeatureStats
   )
 }
 
-function EndpointStatsPanel({ stats, totalRequests }: { stats: UsageEndpointStat[]; totalRequests: number }) {
+function EndpointStatsPanel({
+  stats,
+  totalRequests,
+  showFullUsageNumbers,
+}: {
+  stats: UsageEndpointStat[]
+  totalRequests: number
+  showFullUsageNumbers: boolean
+}) {
   const { t } = useTranslation()
   return (
     <DistributionPanel
@@ -537,11 +586,20 @@ function EndpointStatsPanel({ stats, totalRequests }: { stats: UsageEndpointStat
         errors: item.error_count,
       }))}
       totalRequests={totalRequests}
+      showFullUsageNumbers={showFullUsageNumbers}
     />
   )
 }
 
-function APIKeyStatsPanel({ stats, totalRequests }: { stats: UsageAPIKeyStat[]; totalRequests: number }) {
+function APIKeyStatsPanel({
+  stats,
+  totalRequests,
+  showFullUsageNumbers,
+}: {
+  stats: UsageAPIKeyStat[]
+  totalRequests: number
+  showFullUsageNumbers: boolean
+}) {
   const { t } = useTranslation()
   return (
     <DistributionPanel
@@ -558,6 +616,7 @@ function APIKeyStatsPanel({ stats, totalRequests }: { stats: UsageAPIKeyStat[]; 
       }))}
       limit={3}
       totalRequests={totalRequests}
+      showFullUsageNumbers={showFullUsageNumbers}
     />
   )
 }
@@ -570,6 +629,7 @@ function DistributionPanel({
   items,
   limit = 6,
   totalRequests,
+  showFullUsageNumbers,
 }: {
   title: string
   description: string
@@ -578,6 +638,7 @@ function DistributionPanel({
   items: Array<{ key: string; label: string; requests: number; tokens: number; errors: number }>
   limit?: number
   totalRequests: number
+  showFullUsageNumbers: boolean
 }) {
   const { t } = useTranslation()
   const maxRequests = Math.max(1, ...items.map((item) => safeNumber(item.requests)))
@@ -611,10 +672,10 @@ function DistributionPanel({
                         {item.label}
                       </div>
                       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                        <span>{t('usage.modelStatsRequests')}: {formatTokens(item.requests)}</span>
-                        <span>{t('usage.modelStatsTokens')}: {formatTokens(item.tokens)}</span>
+                        <span>{t('usage.modelStatsRequests')}: {formatTokens(item.requests, showFullUsageNumbers)}</span>
+                        <span>{t('usage.modelStatsTokens')}: {formatTokens(item.tokens, showFullUsageNumbers)}</span>
                         {item.errors > 0 && (
-                          <span className="text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')}: {formatTokens(item.errors)}</span>
+                          <span className="text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')}: {formatTokens(item.errors, showFullUsageNumbers)}</span>
                         )}
                       </div>
                     </div>
@@ -877,14 +938,18 @@ export default function Usage() {
   // 仅加载轻量统计（秒级）—— 联动同页 timeRange,与下方请求记录的范围保持一致
   const loadStats = useCallback(async () => {
     const { start, end } = resolveRangeISO(timeRange, customRange)
-    const stats = await api.getUsageStats({ start, end })
-    return { stats }
+    const [stats, settings] = await Promise.all([
+      api.getUsageStats({ start, end }),
+      api.getSettings().catch((): SystemSettings | null => null),
+    ])
+    return { stats, settings }
   }, [timeRange, customRange])
 
   const { data, loading, error, reload, reloadSilently } = useDataLoader<{
     stats: UsageStats | null
+    settings: SystemSettings | null
   }>({
-    initialData: { stats: null },
+    initialData: { stats: null, settings: null },
     load: loadStats,
   })
 
@@ -966,7 +1031,8 @@ export default function Usage() {
     persistAnalysisVisibility(showAnalysis)
   }, [showAnalysis])
 
-  const { stats } = data
+  const { stats, settings } = data
+  const showFullUsageNumbers = settings?.show_full_usage_numbers ?? false
   const totalPages = Math.max(1, Math.ceil(logsTotal / pageSize))
   const currentPage = Math.min(page, totalPages)
 
@@ -1046,11 +1112,11 @@ export default function Usage() {
                 </div>
               </div>
               <div className={usageStatValueClass}>
-                {formatTokens(totalRequests)}
+                {formatTokens(totalRequests, showFullUsageNumbers)}
               </div>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span className="text-[hsl(var(--success))]">● {t('usage.success')}: {formatTokens(successRequests)}</span>
-                <span>● {rangeRequestsLabel}: {formatTokens(todayRequests)}</span>
+                <span className="text-[hsl(var(--success))]">● {t('usage.success')}: {formatTokens(successRequests, showFullUsageNumbers)}</span>
+                <span>● {rangeRequestsLabel}: {formatTokens(todayRequests, showFullUsageNumbers)}</span>
               </div>
             </CardContent>
           </Card>
@@ -1064,11 +1130,11 @@ export default function Usage() {
                 </div>
               </div>
               <div className={usageStatValueClass}>
-                {formatTokens(totalTokens)}
+                {formatTokens(totalTokens, showFullUsageNumbers)}
               </div>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span>{t('usage.inputTokens')}: {formatTokens(totalPromptTokens)}</span>
-                <span>{t('usage.outputTokens')}: {formatTokens(totalCompletionTokens)}</span>
+                <span>{t('usage.inputTokens')}: {formatTokens(totalPromptTokens, showFullUsageNumbers)}</span>
+                <span>{t('usage.outputTokens')}: {formatTokens(totalCompletionTokens, showFullUsageNumbers)}</span>
               </div>
             </CardContent>
           </Card>
@@ -1115,7 +1181,7 @@ export default function Usage() {
                 </div>
               </div>
               <div className={usageStatValueClass}>
-                {formatTokens(tpm)}
+                {formatTokens(tpm, showFullUsageNumbers)}
               </div>
               <div className="text-[11px] text-muted-foreground leading-snug">{t('usage.tpmDesc')}</div>
             </CardContent>
@@ -1140,13 +1206,13 @@ export default function Usage() {
         {showAnalysis && (
           <>
             <div className="grid grid-cols-[minmax(0,0.5fr)_minmax(360px,0.5fr)] gap-3 max-lg:grid-cols-1">
-              <ModelStatsPanel stats={modelStats} />
-              <FeatureStatsPanel stats={featureStats} totalRequests={totalRequests} />
+              <ModelStatsPanel stats={modelStats} showFullUsageNumbers={showFullUsageNumbers} />
+              <FeatureStatsPanel stats={featureStats} totalRequests={totalRequests} showFullUsageNumbers={showFullUsageNumbers} />
             </div>
 
             <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-              <EndpointStatsPanel stats={endpointStats} totalRequests={totalRequests} />
-              <APIKeyStatsPanel stats={apiKeyStats} totalRequests={totalRequests} />
+              <EndpointStatsPanel stats={endpointStats} totalRequests={totalRequests} showFullUsageNumbers={showFullUsageNumbers} />
+              <APIKeyStatsPanel stats={apiKeyStats} totalRequests={totalRequests} showFullUsageNumbers={showFullUsageNumbers} />
             </div>
           </>
         )}
@@ -1454,13 +1520,13 @@ export default function Usage() {
                         {visibleColumns.token && <TableCell>
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                             <div className={`${usageTableMonoClass} leading-relaxed`}>
-                              <span className="text-blue-500">↓{formatTokens(log.input_tokens)}</span>
+                              <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
                               <span className="mx-1 text-border">|</span>
-                              <span className="text-emerald-500">↑{formatTokens(log.output_tokens)}</span>
+                              <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
                               {log.reasoning_tokens > 0 && (
                                 <>
                                   <span className="mx-1 text-border">|</span>
-                                  <span className="text-amber-500 inline-flex items-center gap-0.5"><Brain className="size-3.5 inline" />{formatTokens(log.reasoning_tokens)}</span>
+                                  <span className="text-amber-500 inline-flex items-center gap-0.5"><Brain className="size-3.5 inline" />{formatTokens(log.reasoning_tokens, true)}</span>
                                 </>
                               )}
                             </div>
@@ -1475,7 +1541,7 @@ export default function Usage() {
                           {log.cached_tokens > 0 ? (
                             <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
                               <DatabaseZap className="size-3.5" />
-                              {formatTokens(log.cached_tokens)}
+                              {formatTokens(log.cached_tokens, true)}
                             </Badge>
                           ) : (
                             <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>

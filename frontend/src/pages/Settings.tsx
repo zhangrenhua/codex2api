@@ -7,10 +7,10 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { HealthResponse, ModelInfo, SystemSettings } from '../types'
+import type { HealthResponse, ModelInfo, SiteBranding, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
-import { DEFAULT_SITE_LOGO, sanitizeBrandingLogo, useBranding } from '../branding'
+import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -198,7 +198,7 @@ function StatusTile({
   children: ReactNode
 }) {
   return (
-    <div className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
+    <div data-slot="status-tile" className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
       <span className="text-[11px] font-bold uppercase text-muted-foreground">{label}</span>
       <div className="text-sm font-semibold text-foreground">{children}</div>
     </div>
@@ -207,6 +207,8 @@ function StatusTile({
 
 const SITE_LOGO_MAX_BYTES = 600 * 1024
 const SITE_LOGO_CANVAS_SIZE = 80
+const BACKGROUND_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+const BACKGROUND_VIDEO_UPLOAD_MAX_BYTES = 40 * 1024 * 1024
 
 function formatBytesKB(bytes: number) {
   return Math.max(1, Math.round(bytes / 1024))
@@ -218,6 +220,17 @@ function getSiteLogoMimeType(file: File) {
   if (type === 'image/png' || name.endsWith('.png')) return 'image/png'
   if (type === 'image/jpeg' || name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
   if (type === 'image/svg+xml' || name.endsWith('.svg')) return 'image/svg+xml'
+  return ''
+}
+
+function getBackgroundImageMimeType(file: File) {
+  const type = file.type.toLowerCase()
+  const name = file.name.toLowerCase()
+  if (type === 'image/png' || name.endsWith('.png')) return 'image/png'
+  if (type === 'image/jpeg' || name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
+  if (type === 'image/webp' || name.endsWith('.webp')) return 'image/webp'
+  if (type === 'image/svg+xml' || name.endsWith('.svg')) return 'image/svg+xml'
+  if (type === 'video/mp4' || name.endsWith('.mp4')) return 'video/mp4'
   return ''
 }
 
@@ -384,6 +397,11 @@ export default function Settings() {
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     site_name: 'CodexProxy',
     site_logo: '',
+    background_image: '',
+    background_opacity: 18,
+    background_blur: 0,
+    background_glass_opacity: 58,
+    background_glass_blur: 5,
     max_concurrency: 2,
     global_rpm: 0,
     account_rpm: 0,
@@ -434,6 +452,8 @@ export default function Settings() {
     usage_log_flush_interval_seconds: 5,
     stream_flush_policy: 'immediate',
     stream_flush_interval_ms: 20,
+    first_token_timeout_seconds: 0,
+    show_full_usage_numbers: false,
     image_storage_backend: 'local',
     image_s3_endpoint: '',
     image_s3_region: '',
@@ -453,12 +473,24 @@ export default function Settings() {
   const [modelsSourceURL, setModelsSourceURL] = useState('')
   const [syncingModels, setSyncingModels] = useState(false)
   const logoFileInputRef = useRef<HTMLInputElement>(null)
+  const backgroundFileInputRef = useRef<HTMLInputElement>(null)
+  const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
   const { toast, showToast } = useToast()
 
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
     setSettingsForm(normalizeLazySettingsForm(settings))
-    applyBranding({ site_name: settings.site_name, site_logo: settings.site_logo })
+    const branding = {
+      site_name: settings.site_name,
+      site_logo: settings.site_logo,
+      background_image: settings.background_image,
+      background_opacity: settings.background_opacity,
+      background_blur: settings.background_blur,
+      background_glass_opacity: settings.background_glass_opacity,
+      background_glass_blur: settings.background_glass_blur,
+    }
+    persistedBrandingRef.current = branding
+    applyBranding(branding)
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
     setModelItems(modelsResp.items ?? [])
@@ -484,7 +516,17 @@ export default function Settings() {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
       const updated = await api.updateSettings(normalizeLazySettingsForm(settingsForm))
       setSettingsForm(normalizeLazySettingsForm(updated))
-      applyBranding({ site_name: updated.site_name, site_logo: updated.site_logo })
+      const branding = {
+        site_name: updated.site_name,
+        site_logo: updated.site_logo,
+        background_image: updated.background_image,
+        background_opacity: updated.background_opacity,
+        background_blur: updated.background_blur,
+        background_glass_opacity: updated.background_glass_opacity,
+        background_glass_blur: updated.background_glass_blur,
+      }
+      persistedBrandingRef.current = branding
+      applyBranding(branding)
       setLoadedAdminSecret(updated.admin_secret ?? '')
       if (updated.admin_auth_source !== 'env') {
         setAdminKey(updated.admin_secret ?? '')
@@ -504,6 +546,36 @@ export default function Settings() {
       setSavingSettings(false)
     }
   }
+
+  useEffect(() => {
+    if (!persistedBrandingRef.current) return
+    applyBranding({
+      site_name: settingsForm.site_name,
+      site_logo: settingsForm.site_logo,
+      background_image: settingsForm.background_image,
+      background_opacity: settingsForm.background_opacity,
+      background_blur: settingsForm.background_blur,
+      background_glass_opacity: settingsForm.background_glass_opacity,
+      background_glass_blur: settingsForm.background_glass_blur,
+    })
+  }, [
+    applyBranding,
+    settingsForm.site_name,
+    settingsForm.site_logo,
+    settingsForm.background_image,
+    settingsForm.background_opacity,
+    settingsForm.background_blur,
+    settingsForm.background_glass_opacity,
+    settingsForm.background_glass_blur,
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (persistedBrandingRef.current) {
+        applyBranding(persistedBrandingRef.current)
+      }
+    }
+  }, [applyBranding])
 
   const handleSiteLogoUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -529,6 +601,34 @@ export default function Settings() {
       }
     } catch {
       showToast(t('settings.siteLogoCompressionFailed'), 'error')
+    }
+  }
+
+  const handleBackgroundImageUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    const mimeType = getBackgroundImageMimeType(file)
+    if (!mimeType) {
+      showToast(t('settings.backgroundImageInvalidType'), 'error')
+      return
+    }
+    const maxBytes = mimeType === 'video/mp4' ? BACKGROUND_VIDEO_UPLOAD_MAX_BYTES : BACKGROUND_IMAGE_UPLOAD_MAX_BYTES
+    if (file.size > maxBytes) {
+      showToast(t(mimeType === 'video/mp4' ? 'settings.backgroundVideoTooLarge' : 'settings.backgroundImageTooLarge'), 'error')
+      return
+    }
+
+    try {
+      const uploaded = await api.uploadBackground(file)
+      setSettingsForm((f) => ({
+        ...f,
+        background_image: uploaded.url,
+        background_opacity: f.background_opacity || 18,
+      }))
+      showToast(t('settings.backgroundImageUploaded'))
+    } catch (err) {
+      showToast(getErrorMessage(err) || t('settings.backgroundImageUploadFailed'), 'error')
     }
   }
 
@@ -579,6 +679,8 @@ export default function Settings() {
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
   const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
+  const backgroundImagePreview = sanitizeBrandingImage(settingsForm.background_image)
+  const backgroundIsVideo = isBrandingVideo(backgroundImagePreview)
   const visibleModelItems = useMemo(() => {
     if (modelItems.length > 0) {
       return modelItems
@@ -857,6 +959,15 @@ export default function Settings() {
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
                 />
               </SettingField>
+              <SettingField label={t('settings.firstTokenTimeout')} description={t('settings.firstTokenTimeoutDesc')}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={600}
+                  value={settingsForm.first_token_timeout_seconds}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
+                />
+              </SettingField>
             </div>
           </SettingsCard>
 
@@ -1110,9 +1221,137 @@ export default function Settings() {
                     ]}
                   />
                 </SettingField>
+                <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')}>
+                  <Select
+                    value={settingsForm.show_full_usage_numbers ? 'true' : 'false'}
+                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, show_full_usage_numbers: value === 'true' }))}
+                    options={booleanOptions}
+                  />
+                </SettingField>
               </div>
             </SettingsCard>
           </div>
+
+          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')}>
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
+              <div className="relative aspect-[16/7] min-h-[220px] overflow-hidden rounded-lg border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3]">
+                {backgroundImagePreview && backgroundIsVideo ? (
+                  <video
+                    src={backgroundImagePreview}
+                    className="size-full object-cover"
+                    style={{
+                      opacity: Math.min(100, Math.max(0, settingsForm.background_opacity)) / 100,
+                      filter: settingsForm.background_blur > 0 ? `blur(${settingsForm.background_blur}px)` : undefined,
+                      transform: settingsForm.background_blur > 0 ? 'scale(1.04)' : undefined,
+                    }}
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                  />
+                ) : backgroundImagePreview ? (
+                  <img
+                    src={backgroundImagePreview}
+                    alt=""
+                    className="size-full object-cover"
+                    style={{
+                      opacity: Math.min(100, Math.max(0, settingsForm.background_opacity)) / 100,
+                      filter: settingsForm.background_blur > 0 ? `blur(${settingsForm.background_blur}px)` : undefined,
+                      transform: settingsForm.background_blur > 0 ? 'scale(1.04)' : undefined,
+                    }}
+                  />
+                ) : (
+                  <div className="flex size-full items-center justify-center text-xs font-medium text-muted-foreground">
+                    {t('settings.backgroundImageEmpty')}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 flex-col justify-between gap-5">
+                <div className="min-w-0 space-y-3">
+                  <Input
+                    value={settingsForm.background_image}
+                    placeholder="/wallpaper.jpg or https://..."
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_image: e.target.value }))}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => backgroundFileInputRef.current?.click()}>
+                      <Upload className="size-4" />
+                      {t('settings.backgroundImageUpload')}
+                    </Button>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setSettingsForm(f => ({ ...f, background_image: '' }))}>
+                      <X className="size-4" />
+                      {t('settings.backgroundImageReset')}
+                    </Button>
+                  </div>
+                  <input
+                    ref={backgroundFileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml,video/mp4,.png,.jpg,.jpeg,.webp,.svg,.mp4"
+                    className="hidden"
+                    onChange={handleBackgroundImageUpload}
+                  />
+                </div>
+                <div className="grid gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundOpacity')}</span>
+                      <span>{settingsForm.background_opacity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={settingsForm.background_opacity}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_opacity: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundBlur')}</span>
+                      <span>{settingsForm.background_blur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={24}
+                      value={settingsForm.background_blur}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_blur: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundGlassOpacity')}</span>
+                      <span>{settingsForm.background_glass_opacity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={settingsForm.background_glass_opacity}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_opacity: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundGlassBlur')}</span>
+                      <span>{settingsForm.background_glass_blur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={20}
+                      value={settingsForm.background_glass_blur}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_blur: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </SettingsCard>
 
           <SettingsCard title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')} description={showConnectionPool ? undefined : t('settings.resinDesc')}>
             <div className="space-y-5">
