@@ -147,7 +147,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				image_storage_config TEXT DEFAULT '{}',
 				show_full_usage_numbers INTEGER DEFAULT 0,
 				scheduler_mode TEXT DEFAULT 'round_robin',
-				affinity_mode TEXT DEFAULT 'bounded'
+				affinity_mode TEXT DEFAULT 'bounded',
+				context_window_enabled INTEGER DEFAULT 0,
+				context_window_threshold INTEGER DEFAULT 272000,
+				context_summary_model TEXT DEFAULT 'gpt-5.4-mini'
 			);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -349,6 +352,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "show_full_usage_numbers", "INTEGER DEFAULT 0"},
 		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
 		{"system_settings", "affinity_mode", "TEXT DEFAULT 'bounded'"},
+		{"system_settings", "context_window_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "context_window_threshold", "INTEGER DEFAULT 272000"},
+		{"system_settings", "context_summary_model", "TEXT DEFAULT 'gpt-5.4-mini'"},
 		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},

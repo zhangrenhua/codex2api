@@ -454,6 +454,9 @@ export default function Settings() {
     stream_flush_interval_ms: 20,
     first_token_timeout_seconds: 0,
     show_full_usage_numbers: false,
+    context_window_enabled: false,
+    context_window_threshold: 272000,
+    context_summary_model: 'gpt-5.4-mini',
     image_storage_backend: 'local',
     image_s3_endpoint: '',
     image_s3_region: '',
@@ -966,6 +969,32 @@ export default function Settings() {
                   max={600}
                   value={settingsForm.first_token_timeout_seconds}
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.contextWindow')} description={t('settings.contextWindowDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
+              <SettingField label={t('settings.contextWindowEnabled')} description={t('settings.contextWindowEnabledDesc')}>
+                <Select
+                  value={settingsForm.context_window_enabled ? 'true' : 'false'}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, context_window_enabled: value === 'true' }))}
+                  options={booleanOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.contextWindowThreshold')} description={t('settings.contextWindowThresholdDesc')}>
+                <Input
+                  type="number"
+                  min={1000}
+                  value={settingsForm.context_window_threshold}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, context_window_threshold: parseInt(e.target.value) || 272000 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.contextSummaryModel')} description={t('settings.contextSummaryModelDesc')}>
+                <Input
+                  value={settingsForm.context_summary_model}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, context_summary_model: e.target.value }))}
                 />
               </SettingField>
             </div>

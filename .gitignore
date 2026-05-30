@@ -5,6 +5,9 @@
 *.so
 *.dylib
 codex2api
+codex2api-*
+*.db
+codex-watchdog.log
 
 # Go
 /vendor/

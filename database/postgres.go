@@ -1241,6 +1241,10 @@ type SystemSettings struct {
 	FirstTokenTimeoutSeconds         int
 	ImageStorageConfig               string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
 	ShowFullUsageNumbers             bool
+	// 算法 1M：上下文窗口管理（摘要 + 结构化截断）。ContextWindowThreshold 同时作为长上下文计费阈值。
+	ContextWindowEnabled   bool
+	ContextWindowThreshold int
+	ContextSummaryModel    string
 }
 
 // GetSystemSettings 加载全局设置
@@ -1286,7 +1290,10 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(first_token_timeout_seconds, 0),
 		       COALESCE(image_storage_config, '{}'),
 		       COALESCE(background_config, '{}'),
-		       COALESCE(show_full_usage_numbers, false)
+		       COALESCE(show_full_usage_numbers, false),
+		       COALESCE(context_window_enabled, false),
+		       COALESCE(context_window_threshold, 272000),
+		       COALESCE(context_summary_model, 'gpt-5.4-mini')
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1307,6 +1314,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.ImageStorageConfig,
 		&s.BackgroundConfig,
 		&s.ShowFullUsageNumbers,
+		&s.ContextWindowEnabled,
+		&s.ContextWindowThreshold,
+		&s.ContextSummaryModel,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1335,9 +1345,12 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				scheduler_mode,
 				affinity_mode,
 				background_config,
-				show_full_usage_numbers
+				show_full_usage_numbers,
+				context_window_enabled,
+				context_window_threshold,
+				context_summary_model
 			)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55)
 			ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1390,7 +1403,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				scheduler_mode = EXCLUDED.scheduler_mode,
 				affinity_mode = EXCLUDED.affinity_mode,
 				background_config = EXCLUDED.background_config,
-				show_full_usage_numbers = EXCLUDED.show_full_usage_numbers
+				show_full_usage_numbers = EXCLUDED.show_full_usage_numbers,
+				context_window_enabled = EXCLUDED.context_window_enabled,
+				context_window_threshold = EXCLUDED.context_window_threshold,
+				context_summary_model = EXCLUDED.context_summary_model
 		`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.AccountRPM, s.ModelRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1402,7 +1418,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.PromptFilterSensitiveWords, s.PromptFilterCustomPatterns, s.PromptFilterDisabledPatterns,
 		s.ClientCompatMode, s.CodexMinCLIVersion, s.UsageLogMode, s.UsageLogBatchSize,
 		s.UsageLogFlushIntervalSeconds, s.StreamFlushPolicy, s.StreamFlushIntervalMS,
-		s.FirstTokenTimeoutSeconds, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers)
+		s.FirstTokenTimeoutSeconds, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers,
+		s.ContextWindowEnabled, s.ContextWindowThreshold, s.ContextSummaryModel)
 	return err
 }
 

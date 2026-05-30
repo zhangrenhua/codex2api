@@ -1,8 +1,33 @@
 package database
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
 
 const longContextThreshold = 272000
+
+// configuredLongContextThreshold 允许通过系统设置（算法 1M 的上下文阈值）
+// 覆盖默认的长上下文计费阈值；为 0 时回退到 longContextThreshold 默认值。
+var configuredLongContextThreshold atomic.Int64
+
+// SetLongContextThreshold 设置长上下文计费阈值（与上下文窗口管理阈值共用同一配置项）。
+// 传入 <=0 时恢复为默认值。
+func SetLongContextThreshold(v int) {
+	if v <= 0 {
+		configuredLongContextThreshold.Store(0)
+		return
+	}
+	configuredLongContextThreshold.Store(int64(v))
+}
+
+// currentLongContextThreshold 返回当前生效的长上下文阈值。
+func currentLongContextThreshold() int {
+	if v := configuredLongContextThreshold.Load(); v > 0 {
+		return int(v)
+	}
+	return longContextThreshold
+}
 
 type ModelPricing struct {
 	InputPricePerMToken             float64
@@ -145,7 +170,7 @@ func CalculateCost(inputTokens, outputTokens, cachedTokens int, model string, se
 
 func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model string, serviceTier string) CostBreakdown {
 	pricing := GetModelPricing(model)
-	isLong := inputTokens > longContextThreshold
+	isLong := inputTokens > currentLongContextThreshold()
 
 	inputPrice := pricing.InputPricePerMToken
 	outputPrice := pricing.OutputPricePerMToken

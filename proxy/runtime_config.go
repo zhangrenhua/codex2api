@@ -24,6 +24,12 @@ const (
 	maxStreamFlushIntervalMS     = 1000
 	defaultFirstTokenTimeoutSec  = 0
 	maxFirstTokenTimeoutSec      = 600
+
+	// 算法 1M：上下文窗口管理（摘要 + 结构化截断）默认值
+	defaultContextWindowEnabled   = false
+	defaultContextWindowThreshold = 272000
+	defaultContextSummaryModel    = "gpt-5.4-mini"
+	minContextWindowThreshold     = 1000
 )
 
 type RuntimeSettings struct {
@@ -32,6 +38,12 @@ type RuntimeSettings struct {
 	StreamFlushPolicy     string
 	StreamFlushIntervalMS int
 	FirstTokenTimeoutSec  int
+
+	// 算法 1M：先对最旧内容做一次摘要，摘要 + 较新内容若仍超阈值则结构化截断，
+	// 强制 input ≤ 阈值；截断时对下游仍上报原始 input_tokens。
+	ContextWindowEnabled   bool
+	ContextWindowThreshold int
+	ContextSummaryModel    string
 }
 
 var runtimeSettings atomic.Value // stores RuntimeSettings
@@ -42,11 +54,14 @@ func init() {
 
 func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
-		ClientCompatMode:      defaultClientCompatMode,
-		CodexMinCLIVersion:    defaultCodexMinCLIVersion,
-		StreamFlushPolicy:     defaultStreamFlushPolicy,
-		StreamFlushIntervalMS: defaultStreamFlushIntervalMS,
-		FirstTokenTimeoutSec:  defaultFirstTokenTimeoutSec,
+		ClientCompatMode:       defaultClientCompatMode,
+		CodexMinCLIVersion:     defaultCodexMinCLIVersion,
+		StreamFlushPolicy:      defaultStreamFlushPolicy,
+		StreamFlushIntervalMS:  defaultStreamFlushIntervalMS,
+		FirstTokenTimeoutSec:   defaultFirstTokenTimeoutSec,
+		ContextWindowEnabled:   defaultContextWindowEnabled,
+		ContextWindowThreshold: defaultContextWindowThreshold,
+		ContextSummaryModel:    defaultContextSummaryModel,
 	}
 }
 
@@ -95,6 +110,14 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	if settings.FirstTokenTimeoutSec > maxFirstTokenTimeoutSec {
 		settings.FirstTokenTimeoutSec = maxFirstTokenTimeoutSec
 	}
+	if settings.ContextWindowThreshold < minContextWindowThreshold {
+		settings.ContextWindowThreshold = defaults.ContextWindowThreshold
+	}
+	if strings.TrimSpace(settings.ContextSummaryModel) == "" {
+		settings.ContextSummaryModel = defaults.ContextSummaryModel
+	} else {
+		settings.ContextSummaryModel = strings.TrimSpace(settings.ContextSummaryModel)
+	}
 	return settings
 }
 
@@ -106,15 +129,20 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.StreamFlushPolicy = settings.StreamFlushPolicy
 		next.StreamFlushIntervalMS = settings.StreamFlushIntervalMS
 		next.FirstTokenTimeoutSec = settings.FirstTokenTimeoutSeconds
+		next.ContextWindowEnabled = settings.ContextWindowEnabled
+		next.ContextWindowThreshold = settings.ContextWindowThreshold
+		next.ContextSummaryModel = settings.ContextSummaryModel
 	}
 	next = NormalizeRuntimeSettings(next)
 	runtimeSettings.Store(next)
+	database.SetLongContextThreshold(next.ContextWindowThreshold)
 	return next
 }
 
 func ApplyRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	settings = NormalizeRuntimeSettings(settings)
 	runtimeSettings.Store(settings)
+	database.SetLongContextThreshold(settings.ContextWindowThreshold)
 	return settings
 }
 

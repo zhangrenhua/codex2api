@@ -128,6 +128,11 @@ func (h *Handler) Messages(c *gin.Context) {
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
 
+	// 2b. 算法 1M：超阈值时摘要最旧内容 + 结构化截断，强制 input ≤ 阈值。
+	// 截断时对下游（流式 message_delta / 非流式 usage）与计费/usage_logs 均上报原始 input_tokens。
+	var ctxWinOrigInput int
+	codexBody, ctxWinOrigInput = h.applyContextWindow(c.Request.Context(), affinityKey, apiKeyID, codexBody)
+
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
@@ -325,6 +330,13 @@ func (h *Handler) Messages(c *gin.Context) {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
+				// 算法 1M：截断时把 completed 事件的 input_tokens 改写为原始值，
+				// 让翻译器据此发出的 message_delta usage 对下游上报原始量。
+				if ctxWinOrigInput > 0 && eventType == "response.completed" {
+					data = rewriteCompletedUsageInputTokens(data, ctxWinOrigInput)
+					parsed = gjson.ParseBytes(data)
+				}
+
 				// TTFT 跟踪
 				isFirstToken := isFirstTokenEvent(eventType)
 				if !ttftRecorded && isFirstToken {
@@ -435,6 +447,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			})
 
 			if lastCompletedData != nil {
+				if ctxWinOrigInput > 0 {
+					lastCompletedData = rewriteCompletedUsageInputTokens(lastCompletedData, ctxWinOrigInput)
+				}
 				anthropicResp := accumulator.build(lastCompletedData)
 				c.JSON(http.StatusOK, anthropicResp)
 			} else {
@@ -487,6 +502,11 @@ func (h *Handler) Messages(c *gin.Context) {
 
 		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
 		c.Set("x-service-tier", resolvedServiceTier)
+
+		// 算法 1M：截断时对计费/usage_logs 上报原始 input_tokens。
+		if ctxWinOrigInput > 0 {
+			usage.applyOriginalInputTokens(ctxWinOrigInput)
+		}
 
 		logInput := &database.UsageLogInput{
 			AccountID:        account.ID(),

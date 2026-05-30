@@ -4235,6 +4235,9 @@ type settingsResponse struct {
 	StreamFlushIntervalMS            int    `json:"stream_flush_interval_ms"`
 	FirstTokenTimeoutSeconds         int    `json:"first_token_timeout_seconds"`
 	ShowFullUsageNumbers             bool   `json:"show_full_usage_numbers"`
+	ContextWindowEnabled             bool   `json:"context_window_enabled"`
+	ContextWindowThreshold           int    `json:"context_window_threshold"`
+	ContextSummaryModel              string `json:"context_summary_model"`
 	ImageStorageBackend              string `json:"image_storage_backend"`
 	ImageS3Endpoint                  string `json:"image_s3_endpoint"`
 	ImageS3Region                    string `json:"image_s3_region"`
@@ -4301,6 +4304,9 @@ type updateSettingsReq struct {
 	StreamFlushIntervalMS            *int    `json:"stream_flush_interval_ms"`
 	FirstTokenTimeoutSeconds         *int    `json:"first_token_timeout_seconds"`
 	ShowFullUsageNumbers             *bool   `json:"show_full_usage_numbers"`
+	ContextWindowEnabled             *bool   `json:"context_window_enabled"`
+	ContextWindowThreshold           *int    `json:"context_window_threshold"`
+	ContextSummaryModel              *string `json:"context_summary_model"`
 	ImageStorageBackend              *string `json:"image_storage_backend"`
 	ImageS3Endpoint                  *string `json:"image_s3_endpoint"`
 	ImageS3Region                    *string `json:"image_s3_region"`
@@ -4860,6 +4866,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 		FirstTokenTimeoutSeconds:         runtimeCfg.FirstTokenTimeoutSec,
 		ShowFullUsageNumbers:             showFullUsageNumbers,
+		ContextWindowEnabled:             runtimeCfg.ContextWindowEnabled,
+		ContextWindowThreshold:           runtimeCfg.ContextWindowThreshold,
+		ContextSummaryModel:              runtimeCfg.ContextSummaryModel,
 		ImageStorageBackend:              imgCfg.Backend,
 		ImageS3Endpoint:                  imgCfg.Endpoint,
 		ImageS3Region:                    imgCfg.Region,
@@ -5198,6 +5207,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		runtimeCfg.FirstTokenTimeoutSec = *req.FirstTokenTimeoutSeconds
 		log.Printf("设置已更新: first_token_timeout_seconds = %d", runtimeCfg.FirstTokenTimeoutSec)
 	}
+	if req.ContextWindowEnabled != nil {
+		runtimeCfg.ContextWindowEnabled = *req.ContextWindowEnabled
+		log.Printf("设置已更新: context_window_enabled = %t", runtimeCfg.ContextWindowEnabled)
+	}
+	if req.ContextWindowThreshold != nil {
+		runtimeCfg.ContextWindowThreshold = *req.ContextWindowThreshold
+		log.Printf("设置已更新: context_window_threshold = %d", runtimeCfg.ContextWindowThreshold)
+	}
+	if req.ContextSummaryModel != nil {
+		runtimeCfg.ContextSummaryModel = strings.TrimSpace(*req.ContextSummaryModel)
+		log.Printf("设置已更新: context_summary_model = %s", runtimeCfg.ContextSummaryModel)
+	}
 	if req.ShowFullUsageNumbers != nil {
 		showFullUsageNumbers = *req.ShowFullUsageNumbers
 		log.Printf("设置已更新: show_full_usage_numbers = %t", showFullUsageNumbers)
@@ -5417,6 +5438,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 		FirstTokenTimeoutSeconds:         runtimeCfg.FirstTokenTimeoutSec,
 		ShowFullUsageNumbers:             showFullUsageNumbers,
+		ContextWindowEnabled:             runtimeCfg.ContextWindowEnabled,
+		ContextWindowThreshold:           runtimeCfg.ContextWindowThreshold,
+		ContextSummaryModel:              runtimeCfg.ContextSummaryModel,
 		ImageStorageConfig:               imgConfigJSON,
 		BackgroundConfig:                 encodeBackgroundConfig(bgCfg),
 	})
@@ -5499,6 +5523,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		StreamFlushIntervalMS:            runtimeCfg.StreamFlushIntervalMS,
 		FirstTokenTimeoutSeconds:         runtimeCfg.FirstTokenTimeoutSec,
 		ShowFullUsageNumbers:             showFullUsageNumbers,
+		ContextWindowEnabled:             runtimeCfg.ContextWindowEnabled,
+		ContextWindowThreshold:           runtimeCfg.ContextWindowThreshold,
+		ContextSummaryModel:              runtimeCfg.ContextSummaryModel,
 		ImageStorageBackend:              imgCfg.Backend,
 		ImageS3Endpoint:                  imgCfg.Endpoint,
 		ImageS3Region:                    imgCfg.Region,

@@ -1192,6 +1192,16 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
 	openAIResponsesBody := PrepareOpenAIResponsesBody(rawBody)
+
+	// 2b. 算法 1M：超阈值时摘要最旧内容 + 结构化截断，强制 input ≤ 阈值。
+	//     ctxWinOrigInput>0 表示发生压缩/截断，需对下游与计费上报原始 input_tokens。
+	var ctxWinOrigInput int
+	codexBody, ctxWinOrigInput = h.applyContextWindow(c.Request.Context(), affinityKey, apiKeyID, codexBody)
+	if ctxWinOrigInput > 0 {
+		expandedInputRaw = responsesInputRaw(codexBody)
+		// 把压缩后的 input 同步到原生 OpenAI Responses 请求体（BYO key 账号走该路径）。
+		openAIResponsesBody = copyResponsesInput(openAIResponsesBody, codexBody)
+	}
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
 		return
@@ -1336,6 +1346,11 @@ func (h *Handler) Responses(c *gin.Context) {
 							codexBody = strippedCodexBody
 							expandedInputRaw = responsesInputRaw(codexBody)
 						}
+						// 算法1M：重建的 openAIResponsesBody 来自未压缩 rawBody，重新套用压缩后的 input 并去除加密内容。
+						if ctxWinOrigInput > 0 && rawChanged {
+							openAIResponsesBody = copyResponsesInput(openAIResponsesBody, codexBody)
+							openAIResponsesBody, _ = stripInvalidEncryptedContentFromResponsesBody(openAIResponsesBody)
+						}
 						log.Printf("OpenAI Responses 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
 						h.store.Release(account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
@@ -1445,7 +1460,11 @@ func (h *Handler) Responses(c *gin.Context) {
 						imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 					}
 					if !clientGone {
-						payload := fmt.Sprintf("data: %s\n\n", data)
+						eventData := data
+						if ctxWinOrigInput > 0 && eventType == "response.completed" {
+							eventData = rewriteCompletedUsageInputTokens(data, ctxWinOrigInput)
+						}
+						payload := fmt.Sprintf("data: %s\n\n", eventData)
 						shouldDefer := !ttftRecorded && !gotTerminal && !isFirstToken
 						if shouldDefer {
 							pendingFirstTokenEvents.WriteString(payload)
@@ -1478,6 +1497,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					actualServiceTier = gjson.GetBytes(respBody, "service_tier").String()
 					imageLogInfo = imageUsageLogInfoFromResponseJSON(respBody)
 					gotTerminal = true
+					if ctxWinOrigInput > 0 {
+						respBody = rewriteResponseObjectUsageInputTokens(respBody, ctxWinOrigInput)
+					}
 					contentType := resp.Header.Get("Content-Type")
 					if contentType == "" {
 						contentType = "application/json"
@@ -1527,6 +1549,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
 			billingServiceTier := resolveBillingServiceTier(actualServiceTier, serviceTier)
 			c.Set("x-service-tier", resolvedServiceTier)
+			// 算法 1M：截断时对计费/usage_logs 上报原始 input_tokens。
+			if ctxWinOrigInput > 0 {
+				usage.applyOriginalInputTokens(ctxWinOrigInput)
+			}
 			logInput := &database.UsageLogInput{
 				AccountID:          account.ID(),
 				Endpoint:           "/v1/responses",
@@ -1628,6 +1654,11 @@ func (h *Handler) Responses(c *gin.Context) {
 					if codexChanged {
 						codexBody = strippedCodexBody
 						expandedInputRaw = responsesInputRaw(codexBody)
+					}
+					// 算法1M：重建的 openAIResponsesBody 来自未压缩 rawBody，重新套用压缩后的 input 并去除加密内容。
+					if ctxWinOrigInput > 0 && rawChanged {
+						openAIResponsesBody = copyResponsesInput(openAIResponsesBody, codexBody)
+						openAIResponsesBody, _ = stripInvalidEncryptedContentFromResponsesBody(openAIResponsesBody)
 					}
 					log.Printf("上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
 					h.store.Release(account)
@@ -1755,7 +1786,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 
 				if !clientGone {
-					payload := fmt.Sprintf("data: %s\n\n", data)
+					eventData := data
+					if ctxWinOrigInput > 0 && eventType == "response.completed" {
+						eventData = rewriteCompletedUsageInputTokens(data, ctxWinOrigInput)
+					}
+					payload := fmt.Sprintf("data: %s\n\n", eventData)
 					shouldDefer := !ttftRecorded && !gotTerminal && !isFirstToken
 					if shouldDefer {
 						pendingFirstTokenEvents.WriteString(payload)
@@ -1831,6 +1866,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					responseJSON = []byte(responseObj.Raw)
 					responseJSON = restoreMissingResponseOutputs(responseJSON, outputItems)
 					responseJSON = appendMissingResponseImageOutputs(responseJSON, imageOutputs)
+					if ctxWinOrigInput > 0 {
+						responseJSON = rewriteResponseObjectUsageInputTokens(responseJSON, ctxWinOrigInput)
+					}
 					imageLogInfo = imageUsageLogInfoFromResponseJSON(responseJSON)
 				}
 			}
@@ -1890,6 +1928,11 @@ func (h *Handler) Responses(c *gin.Context) {
 		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
 		billingServiceTier := resolveBillingServiceTier(actualServiceTier, serviceTier)
 		c.Set("x-service-tier", resolvedServiceTier)
+
+		// 算法 1M：截断时对计费/usage_logs 上报原始 input_tokens。
+		if ctxWinOrigInput > 0 {
+			usage.applyOriginalInputTokens(ctxWinOrigInput)
+		}
 
 		logInput := &database.UsageLogInput{
 			AccountID:          account.ID(),
@@ -2267,6 +2310,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
 
+	// 2b. 算法 1M：超阈值时摘要最旧内容 + 结构化截断，强制 input ≤ 阈值。
+	var ctxWinOrigInput int
+	codexBody, ctxWinOrigInput = h.applyContextWindow(c.Request.Context(), affinityKey, apiKeyID, codexBody)
+
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
@@ -2585,6 +2632,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				return true
 			})
 
+			if ctxWinOrigInput > 0 {
+				usage.applyOriginalInputTokens(ctxWinOrigInput)
+			}
 			compactResult = BuildCompactResponse(chunkID, model, created, fullContent.String(), fullReasoning.String(), toolCalls, usage)
 		}
 
@@ -2642,6 +2692,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
 		billingServiceTier := resolveBillingServiceTier(actualServiceTier, serviceTier)
 		c.Set("x-service-tier", resolvedServiceTier)
+
+		// 算法 1M：截断时对计费/usage_logs 上报原始 input_tokens。
+		if ctxWinOrigInput > 0 {
+			usage.applyOriginalInputTokens(ctxWinOrigInput)
+		}
 
 		logInput := &database.UsageLogInput{
 			AccountID:          account.ID(),
